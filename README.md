@@ -130,6 +130,10 @@ That's it!
   the corresponding local and remote branches and closes the PRs.
 - `land` - merge the bottom-most PR in the current stack and rebase the rest of
   the stack on the latest main.
+- `adopt` - bring an existing, normally-created PR under `stack-pr` management.
+  This embeds stack metadata into the bottom-most commit pointing at that PR, so
+  subsequent `submit` runs update the existing PR (preserving its review
+  history) instead of creating a new one.
 - `config` - set configuration values in the config file. Similar to `git config`,
   it takes a setting in the format `<section>.<key>=<value>` and updates the
   config file (`.stack-pr.cfg` by default).
@@ -369,6 +373,77 @@ Abandon the current stack.
 
 Takes no additional arguments beyond common ones.
 
+#### adopt
+
+Bring an existing, normally-created PR under `stack-pr` management. This is
+useful when you opened a PR the usual way (with its own review history) and now
+want to stack more PRs on top of it.
+
+By default `adopt` looks at the bottom-most commit of the current range
+(`main..HEAD` by default) and embeds stack metadata into it pointing at the
+target PR. Once adopted, run `stack-pr submit` to update that PR and push the
+rest of the stack; the original PR is updated in place rather than closed and
+recreated.
+
+Arguments:
+
+- `pr` (optional): PR number or URL to adopt. If omitted, the PR associated with
+  the currently checked-out branch is used.
+
+Options:
+
+- `--commit`: Commit (any git revision) to attach the PR to, when it isn't the
+  bottom-most one - for example when inserting a new PR underneath an existing
+  one. If omitted, the bottom-most commit of the stack is used.
+
+Notes:
+
+- The PR must be in the `OPEN` state.
+- The PR's existing head branch is preserved (recorded in the metadata), so its
+  review history and URL are kept.
+- `submit` will force-push the adopted commit to the PR's branch, so if you
+  have squashed or rebased since opening the PR, its diff will be updated
+  accordingly. `adopt` warns when the local commit's contents differ from the
+  PR's head.
+
+Typical workflow (stack a new PR *on top* of an existing one):
+
+```bash
+# You already have an open PR for branch 'my-feature'.
+git checkout my-feature
+git commit -m "Second change"   # stack a new change on top
+stack-pr adopt                  # adopt the existing PR for 'my-feature'
+stack-pr view                   # confirm the bottom PR is now managed
+stack-pr submit                 # update the existing PR + create the new one
+```
+
+Stacking a new PR *underneath* an existing one (so the new change lands first):
+
+```bash
+# Branch 'my-feature' has an open PR you want to keep as the second PR.
+git checkout my-feature
+
+# 1. Collapse the branch into a single commit (one commit == one PR), then
+#    adopt the existing PR onto it while it is still the bottom commit:
+git reset --soft $(git merge-base origin/main HEAD)
+git commit                      # combined message for the existing PR
+stack-pr adopt
+
+# 2. Insert the new change beneath the adopted commit:
+git branch tmp-existing
+git reset --hard origin/main
+# ... make the new change ...
+git commit -m "New change (lands first)"
+git cherry-pick tmp-existing    # replay the adopted commit (keeps its metadata)
+git branch -D tmp-existing
+
+stack-pr view                   # new commit at the bottom, existing PR on top
+stack-pr submit                 # creates the new PR; re-bases the existing one onto it
+```
+
+Alternatively, build the stack in any order first and then adopt the existing
+PR onto the right commit directly with `stack-pr adopt --commit <ref>`.
+
 #### view
 
 Inspect the current stack
@@ -434,3 +509,37 @@ branch_name_template=$USERNAME/$BRANCH
 [land]
 style=bottom-only
 ```
+
+## Implementation Details
+
+### Stack metadata
+
+`stack-pr` does not maintain any state outside of git itself. Instead, it
+tracks the stack by embedding a metadata trailer into each managed commit
+message:
+
+```
+stack-info: PR: https://github.com/<owner>/<repo>/pull/<number>, branch: <head-branch>
+```
+
+This single line is the source of truth for whether a commit is "managed":
+
+- `submit` decides whether to **create** or **update** a PR for each commit by
+  looking for this trailer. A commit without it gets a new branch and a new PR
+  (and the trailer is then written back into the commit message); a commit with
+  it has its existing PR updated.
+- `view` reports the linked PR and branch for each commit by parsing the
+  trailer (showing `No PR` when it is absent).
+- `land` and `abandon` operate only on commits that carry a valid trailer.
+
+The trailer records two fields: the **PR link** and the **head branch** that
+`stack-pr` pushes for that commit (named via `--branch-name-template`, by
+default `$USERNAME/stack/$ID`). The PR's base branch is not stored — it is
+derived from the stack order at runtime (the previous commit's head branch, or
+the target branch for the bottom-most PR).
+
+Because the trailer is just text in the commit message, a commit can be brought
+under `stack-pr` management by adding it (which is what `adopt` does for an
+existing PR), and removed by deleting it (which is what `abandon` does). The
+cross-links between PRs in a stack are rendered into the PR body and are
+regenerated on each `submit`.

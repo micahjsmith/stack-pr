@@ -231,6 +231,42 @@ If you'd like to land stack except the top N commits, you could use the followin
 If you prefer to merge via the github web UI, please don't forget to edit commit message on the merge page!
 If you use the default commit message filled by the web UI, links to other PRs from the stack will be included in the commit message.
 """
+ADOPT_TIP = """
+The bottom commit is now linked to the adopted PR. To verify and apply:
+  $ stack-pr view     # confirm the stack looks right
+  $ stack-pr submit   # update the adopted PR and push the rest of the stack
+"""
+ERROR_ADOPT_ALREADY_MANAGED = """The bottom commit is already managed by stack-pr:
+    {e}
+
+There is nothing to adopt. Use 'submit' to update the stack.
+"""
+ERROR_ADOPT_NO_PR = """Could not find a PR to adopt.
+
+Run 'stack-pr adopt' while checked out on the branch whose PR you want to
+adopt, or pass the PR explicitly:
+  $ stack-pr adopt <pr-number-or-url>
+
+Failed trying to execute {cmd}
+"""
+ERROR_ADOPT_PR_NOT_OPEN = """Cannot adopt PR {pr}: it is in '{state}' state, not 'OPEN'.
+
+Only open PRs can be brought under stack-pr management.
+"""
+ERROR_ADOPT_BAD_COMMIT = """Could not resolve commit '{commit}'.
+
+Failed trying to execute {cmd}
+"""
+ERROR_ADOPT_COMMIT_NOT_IN_STACK = """Commit '{commit}' ({sha}) is not part of the current stack.
+
+The commit to adopt must be one of the commits in the range being inspected
+(use 'stack-pr view' to see them, and -B/-H to adjust the range).
+"""
+WARN_ADOPT_CONTENT_DIFFERS = """
+Warning: the local bottom commit's contents differ from the head of PR {pr}.
+The next 'stack-pr submit' will force-push the local commit and update the PR's
+diff accordingly. Double-check the commit content before submitting.
+"""
 
 
 # ===----------------------------------------------------------------------=== #
@@ -575,6 +611,11 @@ def draft_bitmask_type(value: str) -> list[bool]:
 # ===----------------------------------------------------------------------=== #
 # SUBMIT
 # ===----------------------------------------------------------------------=== #
+def format_stack_info(pr: str, branch: str) -> str:
+    """Format the stack-info metadata trailer for a commit message."""
+    return f"stack-info: PR: {pr}, branch: {branch}"
+
+
 def add_or_update_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) -> bool:
     if needs_rebase:
         if not e.has_base() or not e.has_head():
@@ -605,7 +646,7 @@ def add_or_update_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) 
         return needs_rebase
 
     # Add the stack info metadata to the commit message
-    commit_msg += f"\n\nstack-info: PR: {e.pr}, branch: {e.head}"
+    commit_msg += "\n\n" + format_stack_info(e.pr, e.head)
     run_shell_command(
         ["git", "commit", "--amend", "-F", "-"],
         input=commit_msg.encode(),
@@ -1419,6 +1460,184 @@ def command_abandon(args: CommonArgs) -> None:
 
 
 # ===----------------------------------------------------------------------=== #
+# ADOPT
+# ===----------------------------------------------------------------------=== #
+def get_adopt_pr_info(pr: str | None) -> dict:
+    """Look up the PR to adopt via 'gh'.
+
+    With no explicit `pr`, this resolves the PR associated with the currently
+    checked-out branch. Returns the parsed JSON object from 'gh pr view'.
+    """
+    cmd = ["gh", "pr", "view"]
+    if pr:
+        cmd.append(pr)
+    cmd += ["--json", "number,headRefName,headRefOid,state,url"]
+    try:
+        out = get_command_output(cmd)
+    except SubprocessError:
+        error(ERROR_ADOPT_NO_PR.format(cmd=cmd))
+        raise
+    return json.loads(out)
+
+
+def warn_if_content_differs(
+    e: StackEntry, pr_info: dict, *, remote: str, verbose: bool
+) -> None:
+    """Warn if the local commit's tree differs from the adopted PR's head.
+
+    'submit' will force-push the local commit to the PR's branch, so a mismatch
+    means the PR's diff will change. This is informational only; it never blocks
+    adoption, and silently does nothing if the comparison can't be made.
+    """
+    head_oid = pr_info.get("headRefOid")
+    if not head_oid:
+        return
+
+    object_present = (
+        run_shell_command(
+            ["git", "cat-file", "-e", head_oid], quiet=True, check=False
+        ).returncode
+        == 0
+    )
+    if not object_present:
+        run_shell_command(
+            ["git", "fetch", remote, pr_info["headRefName"]],
+            quiet=not verbose,
+            check=False,
+        )
+
+    try:
+        pr_tree = get_command_output(["git", "rev-parse", f"{head_oid}^{{tree}}"])
+    except SubprocessError:
+        # Couldn't resolve the PR head locally; skip the comparison.
+        return
+
+    if pr_tree != e.commit.tree():
+        log(red(WARN_ADOPT_CONTENT_DIFFERS.format(pr=pr_info["url"])))
+
+
+def adopt_commit(
+    e: StackEntry, pr: str, branch: str, *, current_branch: str, verbose: bool
+) -> None:
+    """Embed stack-info metadata into the bottom commit of the stack.
+
+    The target commit may not be HEAD (commits can be stacked on top of it), so
+    the message is rewritten on a detached checkout and the rest of the branch
+    is replayed onto the rewritten commit.
+    """
+    old_sha = e.commit.commit_id()
+    new_msg = e.commit.commit_msg() + "\n\n" + format_stack_info(pr, branch)
+
+    run_shell_command(["git", "checkout", old_sha], quiet=not verbose)
+    run_shell_command(
+        ["git", "commit", "--amend", "-F", "-"],
+        input=new_msg.encode(),
+        quiet=not verbose,
+    )
+    new_sha = get_command_output(["git", "rev-parse", "HEAD"])
+
+    # Replay any commits stacked on top of the target onto the rewritten commit.
+    run_shell_command(
+        [
+            "git",
+            "rebase",
+            "--onto",
+            new_sha,
+            old_sha,
+            current_branch,
+            "--committer-date-is-author-date",
+        ],
+        quiet=not verbose,
+    )
+
+
+def print_tips_after_adopt(st: list[StackEntry], args: CommonArgs) -> None:
+    if not st or not args.show_tips:
+        return
+    log(ADOPT_TIP)
+
+
+def select_adopt_entry(st: list[StackEntry], commit: str | None) -> StackEntry:
+    """Pick the stack entry to adopt the PR onto.
+
+    Defaults to the bottom-most commit; if `commit` is given, resolves it and
+    matches it against the entries in the stack.
+    """
+    if commit is None:
+        # The bottom-most commit is the entry whose base is the target branch.
+        return st[0]
+
+    try:
+        sha = get_command_output(["git", "rev-parse", commit])
+    except SubprocessError:
+        error(ERROR_ADOPT_BAD_COMMIT.format(commit=commit, cmd=["git", "rev-parse", commit]))
+        raise
+
+    for e in st:
+        if e.commit.commit_id() == sha:
+            return e
+
+    error(ERROR_ADOPT_COMMIT_NOT_IN_STACK.format(commit=commit, sha=sha))
+    sys.exit(1)
+
+
+# ===----------------------------------------------------------------------=== #
+# Entry point for 'adopt' command
+# ===----------------------------------------------------------------------=== #
+def command_adopt(args: CommonArgs, pr: str | None, commit: str | None) -> None:
+    log(h("ADOPT"))
+
+    st = get_stack(base=args.base, head=args.head, verbose=args.verbose)
+    if not st:
+        log(h("Empty stack!"))
+        log(h(blue("SUCCESS!")))
+        return
+
+    # By default adopt applies to the bottom-most commit (the entry whose base
+    # is the target branch); a specific commit can be targeted with --commit.
+    e = select_adopt_entry(st, commit)
+    if RE_STACK_INFO_LINE.search(e.commit.commit_msg()):
+        error(ERROR_ADOPT_ALREADY_MANAGED.format(e=e))
+        sys.exit(1)
+
+    pr_info = get_adopt_pr_info(pr)
+    state = pr_info.get("state")
+    if state != "OPEN":
+        error(ERROR_ADOPT_PR_NOT_OPEN.format(pr=pr_info.get("url", pr), state=state))
+        sys.exit(1)
+
+    pr_url = pr_info["url"]
+    head_ref = pr_info["headRefName"]
+
+    warn_if_content_differs(e, pr_info, remote=args.remote, verbose=args.verbose)
+
+    current_branch = get_current_branch_name()
+    log(
+        h(
+            f"Adopting PR {pr_url} (branch '{head_ref}') onto "
+            + e.pprint(links=False)
+        )
+    )
+    adopt_commit(
+        e, pr_url, head_ref, current_branch=current_branch, verbose=args.verbose
+    )
+
+    # Re-read the stack to reflect the freshly embedded metadata and show it.
+    run_shell_command(["git", "checkout", current_branch], quiet=not args.verbose)
+    st = get_stack(base=args.base, head=args.head, verbose=args.verbose)
+    set_head_branches(
+        st,
+        remote=args.remote,
+        verbose=args.verbose,
+        branch_name_template=args.branch_name_template,
+    )
+    set_base_branches(st, target=args.target)
+    print_stack(st, links=args.hyperlinks)
+    print_tips_after_adopt(st, args)
+    log(h(blue("SUCCESS!")))
+
+
+# ===----------------------------------------------------------------------=== #
 # VIEW
 # ===----------------------------------------------------------------------=== #
 def print_tips_after_view(st: list[StackEntry], args: CommonArgs) -> None:
@@ -1629,6 +1848,28 @@ def create_argparser(
         help="Abandon the current stack",
         parents=[common_parser],
     )
+    parser_adopt = subparsers.add_parser(
+        "adopt",
+        help="Bring an existing PR under stack-pr management",
+        parents=[common_parser],
+    )
+    parser_adopt.add_argument(
+        "pr",
+        nargs="?",
+        default=None,
+        help=(
+            "PR number or URL to adopt. If omitted, the PR of the current "
+            "branch is used."
+        ),
+    )
+    parser_adopt.add_argument(
+        "--commit",
+        default=None,
+        help=(
+            "Commit to attach the PR to (any git revision). If omitted, the "
+            "bottom-most commit of the stack is used."
+        ),
+    )
     subparsers.add_parser(
         "view",
         help="Inspect the current stack",
@@ -1721,6 +1962,12 @@ def main() -> None:  # noqa: PLR0912
             command_land(common_args)
         elif args.command == "abandon":
             command_abandon(common_args)
+        elif args.command == "adopt":
+            command_adopt(
+                common_args,
+                getattr(args, "pr", None),
+                getattr(args, "commit", None),
+            )
         elif args.command == "view":
             command_view(common_args)
         else:

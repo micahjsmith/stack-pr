@@ -1,5 +1,10 @@
 # Top of tree
 
+* Added an `adopt` command to bring an existing, normally-created PR under
+  stack-pr management without closing and recreating it. Supports a `--commit`
+  option to attach the PR to a specific commit (e.g. when inserting a new PR
+  underneath an existing one) (#121).
+
 # Version 0.1.3
 
 * Fix a bug with replacing $USERNAME in the branch name. (#44)
