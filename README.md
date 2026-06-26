@@ -27,10 +27,11 @@ This is a non-comprehensive list of dependencies required by `stack-pr.py`:
 
 ### Installation with `pipx`
 
-To install via [pipx](https://pipx.pypa.io/stable/) run:
+This fork is not published to PyPI. To install it directly from the GitHub repo
+via [pipx](https://pipx.pypa.io/stable/) run:
 
 ```bash
-pipx install stack-pr
+pipx install git+https://github.com/micahjsmith/stack-pr.git
 ```
 
 ### Manual installation from source
