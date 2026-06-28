@@ -552,6 +552,21 @@ the target branch for the bottom-most PR).
 
 Because the trailer is just text in the commit message, a commit can be brought
 under `stack-pr` management by adding it (which is what `adopt` does for an
-existing PR), and removed by deleting it (which is what `abandon` does). The
-cross-links between PRs in a stack are rendered into the PR body and are
-regenerated on each `submit`.
+existing PR), and removed by deleting it (which is what `abandon` does).
+
+### Cross-links between PRs
+
+Each PR's body contains a `Stacked PRs:` table of contents listing every PR in
+the stack (with `__->__` marking the current one). This list is regenerated on
+each `submit`, and it is *maintained* as PRs land: a PR that has left the active
+stack but has merged or been closed is kept in the list (pinned below the active
+PRs in its original position), so later PRs retain the full history of the
+stack. A PR that left the stack but is still open is dropped.
+
+The list is stored only in the PR bodies - on each `submit`, `stack-pr` reads
+the previously recorded list back from a surviving PR's body, re-checks the
+status of any entries that are no longer in the active stack, and writes the
+reconciled list to every PR. As a result, merged/closed entries are pinned at
+the bottom of the list; inserting a brand-new commit *below* an
+already-merged one is the one case where an entry can appear slightly out of
+order.
