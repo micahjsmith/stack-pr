@@ -9,6 +9,7 @@ import pytest
 
 from stack_pr import autoland
 from stack_pr.autoland import (
+    AutolandCheckpointer,
     AutolandOptions,
     CheckStatus,
     ConfirmStep,
@@ -17,10 +18,8 @@ from stack_pr.autoland import (
     LandStep,
     StackEntry,
     evaluate_checks,
-    load_state,
     parse_plan,
     poll_merge_status,
-    save_state,
 )
 from stack_pr.cli import CommonArgs
 
@@ -208,29 +207,29 @@ def test_parse_plan_rejects_unknown_step() -> None:
 # --- state round-trip ----------------------------------------------------
 
 
-def test_state_round_trip(tmp_path, mocker) -> None:  # noqa: ANN001
-    ctx = LandingContext(stack=_stack(2), plan=parse_plan("l\nl\n", _stack(2)))
+def test_state_round_trip(tmp_path) -> None:  # noqa: ANN001
+    ctx = LandingContext(
+        stack=_stack(2), plan=parse_plan("l\nd deploy.yaml\nl\n", _stack(2))
+    )
     ctx.current_step = 1
     ctx.last_landed_sha = "abc"
+    ctx.stack[0].state = autoland.PRState.MERGED  # exercise enum round-trip
 
     sf = tmp_path / "state.json"
-    mocker.patch(
-        "stack_pr.autoland._state_file_meta",
-        {"path": sf, "branch": "feat", "base": "main"},
-    )
-    save_state(ctx)
+    AutolandCheckpointer(path=sf, branch="feat", base="main").save(ctx)
 
-    loaded, branch, base = load_state(sf)
-    assert branch == "feat"
-    assert base == "main"
+    cp, loaded = AutolandCheckpointer.load(sf)
+    assert cp.branch == "feat"
+    assert cp.base == "main"
     assert loaded.current_step == 1
     assert loaded.last_landed_sha == "abc"
+    assert loaded.stack[0].state == autoland.PRState.MERGED
     assert [e.pr_number for e in loaded.stack] == [0, 1]
-    assert len(loaded.plan) == 2
+    assert [type(s) for s in loaded.plan] == [LandStep, DeployStep, LandStep]
 
 
 def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
     sf = tmp_path / "state.json"
     sf.write_text('{"version": 999, "stack": [], "plan": [], "branch": "x", "base": "y"}')
     with pytest.raises(ValueError, match="Unsupported state file version"):
-        load_state(sf)
+        AutolandCheckpointer.load(sf)

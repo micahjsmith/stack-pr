@@ -21,11 +21,16 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Union
 
+# FIXME(stack-pr): autoland reaches into cli for shared building blocks
+# (get_stack, command_submit, last) and reimplements a retrying subprocess
+# wrapper below (run/gh_json) that overlaps with stack_pr.shell_commands. These
+# should be consolidated into a shared module (e.g. stack_pr.git / a common
+# helpers module) usable by every subcommand, rather than importing from cli.
 from stack_pr import cli
 
 # ---------------------------------------------------------------------------
@@ -42,17 +47,6 @@ DEFAULT_MERGE_TIMEOUT = 3600  # 60 minutes
 # Output: use rich when available, fall back to plain text otherwise.
 # ---------------------------------------------------------------------------
 
-try:
-    from rich.console import Console as _RichConsole
-    from rich.table import Table
-    from rich.text import Text
-
-    HAVE_RICH = True
-except ImportError:  # pragma: no cover - exercised only without the extra
-    HAVE_RICH = False
-    Table = None  # type: ignore[assignment,misc]
-    Text = None  # type: ignore[assignment,misc]
-
 # Matches rich-style markup tags like [bold], [/dim], [red bold] so the
 # plain-text console can strip them.
 _RE_MARKUP = re.compile(r"\[/?[a-z][a-z0-9 _]*\]")
@@ -68,7 +62,19 @@ class _PlainConsole:
         return input(_RE_MARKUP.sub("", str(prompt)))
 
 
-console: object = _RichConsole() if HAVE_RICH else _PlainConsole()
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    HAVE_RICH = True
+except ImportError:  # pragma: no cover - exercised only without the extra
+    Console = _PlainConsole  # type: ignore[assignment,misc]
+    Table = None  # type: ignore[assignment,misc]
+    Text = None  # type: ignore[assignment,misc]
+    HAVE_RICH = False
+
+console = Console()
 
 
 # ---------------------------------------------------------------------------
@@ -194,13 +200,12 @@ class DeployStep:
 
 @dataclass
 class ConfirmStep:
-    """Pause and wait for the user to press Enter before continuing."""
+    """Pause until the user types ``y``/``Y`` and presses Enter to continue."""
 
     message: str = "Confirm to continue"
     confirmed: bool = False
 
 
-# typing.Union (not X | Y) so this evaluates on Python 3.9.
 PlanStep = Union[LandStep, DeployStep, ConfirmStep]
 
 
@@ -223,31 +228,7 @@ class LandingContext:
 
 STATE_VERSION = 1
 
-# Set in run_autoland so the signal handler and execute_plan can checkpoint.
-_state_file_meta: dict | None = None  # {"path": Path, "branch": str, "base": str}
-
-
-def _default_state_dir() -> Path:
-    return Path.home() / ".stack-pr" / "autoland"
-
-
-def _default_state_path(branch: str) -> Path:
-    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", branch)
-    return _default_state_dir() / f"{slug}.json"
-
-
-def _serialize_entry(entry: StackEntry) -> dict:
-    return {
-        "pr_url": entry.pr_url,
-        "pr_number": entry.pr_number,
-        "branch": entry.branch,
-        "title": entry.title,
-        "review_decision": entry.review_decision,
-        "state": entry.state.value,
-        "check_retries": entry.check_retries,
-        "queue_retries": entry.queue_retries,
-        "error_message": entry.error_message,
-    }
+_STEP_TYPES = {LandStep: "land", DeployStep: "deploy", ConfirmStep: "confirm"}
 
 
 def _deserialize_entry(data: dict) -> StackEntry:
@@ -265,82 +246,64 @@ def _deserialize_entry(data: dict) -> StackEntry:
 
 
 def _serialize_step(step: PlanStep) -> dict:
-    if isinstance(step, LandStep):
-        return {"type": "land", "entry_index": step.entry_index}
-    if isinstance(step, DeployStep):
-        return {
-            "type": "deploy",
-            "workflow": step.workflow,
-            "state": step.state,
-            "error_message": step.error_message,
-        }
-    return {
-        "type": "confirm",
-        "message": step.message,
-        "confirmed": step.confirmed,
-    }
+    # dataclasses.asdict gives the fields; tag the type for deserialization.
+    return {"type": _STEP_TYPES[type(step)], **asdict(step)}
 
 
 def _deserialize_step(data: dict) -> PlanStep:
+    fields = {k: v for k, v in data.items() if k != "type"}
     if data["type"] == "land":
-        return LandStep(entry_index=data["entry_index"])
+        return LandStep(**fields)
     if data["type"] == "deploy":
-        return DeployStep(
-            workflow=data["workflow"],
-            state=data.get("state", "pending"),
-            error_message=data.get("error_message", ""),
+        return DeployStep(**fields)
+    return ConfirmStep(**fields)
+
+
+@dataclass
+class AutolandCheckpointer:
+    """Persists and restores landing state for crash-safe ``--resume``."""
+
+    path: Path
+    branch: str
+    base: str
+
+    @staticmethod
+    def default_path(branch: str) -> Path:
+        slug = re.sub(r"[^a-zA-Z0-9_-]", "_", branch)
+        return Path.home() / ".stack-pr" / "autoland" / f"{slug}.json"
+
+    def save(self, ctx: LandingContext) -> None:
+        """Atomically write a checkpoint of *ctx* to the state file."""
+        data = {
+            "version": STATE_VERSION,
+            "branch": self.branch,
+            "base": self.base,
+            "current_step": ctx.current_step,
+            "last_landed_sha": ctx.last_landed_sha,
+            "stack": [asdict(e) for e in ctx.stack],
+            "plan": [_serialize_step(s) for s in ctx.plan],
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        tmp.rename(self.path)
+
+    def delete(self) -> None:
+        self.path.unlink(missing_ok=True)
+
+    @classmethod
+    def load(cls, path: Path) -> tuple[AutolandCheckpointer, LandingContext]:
+        """Load a checkpoint; returns the checkpointer and restored context."""
+        data = json.loads(path.read_text())
+        if data.get("version") != STATE_VERSION:
+            raise ValueError(f"Unsupported state file version: {data.get('version')}")
+        ctx = LandingContext(
+            stack=[_deserialize_entry(e) for e in data["stack"]],
+            plan=[_deserialize_step(s) for s in data["plan"]],
+            current_step=data.get("current_step", 0),
+            last_landed_sha=data.get("last_landed_sha", ""),
         )
-    return ConfirmStep(
-        message=data.get("message", "Confirm to continue"),
-        confirmed=data.get("confirmed", False),
-    )
-
-
-def save_state(ctx: LandingContext) -> None:
-    """Atomically checkpoint the current context to the state file."""
-    if _state_file_meta is None:
-        return
-
-    path: Path = _state_file_meta["path"]
-    data = {
-        "version": STATE_VERSION,
-        "branch": _state_file_meta["branch"],
-        "base": _state_file_meta["base"],
-        "current_step": ctx.current_step,
-        "last_landed_sha": ctx.last_landed_sha,
-        "stack": [_serialize_entry(e) for e in ctx.stack],
-        "plan": [_serialize_step(s) for s in ctx.plan],
-    }
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    tmp.rename(path)
-
-
-def load_state(path: Path) -> tuple[LandingContext, str, str]:
-    """Load a checkpoint and return ``(ctx, branch, base)``."""
-    data = json.loads(path.read_text())
-    if data.get("version") != STATE_VERSION:
-        raise ValueError(f"Unsupported state file version: {data.get('version')}")
-
-    stack = [_deserialize_entry(e) for e in data["stack"]]
-    plan = [_deserialize_step(s) for s in data["plan"]]
-
-    ctx = LandingContext(
-        stack=stack,
-        plan=plan,
-        current_step=data.get("current_step", 0),
-        last_landed_sha=data.get("last_landed_sha", ""),
-    )
-    return ctx, data["branch"], data["base"]
-
-
-def delete_state() -> None:
-    if _state_file_meta is None:
-        return
-    path: Path = _state_file_meta["path"]
-    path.unlink(missing_ok=True)
+        return cls(path=path, branch=data["branch"], base=data["base"]), ctx
 
 
 def _current_branch() -> str:
@@ -1466,12 +1429,17 @@ def enqueue_and_wait(
             awake_elapsed += poll_interval
 
 
-def execute_plan(ctx: LandingContext, common: cli.CommonArgs, opts: AutolandOptions) -> bool:
+def execute_plan(
+    ctx: LandingContext,
+    common: cli.CommonArgs,
+    opts: AutolandOptions,
+    checkpointer: AutolandCheckpointer,
+) -> bool:
     """Execute the landing plan from ctx.current_step. Returns True on success."""
     for step_idx in range(ctx.current_step, len(ctx.plan)):
         step = ctx.plan[step_idx]
         ctx.current_step = step_idx
-        save_state(ctx)
+        checkpointer.save(ctx)
 
         if isinstance(step, LandStep):
             entry = ctx.stack[step.entry_index]
@@ -1490,7 +1458,7 @@ def execute_plan(ctx: LandingContext, common: cli.CommonArgs, opts: AutolandOpti
             )
 
             if not wait_for_approval(entry, poll_interval=opts.poll_interval, ctx=ctx):
-                return _abort(ctx, f"PR #{entry.pr_number} approval wait was aborted")
+                return _abort(ctx, checkpointer, f"PR #{entry.pr_number} approval wait was aborted")
 
             if entry.state == PRState.MERGED:
                 _refresh_last_landed_sha(ctx, common)
@@ -1518,7 +1486,7 @@ def execute_plan(ctx: LandingContext, common: cli.CommonArgs, opts: AutolandOpti
                         merge_timeout=opts.merge_timeout,
                         ctx=ctx,
                     ):
-                        return _abort(ctx, f"PR #{entry.pr_number} failed to merge")
+                        return _abort(ctx, checkpointer, f"PR #{entry.pr_number} failed to merge")
                     _refresh_last_landed_sha(ctx, common)
 
             has_more_land_steps = any(
@@ -1547,7 +1515,7 @@ def execute_plan(ctx: LandingContext, common: cli.CommonArgs, opts: AutolandOpti
                 target=common.target,
                 ctx=ctx,
             ):
-                return _abort(ctx, f"Deploy {step.workflow} failed or timed out")
+                return _abort(ctx, checkpointer, f"Deploy {step.workflow} failed or timed out")
 
         elif isinstance(step, ConfirmStep):
             if step.confirmed:
@@ -1560,29 +1528,32 @@ def execute_plan(ctx: LandingContext, common: cli.CommonArgs, opts: AutolandOpti
             while True:
                 try:
                     answer = console.input(
-                        "[yellow]Type y to continue (Ctrl+C to abort): [/yellow]"
-                    ).strip().lower()
+                        "[yellow]Type y/Y then Enter to continue "
+                        "(Ctrl+C to abort): [/yellow]"
+                    ).strip()
                 except EOFError:
                     return _abort(
                         ctx,
                         "Confirm step received EOF — cannot confirm in "
                         "non-interactive mode",
                     )
-                if answer == "y":
+                if answer in ("y", "Y"):
                     break
-                console.print("[dim]Type 'y' to confirm.[/dim]")
+                console.print("[dim]Type 'y' or 'Y' to confirm.[/dim]")
             step.confirmed = True
             console.print("[green]Confirmed[/green]")
 
     ctx.current_step = len(ctx.plan)
-    save_state(ctx)
+    checkpointer.save(ctx)
     return True
 
 
-def _abort(ctx: LandingContext, reason: str) -> bool:
+def _abort(
+    ctx: LandingContext, checkpointer: AutolandCheckpointer, reason: str
+) -> bool:
     ctx.abort_reason = reason
     ctx.aborted = True
-    save_state(ctx)
+    checkpointer.save(ctx)
     return False
 
 
@@ -1682,11 +1653,13 @@ def run_autoland(
     _run_fresh(common, opts)
 
 
-def _install_signal_handler(ctx: LandingContext, opts: AutolandOptions) -> None:
+def _install_signal_handler(
+    ctx: LandingContext, checkpointer: AutolandCheckpointer, opts: AutolandOptions
+) -> None:
     def handler(_sig: int, _frame: object) -> None:
         ctx.aborted = True
         ctx.abort_reason = "User interrupted (Ctrl+C)"
-        save_state(ctx)
+        checkpointer.save(ctx)
         console.print(
             "\n[red bold]Interrupted! State saved. Resume with --resume.[/red bold]\n"
         )
@@ -1700,20 +1673,24 @@ def _install_signal_handler(ctx: LandingContext, opts: AutolandOptions) -> None:
     signal.signal(signal.SIGINT, handler)
 
 
-def _finish(ctx: LandingContext, opts: AutolandOptions, *, success: bool) -> None:
+def _finish(
+    ctx: LandingContext,
+    checkpointer: AutolandCheckpointer,
+    opts: AutolandOptions,
+    *,
+    success: bool,
+) -> None:
     console.print("\n")
     print_status(ctx)
     if success:
         console.print("\n[bold green]All PRs landed successfully![/bold green]\n")
-        delete_state()
+        checkpointer.delete()
         cleanup_worktree()
     else:
         console.print(f"\n[bold red]Landing failed: {ctx.abort_reason}[/bold red]\n")
-        if _state_file_meta is not None:
-            console.print(
-                f"[dim]State saved to {_state_file_meta['path']} — "
-                "resume with --resume[/dim]\n"
-            )
+        console.print(
+            f"[dim]State saved to {checkpointer.path} — resume with --resume[/dim]\n"
+        )
         if opts.always_cleanup:
             cleanup_worktree()
         else:
@@ -1722,8 +1699,6 @@ def _finish(ctx: LandingContext, opts: AutolandOptions, *, success: bool) -> Non
 
 
 def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
-    global _state_file_meta
-
     if opts.branch:
         setup_worktree(opts.branch)
         console.print(
@@ -1746,31 +1721,29 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
     ctx = LandingContext(stack=stack, plan=plan)
 
     branch = opts.branch or _current_branch()
-    _state_file_meta = {
-        "path": opts.state_file or _default_state_path(branch),
-        "branch": branch,
-        "base": common.target,
-    }
+    checkpointer = AutolandCheckpointer(
+        path=opts.state_file or AutolandCheckpointer.default_path(branch),
+        branch=branch,
+        base=common.target,
+    )
 
     print_status(ctx)
     if opts.dry_run:
         console.print("\n[yellow]Dry run — exiting.[/yellow]")
         return
 
-    console.print(f"[dim]State file: {_state_file_meta['path']}[/dim]\n")
-    _install_signal_handler(ctx, opts)
-    _finish(ctx, opts, success=execute_plan(ctx, common, opts))
+    console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
+    _install_signal_handler(ctx, checkpointer, opts)
+    _finish(ctx, checkpointer, opts, success=execute_plan(ctx, common, opts, checkpointer))
 
 
 def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
-    global _state_file_meta
-
     if opts.state_file:
         sf_path = opts.state_file
     elif opts.branch:
-        sf_path = _default_state_path(opts.branch)
+        sf_path = AutolandCheckpointer.default_path(opts.branch)
     else:
-        sf_path = _default_state_path(_current_branch())
+        sf_path = AutolandCheckpointer.default_path(_current_branch())
 
     if not sf_path.exists():
         console.print(f"[red]No state file found at {sf_path}[/red]")
@@ -1778,20 +1751,20 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
 
     console.print(f"[bold]Resuming from checkpoint: [cyan]{sf_path}[/cyan][/bold]\n")
     try:
-        ctx, saved_branch, saved_base = load_state(sf_path)
+        checkpointer, ctx = AutolandCheckpointer.load(sf_path)
     except (ValueError, json.JSONDecodeError, KeyError) as e:
         console.print(f"[red]Failed to load state file: {e}[/red]")
         sys.exit(1)
 
-    if opts.branch and opts.branch != saved_branch:
+    if opts.branch and opts.branch != checkpointer.branch:
         console.print(
             f"[red]--branch {opts.branch} does not match saved branch "
-            f"{saved_branch}[/red]"
+            f"{checkpointer.branch}[/red]"
         )
         sys.exit(1)
 
-    if opts.branch or saved_branch != _current_branch():
-        setup_worktree(opts.branch or saved_branch)
+    if opts.branch or checkpointer.branch != _current_branch():
+        setup_worktree(opts.branch or checkpointer.branch)
 
     console.print("[dim]Refreshing PR state from GitHub...[/dim]")
     enrich_stack(ctx.stack)
@@ -1800,12 +1773,10 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
 
     if ctx.current_step >= len(ctx.plan):
         console.print("[green]All steps already completed — nothing to resume.[/green]")
-        _state_file_meta = {"path": sf_path, "branch": saved_branch, "base": saved_base}
-        delete_state()
+        checkpointer.delete()
         return
 
-    _state_file_meta = {"path": sf_path, "branch": saved_branch, "base": saved_base}
     print_status(ctx)
     console.print(f"[dim]State file: {sf_path}[/dim]\n")
-    _install_signal_handler(ctx, opts)
-    _finish(ctx, opts, success=execute_plan(ctx, common, opts))
+    _install_signal_handler(ctx, checkpointer, opts)
+    _finish(ctx, checkpointer, opts, success=execute_plan(ctx, common, opts, checkpointer))

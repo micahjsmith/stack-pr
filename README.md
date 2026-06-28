@@ -499,7 +499,7 @@ files](#config-files)), so a repository captures its workflow in
 target = main
 [autoland]
 merge_queue = true
-required_checks = test-python,test-frontend,lint-python-essential
+required_checks = test,lint
 poll_interval = 120
 max_check_retries = 3
 max_queue_retries = 3
@@ -579,7 +579,7 @@ branch_name_template=$USERNAME/$BRANCH
 style=bottom-only
 [autoland]
 merge_queue=True
-required_checks=test-python,test-frontend
+required_checks=test,lint
 poll_interval=120
 max_check_retries=3
 max_queue_retries=3
