@@ -19,7 +19,6 @@ from stack_pr.autoland import (
     StackEntry,
     evaluate_checks,
     parse_plan,
-    poll_merge_status,
 )
 from stack_pr.cli import CommonArgs
 
@@ -85,92 +84,74 @@ def test_run_autoland_requires_merge_queue() -> None:
         autoland.run_autoland(_common(), _args(), cfg)
 
 
-# --- check evaluation ----------------------------------------------------
+# --- check evaluation (pure: takes the check list) ------------------------
 
 
-def _checks(mocker, data) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.get_check_runs", return_value=data)
+def test_evaluate_checks_all_passing_required() -> None:
+    checks = [
+        {"name": "ci", "bucket": "pass"},
+        {"name": "lint", "bucket": "pass"},
+        {"name": "other", "bucket": "fail"},  # not required -> ignored
+    ]
+    assert evaluate_checks(checks, ["ci", "lint"]).status == CheckStatus.ALL_PASSING
 
 
-def test_evaluate_checks_all_passing_required(mocker) -> None:  # noqa: ANN001
-    _checks(
-        mocker,
-        [
-            {"name": "ci", "bucket": "pass"},
-            {"name": "lint", "bucket": "pass"},
-            {"name": "other", "bucket": "fail"},  # not required -> ignored
-        ],
-    )
-    res = evaluate_checks(1, ["ci", "lint"])
-    assert res.status == CheckStatus.ALL_PASSING
-
-
-def test_evaluate_checks_failure_collects_run_id(mocker) -> None:  # noqa: ANN001
-    _checks(
-        mocker,
-        [
-            {"name": "ci", "bucket": "pass"},
-            {
-                "name": "lint",
-                "bucket": "fail",
-                "link": "https://github.com/o/r/actions/runs/12345/job/9",
-            },
-        ],
-    )
-    res = evaluate_checks(1, ["ci", "lint"])
+def test_evaluate_checks_failure_collects_run_id() -> None:
+    checks = [
+        {"name": "ci", "bucket": "pass"},
+        {
+            "name": "lint",
+            "bucket": "fail",
+            "link": "https://github.com/o/r/actions/runs/12345/job/9",
+        },
+    ]
+    res = evaluate_checks(checks, ["ci", "lint"])
     assert res.status == CheckStatus.FAILED
     assert res.failed_names == ["lint"]
     assert res.failed_runs == [12345]
 
 
-def test_evaluate_checks_missing_required_is_not_started(mocker) -> None:  # noqa: ANN001
-    _checks(mocker, [{"name": "ci", "bucket": "pass"}])
-    res = evaluate_checks(1, ["ci", "lint"])
+def test_evaluate_checks_missing_required_is_not_started() -> None:
+    res = evaluate_checks([{"name": "ci", "bucket": "pass"}], ["ci", "lint"])
     assert res.status == CheckStatus.NOT_STARTED
 
 
-def test_evaluate_checks_empty_required_gates_on_all(mocker) -> None:  # noqa: ANN001
-    _checks(
-        mocker,
-        [
-            {"name": "ci", "bucket": "pass"},
-            {"name": "deploy", "bucket": "skipping"},  # ignored
-            {"name": "lint", "bucket": "pending"},
-        ],
-    )
-    res = evaluate_checks(1, [])
-    assert res.status == CheckStatus.PENDING
+def test_evaluate_checks_empty_required_gates_on_all() -> None:
+    checks = [
+        {"name": "ci", "bucket": "pass"},
+        {"name": "deploy", "bucket": "skipping"},  # ignored
+        {"name": "lint", "bucket": "pending"},
+    ]
+    assert evaluate_checks(checks, []).status == CheckStatus.PENDING
 
 
-def test_evaluate_checks_empty_required_no_checks(mocker) -> None:  # noqa: ANN001
-    _checks(mocker, [])
-    res = evaluate_checks(1, [])
-    assert res.status == CheckStatus.NOT_STARTED
+def test_evaluate_checks_empty_required_no_checks() -> None:
+    assert evaluate_checks([], []).status == CheckStatus.NOT_STARTED
 
 
-# --- merge status polling ------------------------------------------------
+# --- merge status polling (GitHub.poll_merge) ----------------------------
 
 
-def test_poll_merge_status_merged(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.gh_json", return_value={"state": "MERGED"})
-    assert poll_merge_status(1).merged is True
+def test_poll_merge_merged(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.github, "pr_state", return_value="MERGED")
+    assert autoland.github.poll_merge(1).merged is True
 
 
-def test_poll_merge_status_closed(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.gh_json", return_value={"state": "CLOSED"})
-    assert poll_merge_status(1).error == "PR was closed"
+def test_poll_merge_closed(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.github, "pr_state", return_value="CLOSED")
+    assert autoland.github.poll_merge(1).error == "PR was closed"
 
 
-def test_poll_merge_status_booted(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.gh_json", return_value={"state": "OPEN"})
-    mocker.patch("stack_pr.autoland.has_merge_queue_entry", return_value=False)
-    assert poll_merge_status(1).booted is True
+def test_poll_merge_booted(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.github, "pr_state", return_value="OPEN")
+    mocker.patch.object(autoland.github, "in_merge_queue", return_value=False)
+    assert autoland.github.poll_merge(1).booted is True
 
 
-def test_poll_merge_status_still_queued(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.gh_json", return_value={"state": "OPEN"})
-    mocker.patch("stack_pr.autoland.has_merge_queue_entry", return_value=True)
-    res = poll_merge_status(1)
+def test_poll_merge_still_queued(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.github, "pr_state", return_value="OPEN")
+    mocker.patch.object(autoland.github, "in_merge_queue", return_value=True)
+    res = autoland.github.poll_merge(1)
     assert not res.merged
     assert not res.booted
     assert not res.error

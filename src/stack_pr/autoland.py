@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
-import functools
+import contextlib
 import json
 import os
 import re
@@ -454,76 +454,191 @@ def gh_json(cmd: list[str]) -> dict | list:
     return json.loads(result.stdout)
 
 
-@functools.lru_cache(maxsize=1)
-def get_owner_repo() -> tuple[str, str]:
-    """Return ``(owner, repo)`` for the current repository via gh."""
-    data = gh_json(["repo", "view", "--json", "owner,name"])
-    assert isinstance(data, dict)
-    return data["owner"]["login"], data["name"]
+# ---------------------------------------------------------------------------
+# GitHub access — every `gh` / `gh api` call autoland makes lives here.
+# ---------------------------------------------------------------------------
+
+_MERGE_QUEUE_ENTRY_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      mergeQueueEntry { id state }
+    }
+  }
+}
+""".strip()
+
+
+@dataclass
+class MergeQueuePollResult:
+    merged: bool = False
+    booted: bool = False
+    error: str = ""
+
+
+class GitHub:
+    """Wrapper over the ``gh`` CLI for the PR / merge-queue calls autoland needs."""
+
+    def __init__(self) -> None:
+        self._owner_repo: tuple[str, str] | None = None
+
+    def owner_repo(self) -> tuple[str, str]:
+        if self._owner_repo is None:
+            data = gh_json(["repo", "view", "--json", "owner,name"])
+            assert isinstance(data, dict)
+            self._owner_repo = (data["owner"]["login"], data["name"])
+        return self._owner_repo
+
+    def _pr_view(self, pr_number: int, fields: str) -> dict:
+        data = gh_json(["pr", "view", str(pr_number), "--json", fields])
+        assert isinstance(data, dict)
+        return data
+
+    def pr_state(self, pr_number: int) -> str:
+        return self._pr_view(pr_number, "state").get("state", "OPEN")
+
+    def merge_state(self, pr_number: int) -> dict:
+        return self._pr_view(pr_number, "state,mergeStateStatus,mergeable")
+
+    def review_decision(self, pr_number: int) -> str:
+        return self._pr_view(pr_number, "reviewDecision").get("reviewDecision", "")
+
+    def summary(self, pr_number: int) -> dict:
+        return self._pr_view(pr_number, "title,state,reviewDecision")
+
+    def checks(self, pr_number: int) -> list[dict]:
+        data = gh_json(
+            ["pr", "checks", str(pr_number), "--json", "name,state,bucket,link,workflow"]
+        )
+        assert isinstance(data, list)
+        return data
+
+    def rerun_failed(self, run_ids: list[int]) -> None:
+        for run_id in dict.fromkeys(run_ids):  # de-dup, preserve order
+            try:
+                run(["gh", "run", "rerun", str(run_id), "--failed"], quiet=False)
+            except RuntimeError as e:
+                console.print(
+                    f"[yellow]Warning: could not rerun {run_id}: {e}[/yellow]"
+                )
+
+    def in_merge_queue(self, pr_number: int) -> bool:
+        """Whether the PR currently has an active merge-queue entry (GraphQL)."""
+        try:
+            owner, repo = self.owner_repo()
+            result = run(
+                [
+                    "gh", "api", "graphql",
+                    "-F", f"owner={owner}",
+                    "-F", f"repo={repo}",
+                    "-F", f"number={pr_number}",
+                    "-f", f"query={_MERGE_QUEUE_ENTRY_QUERY}",
+                ],
+                quiet=True,
+            )
+            entry = (
+                json.loads(result.stdout)
+                .get("data", {})
+                .get("repository", {})
+                .get("pullRequest", {})
+                .get("mergeQueueEntry")
+            )
+            return entry is not None
+        except (RuntimeError, json.JSONDecodeError):
+            return False
+
+    def enqueue(self, pr_number: int) -> None:
+        run(["gh", "pr", "merge", str(pr_number), "--squash"], quiet=False)
+
+    def poll_merge(self, pr_number: int) -> MergeQueuePollResult:
+        state = self.pr_state(pr_number)
+        if state == "MERGED":
+            return MergeQueuePollResult(merged=True)
+        if state == "CLOSED":
+            return MergeQueuePollResult(error="PR was closed")
+        if state == "OPEN" and not self.in_merge_queue(pr_number):
+            return MergeQueuePollResult(booted=True)
+        return MergeQueuePollResult()
+
+    def workflow_runs(self, workflow: str, branch: str) -> list[dict]:
+        data = gh_json(
+            [
+                "run", "list",
+                "--workflow", workflow,
+                "--branch", branch,
+                "--json", "headSha,status,conclusion",
+                "--limit", "10",
+            ]
+        )
+        assert isinstance(data, list)
+        return data
+
+
+github = GitHub()
 
 
 # ---------------------------------------------------------------------------
 # Worktree management
 # ---------------------------------------------------------------------------
 
-_worktree_path: Path | None = None
-_orig_cwd: str | None = None
 
+class Worktree:
+    """A temporary git worktree autoland operates in (for ``--branch``).
 
-def setup_worktree(branch: str) -> str:
-    """Create a temp worktree for *branch* and chdir into it."""
-    global _worktree_path, _orig_cwd
+    ``create`` checks the branch out in a throwaway worktree and chdirs into
+    it; ``remove`` restores the original directory and deletes the worktree.
+    ``announce_preserved`` is used instead of ``remove`` to keep it around for
+    debugging after a failure.
+    """
 
-    tmpdir = tempfile.mkdtemp(prefix="autoland-")
-    worktree_dir = str(Path(tmpdir) / "repo")
+    def __init__(self, branch: str) -> None:
+        self.branch = branch
+        self.path: Path | None = None
+        self._orig_cwd: str | None = None
 
-    console.print(
-        f"[bold]Creating temporary worktree for [cyan]{branch}[/cyan] "
-        f"at {worktree_dir}[/bold]"
-    )
-    subprocess.run(
-        ["git", "worktree", "add", "-f", worktree_dir, branch],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    def create(self) -> None:
+        tmpdir = tempfile.mkdtemp(prefix="autoland-")
+        worktree_dir = str(Path(tmpdir) / "repo")
+        console.print(
+            f"[bold]Creating temporary worktree for [cyan]{self.branch}[/cyan] "
+            f"at {worktree_dir}[/bold]"
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-f", worktree_dir, self.branch],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.path = Path(worktree_dir)
+        self._orig_cwd = str(Path.cwd())
+        os.chdir(worktree_dir)
 
-    _worktree_path = Path(worktree_dir)
-    _orig_cwd = str(Path.cwd())
-    os.chdir(worktree_dir)
-    return worktree_dir
+    def remove(self) -> None:
+        if self.path is None:
+            return
+        if self._orig_cwd:
+            os.chdir(self._orig_cwd)
+            self._orig_cwd = None
+        console.print(f"\n[dim]Cleaning up worktree at {self.path}...[/dim]")
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(self.path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        shutil.rmtree(self.path.parent, ignore_errors=True)
+        self.path = None
 
-
-def cleanup_worktree() -> None:
-    global _worktree_path, _orig_cwd
-    if _worktree_path is None:
-        return
-
-    wt = _worktree_path
-    _worktree_path = None
-    if _orig_cwd:
-        os.chdir(_orig_cwd)
-        _orig_cwd = None
-
-    console.print(f"\n[dim]Cleaning up worktree at {wt}...[/dim]")
-    subprocess.run(
-        ["git", "worktree", "remove", "--force", str(wt)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    shutil.rmtree(wt.parent, ignore_errors=True)
-
-
-def print_worktree_path() -> None:
-    if _worktree_path is not None:
+    def announce_preserved(self) -> None:
+        if self.path is None:
+            return
         console.print(
             f"\n[bold yellow]Worktree preserved at: "
-            f"[cyan]{_worktree_path}[/cyan][/bold yellow]"
+            f"[cyan]{self.path}[/cyan][/bold yellow]"
         )
         console.print(
             "[dim]To clean up manually: "
-            f"git worktree remove --force {_worktree_path}[/dim]"
+            f"git worktree remove --force {self.path}[/dim]"
         )
 
 
@@ -551,16 +666,7 @@ def enrich_stack(stack: list[StackEntry]) -> None:
     """Fetch PR titles, review status, and current state from GitHub."""
     for entry in stack:
         try:
-            data = gh_json(
-                [
-                    "pr",
-                    "view",
-                    str(entry.pr_number),
-                    "--json",
-                    "title,state,reviewDecision",
-                ]
-            )
-            assert isinstance(data, dict)
+            data = github.summary(entry.pr_number)
             entry.title = data.get("title", "")
             entry.review_decision = data.get("reviewDecision", "")
             if data.get("state") == "MERGED":
@@ -574,20 +680,6 @@ def enrich_stack(stack: list[StackEntry]) -> None:
 # ---------------------------------------------------------------------------
 
 RE_RUN_ID_FROM_LINK = re.compile(r"/actions/runs/(\d+)")
-
-
-def get_check_runs(pr_number: int) -> list[dict]:
-    data = gh_json(
-        [
-            "pr",
-            "checks",
-            str(pr_number),
-            "--json",
-            "name,state,bucket,link,workflow",
-        ]
-    )
-    assert isinstance(data, list)
-    return data
 
 
 def _extract_run_id(link: str) -> int | None:
@@ -610,14 +702,12 @@ class CheckResult:
     summary: str = ""
 
 
-def evaluate_checks(pr_number: int, required_checks: list[str]) -> CheckResult:
-    """Evaluate checks for a PR.
+def evaluate_checks(checks: list[dict], required_checks: list[str]) -> CheckResult:
+    """Evaluate a PR's check runs.
 
     If *required_checks* is non-empty, gate on exactly those named checks.
     Otherwise gate on all reported checks that aren't being skipped.
     """
-    checks = get_check_runs(pr_number)
-
     if required_checks:
         check_map = {
             c.get("name", ""): c
@@ -673,86 +763,6 @@ def evaluate_checks(pr_number: int, required_checks: list[str]) -> CheckResult:
     return CheckResult(status=CheckStatus.ALL_PASSING, summary="All checks passing")
 
 
-def rerun_failed_jobs(run_ids: list[int]) -> None:
-    seen: set[int] = set()
-    for run_id in run_ids:
-        if run_id in seen:
-            continue
-        seen.add(run_id)
-        try:
-            run(["gh", "run", "rerun", str(run_id), "--failed"], quiet=False)
-        except RuntimeError as e:
-            console.print(f"[yellow]Warning: could not rerun {run_id}: {e}[/yellow]")
-
-
-# ---------------------------------------------------------------------------
-# Merge queue interaction
-# ---------------------------------------------------------------------------
-
-_MERGE_QUEUE_ENTRY_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      mergeQueueEntry { id state }
-    }
-  }
-}
-""".strip()
-
-
-def has_merge_queue_entry(pr_number: int) -> bool:
-    """Whether a PR currently has an active merge queue entry (GraphQL)."""
-    try:
-        owner, repo = get_owner_repo()
-        result = run(
-            [
-                "gh", "api", "graphql",
-                "-F", f"owner={owner}",
-                "-F", f"repo={repo}",
-                "-F", f"number={pr_number}",
-                "-f", f"query={_MERGE_QUEUE_ENTRY_QUERY}",
-            ],
-            quiet=True,
-        )
-        data = json.loads(result.stdout)
-        entry = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("mergeQueueEntry")
-        )
-        return entry is not None
-    except (RuntimeError, json.JSONDecodeError):
-        return False
-
-
-def add_to_merge_queue(pr_number: int) -> None:
-    run(["gh", "pr", "merge", str(pr_number), "--squash"], quiet=False)
-
-
-@dataclass
-class MergeQueuePollResult:
-    merged: bool = False
-    booted: bool = False
-    error: str = ""
-
-
-def poll_merge_status(pr_number: int) -> MergeQueuePollResult:
-    data = gh_json(["pr", "view", str(pr_number), "--json", "state"])
-    assert isinstance(data, dict)
-    state = data.get("state", "")
-
-    if state == "MERGED":
-        return MergeQueuePollResult(merged=True)
-    if state == "CLOSED":
-        return MergeQueuePollResult(error="PR was closed")
-    if state == "OPEN":
-        if has_merge_queue_entry(pr_number):
-            return MergeQueuePollResult()  # still in queue
-        return MergeQueuePollResult(booted=True)
-    return MergeQueuePollResult()
-
-
 # ---------------------------------------------------------------------------
 # Post-merge rebase + resubmit (reuses stack-pr submit)
 # ---------------------------------------------------------------------------
@@ -802,13 +812,12 @@ def _is_ancestor(ancestor: str, descendant: str) -> bool:
 def wait_for_deploy(
     step: DeployStep,
     *,
-    target_sha: str,
-    deploy_timeout: int,
-    poll_interval: int,
-    target: str,
+    opts: AutolandOptions,
+    common: cli.CommonArgs,
     ctx: LandingContext,
 ) -> bool:
-    """Wait for a deploy workflow to complete with code at or after target_sha."""
+    """Wait for a deploy workflow to complete with code at or after the landed SHA."""
+    target_sha = ctx.last_landed_sha
     step.state = "waiting"
     console.print(
         f"\n[bold blue]Waiting for deploy: {step.workflow}[/bold blue]"
@@ -819,28 +828,21 @@ def wait_for_deploy(
     while True:
         if ctx.aborted:
             return False
-        if awake_elapsed > deploy_timeout:
+        if awake_elapsed > opts.deploy_timeout:
             step.state = "failed"
-            step.error_message = f"Deploy timed out after {deploy_timeout / 3600:.0f}h"
+            step.error_message = (
+                f"Deploy timed out after {opts.deploy_timeout / 3600:.0f}h"
+            )
             return False
 
         try:
-            data = gh_json(
-                [
-                    "run", "list",
-                    "--workflow", step.workflow,
-                    "--branch", target,
-                    "--json", "headSha,status,conclusion",
-                    "--limit", "10",
-                ]
-            )
+            data = github.workflow_runs(step.workflow, common.target)
         except RuntimeError as e:
             console.print(f"[yellow]Warning: could not poll deploy: {e}[/yellow]")
-            resilient_sleep(poll_interval)
-            awake_elapsed += poll_interval
+            resilient_sleep(opts.poll_interval)
+            awake_elapsed += opts.poll_interval
             continue
 
-        assert isinstance(data, list)
         for wf_run in data:
             if wf_run.get("status") != "completed":
                 continue
@@ -862,10 +864,10 @@ def wait_for_deploy(
         step.error_message = f"Waiting for deploy ({mins}m elapsed)..."
         console.print(
             f"[dim]Deploy {step.workflow}: waiting ({mins}m) — "
-            f"polling in {poll_interval}s[/dim]"
+            f"polling in {opts.poll_interval}s[/dim]"
         )
-        resilient_sleep(poll_interval)
-        awake_elapsed += poll_interval
+        resilient_sleep(opts.poll_interval)
+        awake_elapsed += opts.poll_interval
 
 
 # ---------------------------------------------------------------------------
@@ -1116,26 +1118,17 @@ def print_status(ctx: LandingContext) -> None:
 # ---------------------------------------------------------------------------
 
 
-def check_pr_state(pr_number: int) -> str:
-    data = gh_json(["pr", "view", str(pr_number), "--json", "state"])
-    assert isinstance(data, dict)
-    return data.get("state", "OPEN")
-
-
-def refresh_review_decision(entry: StackEntry) -> None:
-    try:
-        data = gh_json(["pr", "view", str(entry.pr_number), "--json", "reviewDecision"])
-        assert isinstance(data, dict)
-        entry.review_decision = data.get("reviewDecision", "")
-    except RuntimeError:
-        pass
+def _refresh_review(entry: StackEntry) -> None:
+    """Update the entry's review decision, tolerating a transient gh failure."""
+    with contextlib.suppress(RuntimeError):
+        entry.review_decision = github.review_decision(entry.pr_number)
 
 
 def wait_for_approval(
-    entry: StackEntry, *, poll_interval: int, ctx: LandingContext
+    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
 ) -> bool:
     """Wait until the PR has required approvals. Returns False if aborted."""
-    pr_state = check_pr_state(entry.pr_number)
+    pr_state = github.pr_state(entry.pr_number)
     if pr_state == "MERGED":
         entry.state = PRState.MERGED
         return True
@@ -1144,7 +1137,7 @@ def wait_for_approval(
         entry.error_message = "PR was closed"
         return False
 
-    refresh_review_decision(entry)
+    _refresh_review(entry)
     if entry.is_approved:
         return True
 
@@ -1161,11 +1154,11 @@ def wait_for_approval(
             return False
         console.print(
             f"[dim]PR #{entry.pr_number}: waiting for approval — "
-            f"polling in {poll_interval}s[/dim]"
+            f"polling in {opts.poll_interval}s[/dim]"
         )
-        resilient_sleep(poll_interval)
+        resilient_sleep(opts.poll_interval)
 
-        pr_state = check_pr_state(entry.pr_number)
+        pr_state = github.pr_state(entry.pr_number)
         if pr_state == "MERGED":
             entry.state = PRState.MERGED
             return True
@@ -1174,7 +1167,7 @@ def wait_for_approval(
             entry.error_message = "PR was closed"
             return False
 
-        refresh_review_decision(entry)
+        _refresh_review(entry)
         if entry.is_approved:
             entry.error_message = ""
             console.print(f"[green]PR #{entry.pr_number} is now approved[/green]")
@@ -1188,12 +1181,7 @@ def wait_for_approval(
 
 
 def wait_for_checks(
-    entry: StackEntry,
-    *,
-    required_checks: list[str],
-    max_retries: int,
-    poll_interval: int,
-    ctx: LandingContext,
+    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
 ) -> bool:
     """Wait for required checks to pass. Returns True on success."""
     entry.state = PRState.WAITING_FOR_CHECKS
@@ -1202,7 +1190,7 @@ def wait_for_checks(
         if ctx.aborted:
             return False
 
-        pr_state = check_pr_state(entry.pr_number)
+        pr_state = github.pr_state(entry.pr_number)
         if pr_state == "MERGED":
             entry.state = PRState.MERGED
             return True
@@ -1211,7 +1199,9 @@ def wait_for_checks(
             entry.error_message = "PR was closed"
             return False
 
-        result = evaluate_checks(entry.pr_number, required_checks)
+        result = evaluate_checks(
+            github.checks(entry.pr_number), opts.required_checks
+        )
         entry.error_message = result.summary
 
         if result.status == CheckStatus.ALL_PASSING:
@@ -1219,37 +1209,29 @@ def wait_for_checks(
             return True
 
         if result.status == CheckStatus.FAILED:
-            if entry.check_retries >= max_retries:
+            if entry.check_retries >= opts.max_check_retries:
                 entry.state = PRState.FAILED
                 entry.error_message = (
-                    f"Checks failed after {max_retries} retries: "
+                    f"Checks failed after {opts.max_check_retries} retries: "
                     f"{', '.join(result.failed_names)}"
                 )
                 return False
             entry.check_retries += 1
             console.print(
                 f"[yellow]Rerunning failed checks "
-                f"(attempt {entry.check_retries}/{max_retries}): "
+                f"(attempt {entry.check_retries}/{opts.max_check_retries}): "
                 f"{', '.join(result.failed_names)}[/yellow]"
             )
-            rerun_failed_jobs(result.failed_runs)
+            github.rerun_failed(result.failed_runs)
 
         console.print(
             f"[dim]PR #{entry.pr_number}: {result.summary} — "
-            f"polling in {poll_interval}s[/dim]"
+            f"polling in {opts.poll_interval}s[/dim]"
         )
-        resilient_sleep(poll_interval)
+        resilient_sleep(opts.poll_interval)
 
 
 _MERGEABLE_STATES = {"CLEAN", "UNSTABLE", "HAS_HOOKS"}
-
-
-def get_merge_state(pr_number: int) -> dict:
-    data = gh_json(
-        ["pr", "view", str(pr_number), "--json", "state,mergeStateStatus,mergeable"]
-    )
-    assert isinstance(data, dict)
-    return data
 
 
 @dataclass
@@ -1260,14 +1242,14 @@ class MergeableResult:
 
 
 def wait_for_mergeable(
-    entry: StackEntry, *, poll_interval: int, ctx: LandingContext
+    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
 ) -> MergeableResult:
     """Wait until GitHub reports the PR as mergeable."""
     while True:
         if ctx.aborted:
             return MergeableResult(error="aborted")
 
-        data = get_merge_state(entry.pr_number)
+        data = github.merge_state(entry.pr_number)
         pr_state = data.get("state", "")
         merge_state = data.get("mergeStateStatus", "UNKNOWN")
         mergeable = data.get("mergeable", "UNKNOWN")
@@ -1294,11 +1276,11 @@ def wait_for_mergeable(
                 "Resolve them on the PR branch and push; autoland will "
                 "resume automatically.[/bold red]"
             )
-            resilient_sleep(poll_interval)
+            resilient_sleep(opts.poll_interval)
             continue
 
         # UNKNOWN can also mean "already in the merge queue".
-        if merge_state == "UNKNOWN" and has_merge_queue_entry(entry.pr_number):
+        if merge_state == "UNKNOWN" and github.in_merge_queue(entry.pr_number):
             console.print(
                 f"[cyan]PR #{entry.pr_number} is already in the merge queue — "
                 "skipping enqueue[/cyan]"
@@ -1308,29 +1290,30 @@ def wait_for_mergeable(
         entry.error_message = f"Waiting for mergeable state (currently {merge_state})"
         console.print(
             f"[dim]PR #{entry.pr_number}: mergeStateStatus={merge_state} — "
-            f"polling in {poll_interval}s[/dim]"
+            f"polling in {opts.poll_interval}s[/dim]"
         )
-        resilient_sleep(poll_interval)
+        resilient_sleep(opts.poll_interval)
+
+
+def _rewait_after_retry(
+    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
+) -> bool:
+    """Re-verify approval and checks before a queue retry."""
+    if not wait_for_approval(entry, opts=opts, ctx=ctx):
+        return False
+    entry.check_retries = 0
+    return wait_for_checks(entry, opts=opts, ctx=ctx)
 
 
 def enqueue_and_wait(
-    entry: StackEntry,
-    *,
-    required_checks: list[str],
-    max_queue_retries: int,
-    max_check_retries: int,
-    poll_interval: int,
-    merge_timeout: int,
-    ctx: LandingContext,
+    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
 ) -> bool:
     """Add the PR to the merge queue and wait for it to merge."""
     while True:
         if ctx.aborted:
             return False
 
-        mergeable_result = wait_for_mergeable(
-            entry, poll_interval=poll_interval, ctx=ctx
-        )
+        mergeable_result = wait_for_mergeable(entry, opts=opts, ctx=ctx)
         if not mergeable_result.ready:
             return False
         if mergeable_result.already_merged:
@@ -1348,27 +1331,18 @@ def enqueue_and_wait(
         )
 
         try:
-            add_to_merge_queue(entry.pr_number)
+            github.enqueue(entry.pr_number)
         except RuntimeError as e:
             entry.error_message = f"Failed to enqueue: {e}"
             console.print(f"[red]Failed to add to merge queue: {e}[/red]")
-            if entry.queue_retries >= max_queue_retries:
+            if entry.queue_retries >= opts.max_queue_retries:
                 entry.state = PRState.FAILED
                 entry.error_message = (
-                    f"Failed to enqueue after {max_queue_retries} attempts"
+                    f"Failed to enqueue after {opts.max_queue_retries} attempts"
                 )
                 return False
             entry.queue_retries += 1
-            if not wait_for_approval(entry, poll_interval=poll_interval, ctx=ctx):
-                return False
-            entry.check_retries = 0
-            if not wait_for_checks(
-                entry,
-                required_checks=required_checks,
-                max_retries=max_check_retries,
-                poll_interval=poll_interval,
-                ctx=ctx,
-            ):
+            if not _rewait_after_retry(entry, opts=opts, ctx=ctx):
                 return False
             continue
 
@@ -1377,12 +1351,12 @@ def enqueue_and_wait(
         while True:
             if ctx.aborted:
                 return False
-            if awake_elapsed > merge_timeout:
+            if awake_elapsed > opts.merge_timeout:
                 entry.state = PRState.FAILED
                 entry.error_message = "Timed out waiting for merge queue"
                 return False
 
-            poll = poll_merge_status(entry.pr_number)
+            poll = github.poll_merge(entry.pr_number)
             if poll.merged:
                 entry.state = PRState.MERGED
                 entry.error_message = ""
@@ -1399,23 +1373,14 @@ def enqueue_and_wait(
                     f"\n[yellow]PR #{entry.pr_number} was booted from the "
                     "merge queue[/yellow]"
                 )
-                if entry.queue_retries >= max_queue_retries:
+                if entry.queue_retries >= opts.max_queue_retries:
                     entry.state = PRState.FAILED
                     entry.error_message = (
-                        f"Booted from queue {max_queue_retries} times, giving up"
+                        f"Booted from queue {opts.max_queue_retries} times, giving up"
                     )
                     return False
                 entry.queue_retries += 1
-                if not wait_for_approval(entry, poll_interval=poll_interval, ctx=ctx):
-                    return False
-                entry.check_retries = 0
-                if not wait_for_checks(
-                    entry,
-                    required_checks=required_checks,
-                    max_retries=max_check_retries,
-                    poll_interval=poll_interval,
-                    ctx=ctx,
-                ):
+                if not _rewait_after_retry(entry, opts=opts, ctx=ctx):
                     return False
                 break  # re-enqueue in outer loop
 
@@ -1423,10 +1388,10 @@ def enqueue_and_wait(
             entry.error_message = f"In merge queue ({mins}m elapsed)..."
             console.print(
                 f"[dim]PR #{entry.pr_number}: in merge queue ({mins}m) — "
-                f"polling in {poll_interval}s[/dim]"
+                f"polling in {opts.poll_interval}s[/dim]"
             )
-            resilient_sleep(poll_interval)
-            awake_elapsed += poll_interval
+            resilient_sleep(opts.poll_interval)
+            awake_elapsed += opts.poll_interval
 
 
 def execute_plan(
@@ -1457,36 +1422,29 @@ def execute_plan(
                 f"Landing PR #{entry.pr_number} — {entry.title}[/bold]\n{'=' * 60}"
             )
 
-            if not wait_for_approval(entry, poll_interval=opts.poll_interval, ctx=ctx):
-                return _abort(ctx, checkpointer, f"PR #{entry.pr_number} approval wait was aborted")
+            if not wait_for_approval(entry, opts=opts, ctx=ctx):
+                return _abort(
+                    ctx, checkpointer,
+                    f"PR #{entry.pr_number} approval wait was aborted",
+                )
 
             if entry.state == PRState.MERGED:
                 _refresh_last_landed_sha(ctx, common)
             else:
-                if not wait_for_checks(
-                    entry,
-                    required_checks=opts.required_checks,
-                    max_retries=opts.max_check_retries,
-                    poll_interval=opts.poll_interval,
-                    ctx=ctx,
-                ):
+                if not wait_for_checks(entry, opts=opts, ctx=ctx):
                     return _abort(
-                        ctx, f"PR #{entry.pr_number} checks failed after retries"
+                        ctx, checkpointer,
+                        f"PR #{entry.pr_number} checks failed after retries",
                     )
 
                 if entry.state == PRState.MERGED:
                     _refresh_last_landed_sha(ctx, common)
                 else:
-                    if not enqueue_and_wait(
-                        entry,
-                        required_checks=opts.required_checks,
-                        max_queue_retries=opts.max_queue_retries,
-                        max_check_retries=opts.max_check_retries,
-                        poll_interval=opts.poll_interval,
-                        merge_timeout=opts.merge_timeout,
-                        ctx=ctx,
-                    ):
-                        return _abort(ctx, checkpointer, f"PR #{entry.pr_number} failed to merge")
+                    if not enqueue_and_wait(entry, opts=opts, ctx=ctx):
+                        return _abort(
+                            ctx, checkpointer,
+                            f"PR #{entry.pr_number} failed to merge",
+                        )
                     _refresh_last_landed_sha(ctx, common)
 
             has_more_land_steps = any(
@@ -1497,7 +1455,8 @@ def execute_plan(
                     rebase_and_resubmit(common)
                 except Exception as e:  # noqa: BLE001 - report any resubmit failure
                     return _abort(
-                        ctx, f"Rebase failed after merging #{entry.pr_number}: {e}"
+                        ctx, checkpointer,
+                        f"Rebase failed after merging #{entry.pr_number}: {e}",
                     )
 
         elif isinstance(step, DeployStep):
@@ -1507,15 +1466,11 @@ def execute_plan(
             )
             if not ctx.last_landed_sha:
                 _refresh_last_landed_sha(ctx, common)
-            if not wait_for_deploy(
-                step,
-                target_sha=ctx.last_landed_sha,
-                deploy_timeout=opts.deploy_timeout,
-                poll_interval=opts.poll_interval,
-                target=common.target,
-                ctx=ctx,
-            ):
-                return _abort(ctx, checkpointer, f"Deploy {step.workflow} failed or timed out")
+            if not wait_for_deploy(step, opts=opts, common=common, ctx=ctx):
+                return _abort(
+                    ctx, checkpointer,
+                    f"Deploy {step.workflow} failed or timed out",
+                )
 
         elif isinstance(step, ConfirmStep):
             if step.confirmed:
@@ -1533,7 +1488,7 @@ def execute_plan(
                     ).strip()
                 except EOFError:
                     return _abort(
-                        ctx,
+                        ctx, checkpointer,
                         "Confirm step received EOF — cannot confirm in "
                         "non-interactive mode",
                     )
@@ -1653,8 +1608,23 @@ def run_autoland(
     _run_fresh(common, opts)
 
 
+def _dispose_worktree(
+    worktree: Worktree | None, opts: AutolandOptions, *, succeeded: bool
+) -> None:
+    """Remove the worktree, or preserve it after a failure for debugging."""
+    if worktree is None:
+        return
+    if succeeded or opts.always_cleanup:
+        worktree.remove()
+    else:
+        worktree.announce_preserved()
+
+
 def _install_signal_handler(
-    ctx: LandingContext, checkpointer: AutolandCheckpointer, opts: AutolandOptions
+    ctx: LandingContext,
+    checkpointer: AutolandCheckpointer,
+    worktree: Worktree | None,
+    opts: AutolandOptions,
 ) -> None:
     def handler(_sig: int, _frame: object) -> None:
         ctx.aborted = True
@@ -1664,10 +1634,7 @@ def _install_signal_handler(
             "\n[red bold]Interrupted! State saved. Resume with --resume.[/red bold]\n"
         )
         print_status(ctx)
-        if opts.always_cleanup:
-            cleanup_worktree()
-        else:
-            print_worktree_path()
+        _dispose_worktree(worktree, opts, succeeded=False)
         sys.exit(130)
 
     signal.signal(signal.SIGINT, handler)
@@ -1676,6 +1643,7 @@ def _install_signal_handler(
 def _finish(
     ctx: LandingContext,
     checkpointer: AutolandCheckpointer,
+    worktree: Worktree | None,
     opts: AutolandOptions,
     *,
     success: bool,
@@ -1685,22 +1653,21 @@ def _finish(
     if success:
         console.print("\n[bold green]All PRs landed successfully![/bold green]\n")
         checkpointer.delete()
-        cleanup_worktree()
     else:
         console.print(f"\n[bold red]Landing failed: {ctx.abort_reason}[/bold red]\n")
         console.print(
             f"[dim]State saved to {checkpointer.path} — resume with --resume[/dim]\n"
         )
-        if opts.always_cleanup:
-            cleanup_worktree()
-        else:
-            print_worktree_path()
+    _dispose_worktree(worktree, opts, succeeded=success)
+    if not success:
         sys.exit(1)
 
 
 def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
+    worktree: Worktree | None = None
     if opts.branch:
-        setup_worktree(opts.branch)
+        worktree = Worktree(opts.branch)
+        worktree.create()
         console.print(
             f"[green]Working in temporary worktree for [bold]{opts.branch}"
             "[/bold][/green]\n"
@@ -1733,8 +1700,11 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         return
 
     console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
-    _install_signal_handler(ctx, checkpointer, opts)
-    _finish(ctx, checkpointer, opts, success=execute_plan(ctx, common, opts, checkpointer))
+    _install_signal_handler(ctx, checkpointer, worktree, opts)
+    _finish(
+        ctx, checkpointer, worktree, opts,
+        success=execute_plan(ctx, common, opts, checkpointer),
+    )
 
 
 def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
@@ -1763,8 +1733,10 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         )
         sys.exit(1)
 
+    worktree: Worktree | None = None
     if opts.branch or checkpointer.branch != _current_branch():
-        setup_worktree(opts.branch or checkpointer.branch)
+        worktree = Worktree(opts.branch or checkpointer.branch)
+        worktree.create()
 
     console.print("[dim]Refreshing PR state from GitHub...[/dim]")
     enrich_stack(ctx.stack)
@@ -1774,9 +1746,13 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
     if ctx.current_step >= len(ctx.plan):
         console.print("[green]All steps already completed — nothing to resume.[/green]")
         checkpointer.delete()
+        _dispose_worktree(worktree, opts, succeeded=True)
         return
 
     print_status(ctx)
     console.print(f"[dim]State file: {sf_path}[/dim]\n")
-    _install_signal_handler(ctx, checkpointer, opts)
-    _finish(ctx, checkpointer, opts, success=execute_plan(ctx, common, opts, checkpointer))
+    _install_signal_handler(ctx, checkpointer, worktree, opts)
+    _finish(
+        ctx, checkpointer, worktree, opts,
+        success=execute_plan(ctx, common, opts, checkpointer),
+    )

@@ -176,7 +176,6 @@ multiline-quotes = "double"
 "src/stack_pr/autoland.py" = [
     "S101",  # asserts used to narrow gh JSON result types
     "S607",  # git/gh/$EDITOR invoked by name (same class as the global S603)
-    "PLW0603",  # module globals for the signal handler / worktree / state file
     "C901",  # the land/enqueue/execute loops are intrinsically branchy
     "PLR0911",
     "PLR0912",
