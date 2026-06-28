@@ -1519,7 +1519,7 @@ def warn_if_content_differs(
 def adopt_commit(
     e: StackEntry, pr: str, branch: str, *, current_branch: str, verbose: bool
 ) -> None:
-    """Embed stack-info metadata into the bottom commit of the stack.
+    """Embed stack-info metadata into a selected commit of the stack.
 
     The target commit may not be HEAD (commits can be stacked on top of it), so
     the message is rewritten on a detached checkout and the rest of the branch
