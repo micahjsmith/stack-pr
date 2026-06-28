@@ -135,6 +135,11 @@ That's it!
   This embeds stack metadata into the bottom-most commit pointing at that PR, so
   subsequent `submit` runs update the existing PR (preserving its review
   history) instead of creating a new one.
+- `autoland` - land the whole stack automatically through the GitHub merge
+  queue: wait for approvals and CI (retrying flaky checks), enqueue each PR
+  bottom-to-top, rebase and re-submit the rest after each merge, and resume
+  cleanly after an interruption. Requires a repo that uses the GitHub merge
+  queue (see `autoland.merge_queue` below).
 - `config` - set configuration values in the config file. Similar to `git config`,
   it takes a setting in the format `<section>.<key>=<value>` and updates the
   config file (`.stack-pr.cfg` by default).
@@ -456,6 +461,58 @@ Stacking a new PR *underneath* an existing one (so the new change lands first):
 Alternatively, build the stack in any order first and then adopt the existing
 PR onto the right commit directly with `stack-pr adopt --commit <ref>`.
 
+#### autoland
+
+Land the entire stack automatically through the GitHub merge queue, one PR at a
+time from the bottom up. Run it from the repo root while on the stack's head
+branch. For each PR it waits for approval and CI (re-running flaky checks),
+adds the PR to the merge queue (retrying if the PR is booted), and after each
+merge rebases and re-submits the rest of the stack. Progress is checkpointed so
+an interrupted run can be resumed.
+
+> **Note**: `autoland` currently supports only repositories that use the GitHub
+> merge queue. On other repositories it fails fast with a "not implemented"
+> error; use `stack-pr land` instead. (Direct-merge autoland is future work.)
+
+Options:
+
+- `--dry-run`: Discover and display the stack, then exit.
+- `--branch BRANCH`: Land a stack rooted on `BRANCH` using a temporary worktree
+  (so your current checkout is left untouched). The worktree is removed on
+  success and preserved on failure for debugging.
+- `--always-cleanup`: Always remove the temporary worktree, even on failure.
+- `-i, --interactive`: Edit the landing plan in `$EDITOR` first, inserting
+  `deploy` checkpoints (wait for a named workflow to ship the landed code) and
+  `confirm` checkpoints (pause for manual confirmation) between land steps.
+- `--resume`: Resume a previously interrupted run from its checkpoint.
+- `--state-file PATH`: Override the checkpoint path (default:
+  `~/.stack-pr/autoland/<branch>.json`).
+- `--poll-interval`, `--max-check-retries`, `--max-queue-retries`,
+  `--deploy-timeout`: Override the corresponding `[autoland]` config values.
+
+Everything repo-specific is configured under `[autoland]` (see [Config
+files](#config-files)), so a repository captures its workflow in
+`.stack-pr.cfg`:
+
+```ini
+[repo]
+target = main
+[autoland]
+merge_queue = true
+required_checks = test,lint
+poll_interval = 120
+max_check_retries = 3
+max_queue_retries = 3
+```
+
+- `merge_queue` (default `false`): must be `true` to enable `autoland`.
+- `required_checks` (default empty): comma-separated CI check names that gate a
+  merge. When empty, all reported (non-skipped) checks must pass.
+
+Richer live progress tables are shown when the optional `rich` dependency is
+installed (`pipx install 'stack-pr[rich]'` or add the `rich` extra); otherwise
+`autoland` prints plain-text status.
+
 #### view
 
 Inspect the current stack
@@ -520,6 +577,14 @@ reviewer=GithubHandle1,GithubHandle2
 branch_name_template=$USERNAME/$BRANCH
 [land]
 style=bottom-only
+[autoland]
+merge_queue=True
+required_checks=test,lint
+poll_interval=120
+max_check_retries=3
+max_queue_retries=3
+merge_timeout=3600
+deploy_timeout=10800
 ```
 
 ## Implementation Details

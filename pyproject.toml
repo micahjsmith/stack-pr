@@ -37,6 +37,11 @@ dev = [
     "mypy",
     "ruff",
 ]
+# Optional: richer `autoland` output (live status tables). Falls back to
+# plain text when not installed.
+rich = [
+    "rich>=13.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/modular/stack-pr"
@@ -167,6 +172,16 @@ inline-quotes = "double"
 multiline-quotes = "double"
 
 [tool.ruff.lint.extend-per-file-ignores]
+# autoland is a long-running orchestration state machine driving git/gh.
+"src/stack_pr/autoland.py" = [
+    "S101",  # asserts used to narrow gh JSON result types
+    "S607",  # git/gh/$EDITOR invoked by name (same class as the global S603)
+    "C901",  # the land/enqueue/execute loops are intrinsically branchy
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "TRY300",
+]
 # Allow certain useful patterns in tests
 "tests/**/*.py" = [
     "S101", # allow assert statements within if statements
