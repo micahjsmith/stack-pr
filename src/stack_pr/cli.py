@@ -1803,6 +1803,40 @@ def command_config(config_file: str, setting: str) -> None:
     print(f"Set {section}.{key} = {value}")
 
 
+def command_install(name: str, *, local: bool) -> None:
+    """Install stack-pr as a git alias so it can be run as `git <name>`.
+
+    Writes e.g. ``[alias] stack = !stack-pr`` to the user's git config.
+    """
+    scope = "--local" if local else "--global"
+    alias_value = "!stack-pr"
+    run_shell_command(
+        ["git", "config", scope, f"alias.{name}", alias_value],
+        quiet=True,
+    )
+    print(f"Installed git alias '{name}' -> '{alias_value}' ({scope}).")
+    print("\nYou can now invoke stack-pr through git, e.g.:")
+    print(f"  git {name} view")
+    print(f"  git {name} submit")
+    print(
+        f"  git {name} help     # note: 'git {name} --help' is intercepted by git,"
+    )
+    print(f"                      # so use 'git {name} help' instead.")
+
+
+def command_help(parser: argparse.ArgumentParser, topic: str | None) -> None:
+    """Print help. With a *topic*, show that subcommand's help.
+
+    Exists so `git stack help [cmd]` works: git intercepts `git stack --help`
+    for aliases and only prints "'stack' is aliased to '!stack-pr'".
+    """
+    if topic:
+        # Defer to argparse's own per-subcommand help (this exits the process).
+        parser.parse_args([topic, "--help"])
+    else:
+        parser.print_help()
+
+
 # ===----------------------------------------------------------------------=== #
 # Main entry point
 # ===----------------------------------------------------------------------=== #
@@ -1950,6 +1984,32 @@ def create_argparser(
         help="Configuration setting in format <section>.<key>=<value>",
     )
 
+    parser_install = subparsers.add_parser(
+        "install",
+        help="Install stack-pr as a git alias (e.g. so `git stack` works)",
+    )
+    parser_install.add_argument(
+        "--name",
+        default="stack",
+        help="Git alias name to create (default: stack, i.e. `git stack ...`).",
+    )
+    parser_install.add_argument(
+        "--local",
+        action="store_true",
+        help="Write to the repository's git config instead of the global one.",
+    )
+
+    parser_help = subparsers.add_parser(
+        "help",
+        help="Show help (use `git stack help`; `git stack --help` is intercepted by git)",
+    )
+    parser_help.add_argument(
+        "topic",
+        nargs="?",
+        default=None,
+        help="Optional subcommand to show help for (e.g. `help submit`).",
+    )
+
     return parser
 
 
@@ -1960,7 +2020,7 @@ def load_config(config_file: str | Path) -> configparser.ConfigParser:
     return config
 
 
-def main() -> None:  # noqa: PLR0912, PLR0915
+def main() -> None:  # noqa: PLR0912, PLR0915, C901
     repo_config_file = get_repo_root() / ".stack-pr.cfg"
     config_file = os.getenv("STACKPR_CONFIG", repo_config_file)
     config = load_config(config_file)
@@ -1980,6 +2040,14 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     # Handle config command early since it doesn't need git repo setup
     if args.command == "config":
         command_config(config_file, args.setting)
+        return
+
+    # These commands don't need gh/target/stack setup either.
+    if args.command == "help":
+        command_help(parser, args.topic)
+        return
+    if args.command == "install":
+        command_install(args.name, local=args.local)
         return
 
     # Make sure "$ID" is present in the branch name template and append it if not
