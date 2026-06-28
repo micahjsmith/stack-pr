@@ -110,6 +110,11 @@ RE_STACK_INFO_LINE = re.compile(
 RE_PR_TOC = re.compile(
     r"^Stacked PRs:\r?\n(^ \* (__->__)?#\d+\r?\n)*\r?\n", re.MULTILINE
 )
+# A single entry in the cross-links table of contents, e.g. " * __->__#42".
+RE_TOC_ENTRY = re.compile(r"^ \* (?:__->__)?#(\d+)\s*$", re.MULTILINE)
+
+# Header line introducing the cross-links table of contents.
+STACK_TOC_HEADER = "Stacked PRs:"
 
 # Delimeter for PR body
 CROSS_LINKS_DELIMETER = "--- --- ---"
@@ -810,18 +815,69 @@ def create_pr(e: StackEntry, *, is_draft: bool, reviewer: str = "") -> None:
     e.pr = r.split()[-1]
 
 
-def generate_toc(st: list[StackEntry], current: str) -> str:
-    # Don't generate TOC for single PR
-    if len(st) == 1:
+def extract_toc_pr_ids(body: str) -> list[str]:
+    """Extract the PR ids recorded in a PR body's cross-links table.
+
+    Returns the ids in bottom-to-top stack order (the table is rendered
+    top-first, so the result is reversed). Returns an empty list if the body
+    doesn't contain a recognizable cross-links table.
+    """
+    if CROSS_LINKS_DELIMETER not in body:
+        return []
+    header = body.split(CROSS_LINKS_DELIMETER, 1)[0]
+    if STACK_TOC_HEADER not in header:
+        return []
+    # findall yields ids top-first (as rendered); reverse to bottom-first.
+    return RE_TOC_ENTRY.findall(header)[::-1]
+
+
+def get_pr_state(pr_id: str) -> str:
+    """Return the GitHub state of a PR: 'OPEN', 'MERGED', or 'CLOSED'."""
+    out = get_command_output(["gh", "pr", "view", pr_id, "--json", "state"])
+    return str(json.loads(out)["state"])
+
+
+def build_stack_pr_list(st: list[StackEntry]) -> list[str]:
+    """Build the ordered list of PR ids to show in every PR's cross-links.
+
+    The list is maintained across submits: PRs that have left the active stack
+    but were previously part of it (i.e. they merged or were closed) are kept,
+    pinned below the active stack in their original order. PRs that left the
+    stack but are still open are dropped. The result is bottom-to-top order.
+    """
+    active_ids = [last(e.pr) for e in st]
+    active_set = set(active_ids)
+
+    # Recover the previously recorded list from a surviving PR's body. Every PR
+    # carries the full list, so the first one with a recognizable table wins.
+    historical: list[str] = []
+    for e in st:
+        historical = extract_toc_pr_ids(get_pr_body(e))
+        if historical:
+            break
+
+    # Keep historical entries that have left the stack but aren't open anymore.
+    inactive: list[str] = []
+    for pr_id in historical:
+        if pr_id in active_set or pr_id in inactive:
+            continue
+        if get_pr_state(pr_id) != "OPEN":
+            inactive.append(pr_id)
+
+    return inactive + active_ids
+
+
+def generate_toc(pr_ids: list[str], current: str) -> str:
+    # Don't generate a table of contents for a lone PR with no history.
+    if len(pr_ids) <= 1:
         return ""
 
-    def toc_entry(se: StackEntry) -> str:
-        pr_id = last(se.pr)
+    def toc_entry(pr_id: str) -> str:
         arrow = "__->__" if pr_id == current else ""
         return f" * {arrow}#{pr_id}\n"
 
-    entries = (toc_entry(se) for se in st[::-1])
-    return f"Stacked PRs:\n{''.join(entries)}\n"
+    entries = (toc_entry(pr_id) for pr_id in pr_ids[::-1])
+    return f"{STACK_TOC_HEADER}\n{''.join(entries)}\n"
 
 
 def get_pr_body(e: StackEntry) -> str:
@@ -832,9 +888,13 @@ def get_pr_body(e: StackEntry) -> str:
 
 
 def add_cross_links(st: list[StackEntry], *, keep_body: bool, verbose: bool) -> None:
+    # Build the maintained list of PRs once - it's identical for every PR in
+    # the stack (apart from which one is marked as current).
+    pr_ids = build_stack_pr_list(st)
+
     for e in st:
         pr_id = last(e.pr)
-        pr_toc = generate_toc(st, pr_id)
+        pr_toc = generate_toc(pr_ids, pr_id)
 
         title = e.commit.title()
         body = e.commit.commit_msg()
