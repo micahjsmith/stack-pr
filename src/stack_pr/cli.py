@@ -1936,6 +1936,11 @@ def create_argparser(
         parents=[common_parser],
     )
 
+    # autoland lives in its own module to keep this file small.
+    from stack_pr import autoland  # noqa: PLC0415
+
+    autoland.register_parser(subparsers, common_parser)
+
     parser_config = subparsers.add_parser(
         "config",
         help="Set a configuration value",
@@ -1955,7 +1960,7 @@ def load_config(config_file: str | Path) -> configparser.ConfigParser:
     return config
 
 
-def main() -> None:  # noqa: PLR0912
+def main() -> None:  # noqa: PLR0912, PLR0915
     repo_config_file = get_repo_root() / ".stack-pr.cfg"
     config_file = os.getenv("STACKPR_CONFIG", repo_config_file)
     config = load_config(config_file)
@@ -2004,7 +2009,9 @@ def main() -> None:  # noqa: PLR0912
             output = result.stdout.decode() if result.stdout else ""
             stashed_changes = "No local changes to save" not in output
 
-        if args.command != "view" and not is_repo_clean():
+        # autoland may operate in a temporary worktree (--branch), so the
+        # primary checkout being dirty shouldn't block it.
+        if args.command not in ("view", "autoland") and not is_repo_clean():
             error(ERROR_REPO_DIRTY)
             return
         check_target_branch_exists(common_args)
@@ -2030,6 +2037,10 @@ def main() -> None:  # noqa: PLR0912
             )
         elif args.command == "view":
             command_view(common_args)
+        elif args.command == "autoland":
+            from stack_pr import autoland  # noqa: PLC0415
+
+            autoland.run_autoland(common_args, args, config)
         else:
             print(h(red("Unknown command: " + args.command)))
             return

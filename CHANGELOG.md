@@ -7,6 +7,12 @@
 * The `Stacked PRs:` cross-links list is now maintained as PRs land: merged and
   closed PRs are kept in the list of later PRs instead of disappearing after a
   subsequent `submit` (#53).
+* Added an `autoland` command that lands a whole stack through the GitHub merge
+  queue (waits for approval/CI with flaky-check retries, enqueues bottom-to-top,
+  rebases and re-submits after each merge, and supports `--resume`, `--branch`
+  worktrees, and interactive deploy/confirm checkpoints). Repo-specific settings
+  live under `[autoland]` config; requires `autoland.merge_queue=true`. Install
+  the optional `rich` extra for live progress tables.
 
 # Version 0.1.3
 
