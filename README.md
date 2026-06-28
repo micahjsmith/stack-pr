@@ -411,35 +411,46 @@ Typical workflow (stack a new PR *on top* of an existing one):
 ```bash
 # You already have an open PR for branch 'my-feature'.
 git checkout my-feature
+stack-pr adopt                  # adopt the existing PR for 'my-feature' first
 git commit -m "Second change"   # stack a new change on top
-stack-pr adopt                  # adopt the existing PR for 'my-feature'
 stack-pr view                   # confirm the bottom PR is now managed
 stack-pr submit                 # update the existing PR + create the new one
 ```
 
 Stacking a new PR *underneath* an existing one (so the new change lands first):
 
-```bash
-# Branch 'my-feature' has an open PR you want to keep as the second PR.
-git checkout my-feature
+1. Collapse the branch into a single commit (one commit == one PR) with an
+   interactive rebase, marking every commit except the first as `squash` (or
+   `fixup`):
 
-# 1. Collapse the branch into a single commit (one commit == one PR), then
-#    adopt the existing PR onto it while it is still the bottom commit:
-git reset --soft $(git merge-base origin/main HEAD)
-git commit                      # combined message for the existing PR
-stack-pr adopt
+   ```bash
+   git checkout my-feature
+   git rebase -i $(git merge-base origin/main HEAD)
+   ```
 
-# 2. Insert the new change beneath the adopted commit:
-git branch tmp-existing
-git reset --hard origin/main
-# ... make the new change ...
-git commit -m "New change (lands first)"
-git cherry-pick tmp-existing    # replay the adopted commit (keeps its metadata)
-git branch -D tmp-existing
+2. Adopt the existing PR onto that commit while it is still the bottom commit:
 
-stack-pr view                   # new commit at the bottom, existing PR on top
-stack-pr submit                 # creates the new PR; re-bases the existing one onto it
-```
+   ```bash
+   stack-pr adopt
+   ```
+
+3. Insert the new change beneath the adopted commit by building it on top of
+   `main` and rebasing the adopted commit onto it:
+
+   ```bash
+   git checkout -b tmp-new-bottom origin/main
+   # ... make the new change ...
+   git commit -m "New change (lands first)"
+   git rebase --onto tmp-new-bottom origin/main my-feature
+   git branch -D tmp-new-bottom
+   ```
+
+4. Review and submit the stack:
+
+   ```bash
+   stack-pr view     # new commit at the bottom, existing PR on top
+   stack-pr submit   # creates the new PR; re-bases the existing one onto it
+   ```
 
 Alternatively, build the stack in any order first and then adopt the existing
 PR onto the right commit directly with `stack-pr adopt --commit <ref>`.
