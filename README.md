@@ -15,11 +15,19 @@ Example:
 
 ![StackedPRExample1](https://modular-assets.s3.amazonaws.com/images/stackpr/example_0.png)
 
+## Comparison
+
+There are several tool that help with stacked PRs.
+
+- stack-pr (this project): A stack is a set of commits on a branch. Each commit is one PR. The commits are modified over time via a interactive rebase-based workflow. Each PR description automatically gets a preamble section showing the full stack. The tool manages a mapping from commit => temp branch => PR with state stored in the commit body itself. Support for GitHub only via the `gh` CLI.
+- [git-spice](https://abhinav.github.io/git-spice/): A stack is a set of branches. Each branch is one PR. The branches are modified over time via normal git operations. Branches must be tracked by the tool with a separate local state store. A special restack commit rebases all the branches. Support for non-linear stack branches and multiple git hosting providers.
+- [jj-stack](https://github.com/keanemind/jj-stack/): A stack is a set of Jujutsu bookmarks. Jujutsu already conceptually supports stacks locally, so this tool focuses on syncing the local repo state to GitHub.
+
 ## Installation
 
 ### Dependencies
 
-This is a non-comprehensive list of dependencies required by `stack-pr.py`:
+This is a non-comprehensive list of dependencies required by `stack-pr`:
 
 - Install `gh`, e.g., `brew install gh` on MacOS.
 - Run `gh auth login` with SSH
@@ -31,7 +39,7 @@ This fork is not published to PyPI. To install it directly from the GitHub repo
 via [pipx](https://pipx.pypa.io/stable/) run:
 
 ```bash
-pipx install git+https://github.com/micahjsmith/stack-pr.git
+pipx install 'stack-pr[rich] @ git+https://github.com/micahjsmith/stack-pr.git'
 ```
 
 ### Manual installation from source
@@ -90,7 +98,7 @@ git rebase main       # Rebase your commits on top of main
 stack-pr submit       # Resubmit to update all PRs
 ```
 
-7. When your PRs are ready to merge, you have two options:
+7. When your PRs are ready to merge, you have three options:
 
 **Option A**: Using `stack-pr land`:
 ```bash
@@ -111,6 +119,11 @@ This will:
    ```
 3. Repeat for each PR in the stack
 
+**Option C**: Using `stack-pr autoland` (if your repo uses GitHub merge queue):
+```bash
+stack-pr autoland
+```
+
 That's it!
 
 > **Pro-tip**: Run `stack-pr view` frequently - it's a safe command that helps you understand the current state of your stack and catch any potential issues early.
@@ -129,12 +142,15 @@ That's it!
 - `abandon` - remove all stack metadata from the given set of commits. Apart
   from removing the metadata from the affected commits, this command deletes
   the corresponding local and remote branches and closes the PRs.
-- `land` - merge the bottom-most PR in the current stack and rebase the rest of
-  the stack on the latest main.
 - `adopt` - bring an existing, normally-created PR under `stack-pr` management.
   This embeds stack metadata into the bottom-most commit pointing at that PR, so
   subsequent `submit` runs update the existing PR (preserving its review
   history) instead of creating a new one.
+- `land` - merge the bottom-most PR in the current stack and rebase the rest of
+  the stack on the latest main.
+
+`stack-pr` also has several other commands:
+
 - `autoland` - land the whole stack automatically through the GitHub merge
   queue: wait for approvals and CI (retrying flaky checks), enqueue each PR
   bottom-to-top, rebase and re-submit the rest after each merge, and resume
@@ -150,18 +166,21 @@ A usual workflow is the following:
 while not ready to merge:
     make local changes
     commit to local git repo or amend existing commits
-    create or update the stack with `stack-pr.py submit`
-merge changes with `stack-pr.py land`
+    create or update the stack with `stack-pr submit`
+merge changes with `stack-pr land`
 ```
 
 You can also use `view` at any point to examine the current state, and
 `abandon` to drop the stack.
 
-Under the hood the tool creates and maintains branches named
+### How it works
+
+Under the hood, the tool creates and maintains branches named
 `$USERNAME/stack/$BRANCH_NUM` (the name pattern can be customized via
-`--branch-name-template` option) and embeds stack metadata into commit messages,
-but you are not supposed to work with those branches or edit that metadata
-manually. I.e. instead of pushing to these branches you should use `submit`,
+`--branch-name-template` option) and embeds stack metadata into commit messages (see [](#implementation-details)).
+
+You don't work with those managed branches or edit that metadata
+manually. Instead of pushing to these branches you should use `submit`,
 instead of deleting them you should use `abandon` and instead of merging them
 you should use `land`.
 
@@ -570,13 +589,16 @@ draft=False
 keep_body=False
 stash=False
 show_tips=True
+
 [repo]
 remote=origin
 target=main
 reviewer=GithubHandle1,GithubHandle2
 branch_name_template=$USERNAME/$BRANCH
+
 [land]
 style=bottom-only
+
 [autoland]
 merge_queue=True
 required_checks=test,lint
