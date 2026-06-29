@@ -13,6 +13,9 @@
   worktrees, and interactive deploy/confirm checkpoints). Repo-specific settings
   live under `[autoland]` config; requires `autoland.merge_queue=true`. Install
   the optional `rich` extra for live progress tables.
+* Added an `install` command that registers stack-pr as a git alias (e.g.
+  `git stack`), plus a `help` command so `git stack help` works (git intercepts
+  `git stack --help` for aliases).
 
 # Version 0.1.3
 

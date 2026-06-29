@@ -46,6 +46,18 @@ pipx install .
 
 `stack-pr` allows you to work with stacked PRs: submit, view, and land them.
 
+### Use as a git subcommand
+
+If you'd rather drive the tool through `git`, install it as a git alias:
+
+```bash
+stack-pr install
+```
+
+```bash
+git stack view
+git stack submit
+```
 ### Basic Workflow
 
 The most common workflow is simple:
@@ -143,6 +155,10 @@ That's it!
 - `config` - set configuration values in the config file. Similar to `git config`,
   it takes a setting in the format `<section>.<key>=<value>` and updates the
   config file (`.stack-pr.cfg` by default).
+- `install` - install stack-pr as a git alias so it can be invoked as
+  `git stack` (see [Use as a git subcommand](#use-as-a-git-subcommand)).
+- `help` - print help. Useful as `git stack help`, since `git stack --help` is
+  intercepted by git for aliases.
 
 A usual workflow is the following:
 
@@ -553,6 +569,29 @@ stack-pr config land.style=bottom-only
 ```
 
 The config command modifies the config file (the `.stack-pr.cfg` file in the repo root by default, or the path specified by `STACKPR_CONFIG` environment variable). If the file doesn't exist, it will be created. If a setting already exists, it will be updated.
+
+#### install
+
+Install stack-pr as a git alias so it can be invoked as `git <name>` (see
+[Use as a git subcommand](#use-as-a-git-subcommand)). This writes
+`alias.<name> = !stack-pr` to your git config.
+
+Options:
+
+- `--name`: Alias name to create (default: `stack`, i.e. `git stack ...`).
+- `--local`: Write to the current repository's git config instead of the
+  global one.
+
+#### help
+
+Print help, optionally for a specific subcommand. This exists primarily so
+`git stack help` works: git intercepts `git stack --help` for aliases and only
+prints `'stack' is aliased to '!stack-pr'`.
+
+Arguments:
+
+- `topic` (optional): Subcommand to show help for, e.g. `stack-pr help submit`
+  (or `git stack help submit`).
 
 ### Config files
 
