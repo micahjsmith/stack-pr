@@ -54,35 +54,10 @@ If you'd rather drive the tool through `git`, install it as a git alias:
 stack-pr install
 ```
 
-This adds an alias to your global git config so that `git stack` runs
-`stack-pr`:
-
-```ini
-[alias]
-    stack = !stack-pr
-```
-
-You can then use any command via git:
-
 ```bash
 git stack view
 git stack submit
-git stack land
 ```
-
-Use `--name` to pick a different alias and `--local` to write to the current
-repo's config instead of the global one:
-
-```bash
-stack-pr install --name sp        # enables `git sp ...`
-stack-pr install --local          # write to ./.git/config
-```
-
-> **Note**: `git stack --help` will **not** show stack-pr's help — git
-> intercepts `--help` for aliases and only prints
-> `'stack' is aliased to '!stack-pr'`. Use **`git stack help`** instead (and
-> `git stack help <command>` for a specific subcommand).
-
 ### Basic Workflow
 
 The most common workflow is simple:
