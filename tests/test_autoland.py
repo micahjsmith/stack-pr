@@ -185,12 +185,18 @@ def _stack(n: int) -> list:
 
 
 def test_parse_plan_with_workflow_and_confirm() -> None:
-    text = "l\nw deploy.yaml\nc ship it\nl\n"
+    text = "l\nw deploy.yaml\nc QA sign-off complete\nl\n"
     steps = parse_plan(text, _stack(2))
     assert [type(s) for s in steps] == [LandStep, WorkflowStep, ConfirmStep, LandStep]
     assert steps[1].workflow == "deploy.yaml"
-    assert steps[2].message == "ship it"
+    assert steps[2].condition == "QA sign-off complete"
     assert [s.entry_index for s in steps if isinstance(s, LandStep)] == [0, 1]
+
+
+def test_parse_plan_bare_confirm_has_no_condition() -> None:
+    steps = parse_plan("l\nc\n", _stack(1))
+    assert [type(s) for s in steps] == [LandStep, ConfirmStep]
+    assert steps[1].condition == ""
 
 
 def test_parse_plan_rejects_old_deploy_letter() -> None:
