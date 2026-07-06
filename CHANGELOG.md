@@ -1,5 +1,23 @@
 # Top of tree
 
+* Fixed `autoland` re-submitting the wrong commit range after each merge. The
+  stack base was deduced once at startup; after a PR merged and the stack was
+  rebased onto an advanced target, that stale base made `submit` sweep in every
+  commit merged by others in the meantime — trying to open bogus PRs for
+  unrelated changes and aborting the land. `autoland` now re-deduces the base
+  against the current target after each rebase. (#15)
+* Fixed `submit` flipping existing ready PRs back to draft. To avoid closing
+  PRs while branches are reordered, `submit` temporarily repointed their base
+  branches and had marked them draft during that window; an interrupted run (or
+  any error before the un-draft step) left them stuck as drafts. `submit` no
+  longer touches the draft/ready status of existing PRs at all — that state is
+  the user's to control. (#14)
+* Fixed `autoland` workflow checkpoints (`w <workflow>`) polling forever in
+  busy repos. The checkpoint targeted the current `origin/<target>` HEAD, which
+  can advance past the landed PR's merge commit (bot commits, other PRs) between
+  merge and the check — so a green workflow run on the actual merge commit was
+  rejected as "too old". The checkpoint now targets the landed PR's exact merge
+  commit. (#12)
 * Fixed a crash during `submit` when a PR in the stack had been added to a
   GitHub merge queue. GitHub refuses to change such a PR's base branch, which
   previously aborted the whole submit; now stack-pr warns and leaves that PR's
@@ -18,9 +36,12 @@
   support `w <workflow>` steps (wait for a named GitHub Actions workflow to
   complete with the landed code) and `c [condition]` confirmation steps between
   land steps (the optional condition names what to verify before proceeding and
-  is shown in the prompt). Repo-specific settings live under `[autoland]`
-  config; requires `autoland.merge_queue=true`. Install the optional `rich`
-  extra for live progress tables. (#3, #7, #9)
+  is shown in the prompt); setting `autoland.default_workflow` pre-fills the
+  plan with a trailing `w <default_workflow>` step. A per-branch filesystem lock prevents
+  two autolands from running on the same branch at once, and starting a fresh
+  run over an existing checkpoint requires confirmation. Repo-specific settings live
+  under `[autoland]` config; requires `autoland.merge_queue=true`. Install the
+  optional `rich` extra for live progress tables. (#3, #7, #8, #9)
 * Added an `install` command that registers stack-pr as a git alias (e.g.
   `git stack`), plus a `help` command so `git stack help` works (git intercepts
   `git stack --help` for aliases).

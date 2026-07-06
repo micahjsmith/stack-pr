@@ -523,12 +523,24 @@ Options:
   `condition` after `c` is optional: it names what you want to verify before
   proceeding (e.g. `c QA sign-off complete`), and is shown in the prompt when
   autoland reaches that step (`Confirm "QA sign-off complete" is complete —
-  ready to proceed?`). A bare `c` just prompts `Ready to proceed?`.
+  ready to proceed?`). A bare `c` just prompts `Ready to proceed?`. When
+  `autoland.default_workflow` is configured, the pre-filled plan already ends
+  with a `w <default_workflow>` step, which you can edit or delete.
 - `--resume`: Resume a previously interrupted run from its checkpoint.
 - `--state-file PATH`: Override the checkpoint path (default:
   `~/.stack-pr/autoland/<branch>.json`).
 - `--poll-interval`, `--max-check-retries`, `--max-queue-retries`,
   `--workflow-timeout`: Override the corresponding `[autoland]` config values.
+
+Only one `autoland` can run against a given branch at a time: while a run is in
+progress it holds a per-branch lock (`~/.stack-pr/autoland/<branch>.json.lock`)
+next to its checkpoint, so a second `autoland` on the same branch exits
+immediately rather than racing the first. The lock is released automatically
+when the run ends — including on failure or Ctrl+C — while the checkpoint is
+kept so you can `--resume`. If you start a *new* (non-`--resume`) `autoland`
+while a checkpoint from a previous run still exists, `autoland` warns that a
+land is already in progress and asks you to confirm before overwriting it (the
+previous run then can no longer be resumed).
 
 Everything repo-specific is configured under `[autoland]` (see [Config
 files](#config-files)), so a repository captures its workflow in
@@ -543,11 +555,16 @@ required_checks = test,lint
 poll_interval = 120
 max_check_retries = 3
 max_queue_retries = 3
+default_workflow = deploy.yaml
 ```
 
 - `merge_queue` (default `false`): must be `true` to enable `autoland`.
 - `required_checks` (default empty): comma-separated CI check names that gate a
   merge. When empty, all reported (non-skipped) checks must pass.
+- `default_workflow` (default empty): when set, an interactive (`-i`) landing
+  plan is pre-filled with a `w <default_workflow>` step after the land steps,
+  so a repo's usual post-land workflow wait is there by default (still
+  editable/removable in `$EDITOR`).
 
 Richer live progress tables are shown when the optional `rich` dependency is
 installed (`pipx install 'stack-pr[rich]'` or add the `rich` extra); otherwise
@@ -682,6 +699,7 @@ max_check_retries=3
 max_queue_retries=3
 merge_timeout=3600
 workflow_timeout=10800
+default_workflow=deploy.yaml
 ```
 
 ## Implementation Details
