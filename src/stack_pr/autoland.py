@@ -205,9 +205,15 @@ class WorkflowStep:
 
 @dataclass
 class ConfirmStep:
-    """Pause until the user types ``y``/``Y`` and presses Enter to continue."""
+    """Pause for manual confirmation before continuing.
 
-    message: str = "Confirm to continue"
+    ``condition`` is an optional human-readable thing to verify before
+    proceeding (e.g. ``"QA sign-off complete"``). When set, it is shown in the
+    confirmation prompt; when empty, a generic prompt is shown. Either way the
+    step waits until the user types ``y``/``Y`` and presses Enter.
+    """
+
+    condition: str = ""
     confirmed: bool = False
 
 
@@ -940,7 +946,9 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
         "# Autoland plan — edit steps below.",
         "# l             = land the next PR in the stack",
         "# w <workflow>  = wait for a workflow to complete",
-        "# c <message>   = pause and wait for manual confirmation",
+        "# c [condition] = pause for manual confirmation; the optional",
+        "#                 condition names what to verify before proceeding",
+        "#                 (e.g. 'c QA sign-off complete')",
         "#",
         "# Lines starting with # are comments and are ignored.",
         "# Blank lines are ignored.",
@@ -953,7 +961,7 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
         elif isinstance(step, WorkflowStep):
             lines.append(f"w {step.workflow}")
         elif isinstance(step, ConfirmStep):
-            lines.append(f"c {step.message}")
+            lines.append(f"c {step.condition}".rstrip())
     lines.append("")
     return "\n".join(lines)
 
@@ -986,10 +994,9 @@ def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
                 )
             steps.append(WorkflowStep(workflow=workflow))
         elif line == "c" or line.startswith("c "):
-            message = (
-                line[2:].strip() if line.startswith("c ") else "Confirm to continue"
-            )
-            steps.append(ConfirmStep(message=message))
+            # The condition is optional: a bare 'c' just pauses to confirm.
+            condition = line[2:].strip() if line.startswith("c ") else ""
+            steps.append(ConfirmStep(condition=condition))
         else:
             raise ValueError(f"Line {line_num}: unrecognized step: {raw_line!r}")
 
@@ -1122,7 +1129,7 @@ def render_status_table(ctx: LandingContext) -> Table:  # pragma: no cover
                 f"{pointer} Step {step_idx + 1}/{len(plan)}",
                 Text("Manual confirmation", style="bold yellow"),
             )
-            table.add_row("  Message", step.message)
+            table.add_row("  Condition", step.condition or "(none)")
 
     if ctx.aborted:
         table.caption = f"ABORTED: {ctx.abort_reason}"
@@ -1158,9 +1165,8 @@ def render_status_plain(ctx: LandingContext) -> str:
                 if step.confirmed
                 else ("waiting" if i == ctx.current_step else "pending")
             )
-            lines.append(
-                f"{cur} [{i + 1}/{len(plan)}] Confirm: {step.message} — {state}"
-            )
+            desc = f"Confirm: {step.condition}" if step.condition else "Confirm"
+            lines.append(f"{cur} [{i + 1}/{len(plan)}] {desc} — {state}")
     if ctx.aborted:
         lines.append(f"ABORTED: {ctx.abort_reason}")
     return "\n".join(lines)
@@ -1535,10 +1541,15 @@ def execute_plan(
         elif isinstance(step, ConfirmStep):
             if step.confirmed:
                 continue
+            question = (
+                f'Confirm "{step.condition}" is complete — ready to proceed?'
+                if step.condition
+                else "Ready to proceed?"
+            )
             console.print(
                 f"\n{'=' * 60}\n[bold yellow]Step {step_idx + 1}/{len(ctx.plan)}: "
                 f"Manual confirmation required[/bold yellow]\n{'=' * 60}\n"
-                f"\n[bold]{step.message}[/bold]\n"
+                f"\n[bold]{question}[/bold]\n"
             )
             while True:
                 try:
