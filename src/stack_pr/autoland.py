@@ -91,6 +91,7 @@ class AutolandOptions:
     max_queue_retries: int
     merge_timeout: int
     workflow_timeout: int
+    default_workflow: str | None
     dry_run: bool
     branch: str | None
     interactive: bool
@@ -138,6 +139,9 @@ class AutolandOptions:
                 getattr(args, "workflow_timeout", None),
                 "workflow_timeout",
                 DEFAULT_WORKFLOW_TIMEOUT,
+            ),
+            default_workflow=(
+                config.get("autoland", "default_workflow", fallback="").strip() or None
             ),
             dry_run=bool(getattr(args, "dry_run", False)),
             branch=getattr(args, "branch", None),
@@ -875,8 +879,15 @@ def wait_for_workflow(
 # ---------------------------------------------------------------------------
 
 
-def generate_default_plan(stack: list[StackEntry]) -> list[PlanStep]:
-    return [LandStep(entry_index=i) for i in range(len(stack))]
+def generate_default_plan(
+    stack: list[StackEntry], default_workflow: str | None = None
+) -> list[PlanStep]:
+    plan: list[PlanStep] = [LandStep(entry_index=i) for i in range(len(stack))]
+    # If a default workflow is configured, wait for it once the whole stack has
+    # landed. The user can still edit or remove this step in interactive mode.
+    if default_workflow:
+        plan.append(WorkflowStep(workflow=default_workflow))
+    return plan
 
 
 def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str:
@@ -945,9 +956,13 @@ def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
     return steps
 
 
-def edit_plan_interactive(stack: list[StackEntry]) -> list[PlanStep]:
+def edit_plan_interactive(
+    stack: list[StackEntry], default_workflow: str | None = None
+) -> list[PlanStep]:
     """Open the default plan in $EDITOR and return the parsed result."""
-    plan_text = format_plan_for_editor(stack, generate_default_plan(stack))
+    plan_text = format_plan_for_editor(
+        stack, generate_default_plan(stack, default_workflow)
+    )
     editor = os.environ.get("EDITOR", "vim")
 
     with tempfile.NamedTemporaryFile(
@@ -1684,7 +1699,7 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
     enrich_stack(stack)
 
     plan = (
-        edit_plan_interactive(stack)
+        edit_plan_interactive(stack, opts.default_workflow)
         if opts.interactive
         else generate_default_plan(stack)
     )

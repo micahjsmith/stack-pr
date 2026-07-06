@@ -519,7 +519,9 @@ Options:
 - `-i, --interactive`: Edit the landing plan in `$EDITOR` first, inserting
   `workflow` checkpoints (`w <workflow>` — wait for a named GitHub Actions
   workflow to complete with the landed code) and `confirm` checkpoints (`c
-  <message>` — pause for manual confirmation) between land steps.
+  <message>` — pause for manual confirmation) between land steps. When
+  `autoland.default_workflow` is configured, the pre-filled plan already ends
+  with a `w <default_workflow>` step, which you can edit or delete.
 - `--resume`: Resume a previously interrupted run from its checkpoint.
 - `--state-file PATH`: Override the checkpoint path (default:
   `~/.stack-pr/autoland/<branch>.json`).
@@ -539,11 +541,16 @@ required_checks = test,lint
 poll_interval = 120
 max_check_retries = 3
 max_queue_retries = 3
+default_workflow = deploy.yaml
 ```
 
 - `merge_queue` (default `false`): must be `true` to enable `autoland`.
 - `required_checks` (default empty): comma-separated CI check names that gate a
   merge. When empty, all reported (non-skipped) checks must pass.
+- `default_workflow` (default empty): when set, an interactive (`-i`) landing
+  plan is pre-filled with a `w <default_workflow>` step after the land steps,
+  so a repo's usual post-land workflow wait is there by default (still
+  editable/removable in `$EDITOR`).
 
 Richer live progress tables are shown when the optional `rich` dependency is
 installed (`pipx install 'stack-pr[rich]'` or add the `rich` extra); otherwise
@@ -647,6 +654,7 @@ max_check_retries=3
 max_queue_retries=3
 merge_timeout=3600
 workflow_timeout=10800
+default_workflow=deploy.yaml
 ```
 
 ## Implementation Details
