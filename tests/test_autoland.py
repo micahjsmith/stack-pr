@@ -18,6 +18,7 @@ from stack_pr.autoland import (
     StackEntry,
     WorkflowStep,
     evaluate_checks,
+    generate_default_plan,
     parse_plan,
 )
 from stack_pr.cli import CommonArgs
@@ -73,6 +74,23 @@ def test_options_precedence_flag_over_config_over_default() -> None:
     assert opts.max_check_retries == 7  # from flag
     assert opts.max_queue_retries == autoland.DEFAULT_MAX_QUEUE_RETRIES  # default
     assert opts.required_checks == ["a", "b", "c"]
+
+
+def test_default_workflow_from_config() -> None:
+    cfg = configparser.ConfigParser()
+    cfg.add_section("autoland")
+    cfg.set("autoland", "default_workflow", "deploy.yaml")
+    opts = AutolandOptions.from_config_and_args(cfg, _args())
+    assert opts.default_workflow == "deploy.yaml"
+
+
+def test_default_workflow_absent_is_none() -> None:
+    cfg = configparser.ConfigParser()
+    cfg.add_section("autoland")
+    # Empty/whitespace-only value is treated as unset.
+    cfg.set("autoland", "default_workflow", "  ")
+    opts = AutolandOptions.from_config_and_args(cfg, _args())
+    assert opts.default_workflow is None
 
 
 # --- merge-queue gate ----------------------------------------------------
@@ -179,6 +197,15 @@ def test_parse_plan_rejects_old_deploy_letter() -> None:
     # The 'd' letter was renamed to 'w'; it should no longer be recognized.
     with pytest.raises(ValueError, match="unrecognized step"):
         parse_plan("l\nd deploy.yaml\n", _stack(1))
+
+
+def test_generate_default_plan_appends_workflow_when_configured() -> None:
+    plain = generate_default_plan(_stack(2))
+    assert [type(s) for s in plain] == [LandStep, LandStep]
+
+    with_wf = generate_default_plan(_stack(2), default_workflow="deploy.yaml")
+    assert [type(s) for s in with_wf] == [LandStep, LandStep, WorkflowStep]
+    assert with_wf[-1].workflow == "deploy.yaml"
 
 
 def test_parse_plan_requires_all_lands() -> None:
