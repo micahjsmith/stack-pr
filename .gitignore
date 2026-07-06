@@ -83,7 +83,9 @@ venv.bak/
 *.egg-info
 pixi.lock
 
-.stack-pr.cfg
 .vscode
+
+# Claude Code working files (worktrees, local settings, etc.)
+.claude/
 
 .DS_Store
