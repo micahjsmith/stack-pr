@@ -1,5 +1,11 @@
 # Top of tree
 
+* Fixed `autoland` re-submitting the wrong commit range after each merge. The
+  stack base was deduced once at startup; after a PR merged and the stack was
+  rebased onto an advanced target, that stale base made `submit` sweep in every
+  commit merged by others in the meantime — trying to open bogus PRs for
+  unrelated changes and aborting the land. `autoland` now re-deduces the base
+  against the current target after each rebase. (#15)
 * Fixed `submit` flipping existing ready PRs back to draft. To avoid closing
   PRs while branches are reordered, `submit` temporarily repointed their base
   branches and had marked them draft during that window; an interrupted run (or
