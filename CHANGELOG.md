@@ -15,7 +15,7 @@
   complete with the landed code) and `c <message>` confirmation steps between
   land steps. Repo-specific settings live under `[autoland]` config; requires
   `autoland.merge_queue=true`. Install the optional `rich` extra for live
-  progress tables. (#3)
+  progress tables. (#3, #7)
 * Added an `install` command that registers stack-pr as a git alias (e.g.
   `git stack`), plus a `help` command so `git stack help` works (git intercepts
   `git stack --help` for aliases).
