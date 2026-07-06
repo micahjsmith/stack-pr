@@ -1,5 +1,9 @@
 # Top of tree
 
+* Fixed a crash during `submit` when a PR in the stack had been added to a
+  GitHub merge queue. GitHub refuses to change such a PR's base branch, which
+  previously aborted the whole submit; now stack-pr warns and leaves that PR's
+  base unchanged while still updating its title/body.
 * Added an `adopt` command to bring an existing, normally-created PR under
   stack-pr management without closing and recreating it. Supports a `--commit`
   option to attach the PR to a specific commit (e.g. when inserting a new PR

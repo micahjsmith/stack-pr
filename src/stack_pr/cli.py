@@ -61,7 +61,7 @@ from functools import cache
 from logging import getLogger
 from pathlib import Path
 from re import Pattern
-from subprocess import SubprocessError
+from subprocess import PIPE, SubprocessError
 
 from stack_pr.git import (
     branch_exists,
@@ -450,6 +450,10 @@ def red(s: str) -> str:
     return ShellColors.FAIL + s + ShellColors.ENDC
 
 
+def yellow(s: str) -> str:
+    return ShellColors.WARNING + s + ShellColors.ENDC
+
+
 # https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
 def link(location: str, text: str) -> str:
     """
@@ -462,6 +466,10 @@ def link(location: str, text: str) -> str:
 
 def error(msg: str) -> None:
     print(red("\nERROR: ") + msg)
+
+
+def warning(msg: str) -> None:
+    print(yellow("\nWARNING: ") + msg)
 
 
 def log(msg: str, *, level: int = 1) -> None:
@@ -887,6 +895,49 @@ def get_pr_body(e: StackEntry) -> str:
     return str(json.loads(out)["body"] or "").strip()
 
 
+def edit_pr_base(
+    pr: str,
+    base: str,
+    *,
+    extra_args: list[str] | None = None,
+    verbose: bool,
+    **kwargs: object,
+) -> None:
+    """Run ``gh pr edit <pr> -B <base> [extra_args]``, tolerating merge queues.
+
+    GitHub refuses to change the base branch of a PR that has been added to a
+    merge queue (``Cannot change the base branch because the branch has been
+    added to a merge queue``). Such a PR is already on its way to landing, so
+    instead of crashing we warn and retry the edit without the ``-B`` flag, so
+    any other updates (``extra_args``, e.g. title/body) still get applied.
+    """
+    extra_args = extra_args or []
+    result = run_shell_command(
+        ["gh", "pr", "edit", pr, "-B", base, *extra_args],
+        quiet=not verbose,
+        check=False,
+        stderr=PIPE,
+        **kwargs,
+    )
+    if result.returncode == 0:
+        return
+
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+    if "merge queue" not in stderr:
+        sys.stderr.write(stderr)
+        raise SubprocessError(f"Failed to edit {pr} (exit code {result.returncode}).")
+
+    warning(
+        f"Could not change the base branch of {pr}: it has been added to a "
+        "merge queue. Leaving its base branch unchanged."
+    )
+    if extra_args:
+        # Re-run without the base change so the remaining edits still apply.
+        run_shell_command(
+            ["gh", "pr", "edit", pr, *extra_args], quiet=not verbose, **kwargs
+        )
+
+
 def add_cross_links(st: list[StackEntry], *, keep_body: bool, verbose: bool) -> None:
     # Build the maintained list of PRs once - it's identical for every PR in
     # the stack (apart from which one is marked as current).
@@ -922,10 +973,12 @@ def add_cross_links(st: list[StackEntry], *, keep_body: bool, verbose: bool) -> 
         pr_body = [*header, body_content]
 
         if e.has_base():
-            run_shell_command(
-                ["gh", "pr", "edit", e.pr, "-t", title, "-F", "-", "-B", e.base or ""],
+            edit_pr_base(
+                e.pr,
+                e.base or "",
+                extra_args=["-t", title, "-F", "-"],
+                verbose=verbose,
                 input="\n".join(pr_body).encode(),
-                quiet=not verbose,
             )
         else:
             error("Stack entry has no base branch")
@@ -975,7 +1028,7 @@ def reset_remote_base_branches(
         if not is_draft_pr(e):
             run_shell_command(["gh", "pr", "ready", e.pr, "--undo"], quiet=not verbose)
             e.is_tmp_draft = True
-        run_shell_command(["gh", "pr", "edit", e.pr, "-B", target], quiet=not verbose)
+        edit_pr_base(e.pr, target, verbose=verbose)
 
 
 # If local 'main' lags behind 'origin/main', and 'head' contains all commits
