@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Union
@@ -845,9 +845,18 @@ def rebase_and_resubmit(common: cli.CommonArgs) -> None:
     # branch is checked out in another worktree.
     run(["git", "rebase", f"{common.remote}/{common.target}"], quiet=False)
 
+    # Re-deduce the base against the *current* origin/<target>. `common.base`
+    # was deduced once when autoland started (merge-base with the target at
+    # that time). After other PRs land in the target and we rebase onto it,
+    # that cached base is stale: the range base..HEAD would then sweep in every
+    # commit merged by others in the meantime, and submit would try to open
+    # bogus PRs for them. Clearing the base forces deduce_base to recompute
+    # merge-base(HEAD, origin/<target>) from the freshly rebased HEAD.
+    resubmit_common = cli.deduce_base(replace(common, base=""))
+
     console.print("[bold]Re-submitting stack...[/bold]")
     cli.command_submit(
-        common, draft=False, reviewer="", keep_body=True, draft_bitmask=None
+        resubmit_common, draft=False, reviewer="", keep_body=True, draft_bitmask=None
     )
 
 

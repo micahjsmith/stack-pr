@@ -1,5 +1,11 @@
 # Top of tree
 
+* Fixed `autoland` re-submitting the wrong commit range after each merge. The
+  stack base was deduced once at startup; after a PR merged and the stack was
+  rebased onto an advanced target, that stale base made `submit` sweep in every
+  commit merged by others in the meantime — trying to open bogus PRs for
+  unrelated changes and aborting the land. `autoland` now re-deduces the base
+  against the current target after each rebase. (#15)
 * Fixed `autoland` workflow checkpoints (`w <workflow>`) polling forever in
   busy repos. The checkpoint targeted the current `origin/<target>` HEAD, which
   can advance past the landed PR's merge commit (bot commits, other PRs) between

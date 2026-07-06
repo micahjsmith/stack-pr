@@ -1,5 +1,6 @@
 import argparse
 import configparser
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -355,6 +356,30 @@ def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
     sf.write_text('{"version": 999, "stack": [], "plan": [], "branch": "x", "base": "y"}')
     with pytest.raises(ValueError, match="Unsupported state file version"):
         AutolandCheckpointer.load(sf)
+
+
+# --- rebase + resubmit ---------------------------------------------------
+
+
+def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
+    # After rebasing onto an advanced target, the base cached at autoland start
+    # is stale; resubmit must re-deduce it (else it sweeps others' commits into
+    # the stack). Verify the stale base is cleared before deduce_base and that
+    # command_submit receives the freshly-deduced base, not the stale one.
+    stale = dataclasses.replace(_common(), base="STALE_MERGE_BASE")
+    fresh = dataclasses.replace(stale, base="FRESH_ORIGIN_MASTER")
+
+    mocker.patch("stack_pr.autoland.run")  # git fetch / rebase
+    mocker.patch("stack_pr.autoland.console")
+    deduce = mocker.patch("stack_pr.autoland.cli.deduce_base", return_value=fresh)
+    submit = mocker.patch("stack_pr.autoland.cli.command_submit")
+
+    autoland.rebase_and_resubmit(stale)
+
+    # deduce_base is called with the cached base cleared...
+    assert deduce.call_args.args[0].base == ""
+    # ...and command_submit runs with the re-deduced base, never the stale one.
+    assert submit.call_args.args[0].base == "FRESH_ORIGIN_MASTER"
 
 
 # --- concurrency lock ----------------------------------------------------
