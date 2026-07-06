@@ -177,6 +177,106 @@ def test_poll_merge_still_queued(mocker) -> None:  # noqa: ANN001
     assert not res.error
 
 
+# --- workflow checkpoint SHA ---------------------------------------------
+
+
+def _opts(**overrides) -> AutolandOptions:  # noqa: ANN003
+    base = {
+        "merge_queue": True,
+        "required_checks": [],
+        "poll_interval": 0,
+        "max_check_retries": 0,
+        "max_queue_retries": 0,
+        "merge_timeout": 0,
+        "workflow_timeout": 3600,
+        "default_workflow": None,
+        "dry_run": False,
+        "branch": None,
+        "interactive": False,
+        "resume": False,
+        "state_file": None,
+        "always_cleanup": False,
+    }
+    base.update(overrides)
+    return AutolandOptions(**base)
+
+
+def test_merge_commit_parses_oid(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(
+        autoland, "gh_json", return_value={"mergeCommit": {"oid": "deadbeef"}}
+    )
+    assert autoland.github.merge_commit(1) == "deadbeef"
+
+
+def test_merge_commit_none_when_unmerged(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland, "gh_json", return_value={"mergeCommit": None})
+    assert autoland.github.merge_commit(1) is None
+
+
+def test_refresh_last_landed_sha_prefers_merge_commit(mocker) -> None:  # noqa: ANN001
+    # origin/<target> HEAD has advanced past our merge commit (bot commits,
+    # other PRs). We must record OUR merge commit, not the moving HEAD.
+    mocker.patch.object(autoland, "run")  # git fetch is a no-op
+    mocker.patch.object(autoland.github, "merge_commit", return_value="mergesha")
+    ctx = LandingContext(last_landed_sha="")
+    autoland._refresh_last_landed_sha(ctx, _common(), pr_number=42)  # noqa: SLF001
+    assert ctx.last_landed_sha == "mergesha"
+
+
+def test_refresh_last_landed_sha_falls_back_to_head(mocker) -> None:  # noqa: ANN001
+    # No PR context (e.g. resume) or the merge commit is unknown: fall back to
+    # origin/<target> HEAD.
+    mocker.patch.object(
+        autoland,
+        "run",
+        return_value=argparse.Namespace(stdout="headsha\n", returncode=0),
+    )
+    mocker.patch.object(autoland.github, "merge_commit", return_value=None)
+    ctx = LandingContext(last_landed_sha="")
+    autoland._refresh_last_landed_sha(ctx, _common(), pr_number=42)  # noqa: SLF001
+    assert ctx.last_landed_sha == "headsha"
+
+
+def test_wait_for_workflow_accepts_run_on_merge_commit(mocker) -> None:  # noqa: ANN001
+    # Regression: a green deploy run on our exact merge commit must satisfy the
+    # checkpoint even though origin/<target> has since moved on.
+    mocker.patch.object(
+        autoland.github,
+        "workflow_runs",
+        return_value=[
+            {"headSha": "mergesha", "status": "completed", "conclusion": "success"}
+        ],
+    )
+    step = WorkflowStep(workflow="deploy.yaml")
+    ctx = LandingContext(last_landed_sha="mergesha")
+    assert autoland.wait_for_workflow(
+        step, opts=_opts(), common=_common(), ctx=ctx
+    )
+    assert step.state == "succeeded"
+
+
+def test_wait_for_workflow_ignores_failed_and_incomplete(mocker) -> None:  # noqa: ANN001
+    # A failed run and a still-running run on our SHA must not satisfy the
+    # checkpoint; abort so the poll loop terminates for the test.
+    calls = {"n": 0}
+
+    def _runs(*_a, **_k) -> list:  # noqa: ANN002, ANN003
+        calls["n"] += 1
+        ctx.aborted = True  # stop after one poll
+        return [
+            {"headSha": "mergesha", "status": "completed", "conclusion": "failure"},
+            {"headSha": "mergesha", "status": "in_progress", "conclusion": None},
+        ]
+
+    mocker.patch.object(autoland.github, "workflow_runs", side_effect=_runs)
+    mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
+    step = WorkflowStep(workflow="deploy.yaml")
+    ctx = LandingContext(last_landed_sha="mergesha")
+    assert not autoland.wait_for_workflow(
+        step, opts=_opts(), common=_common(), ctx=ctx
+    )
+
+
 # --- plan parsing --------------------------------------------------------
 
 
