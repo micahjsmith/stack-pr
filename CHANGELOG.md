@@ -1,5 +1,11 @@
 # Top of tree
 
+* Fixed `submit` flipping existing ready PRs back to draft. To avoid closing
+  PRs while branches are reordered, `submit` temporarily repointed their base
+  branches and had marked them draft during that window; an interrupted run (or
+  any error before the un-draft step) left them stuck as drafts. `submit` no
+  longer touches the draft/ready status of existing PRs at all — that state is
+  the user's to control. (#14)
 * Fixed `autoland` workflow checkpoints (`w <workflow>`) polling forever in
   busy repos. The checkpoint targeted the current `origin/<target>` HEAD, which
   can advance past the landed PR's merge commit (bot commits, other PRs) between

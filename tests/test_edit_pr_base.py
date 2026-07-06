@@ -7,7 +7,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from subprocess import SubprocessError
 
-from stack_pr.cli import edit_pr_base
+from stack_pr.cli import edit_pr_base, reset_remote_base_branches
 
 PR = "https://github.com/o/r/pull/42"
 
@@ -79,3 +79,25 @@ def test_edit_pr_base_other_error_raises(mocker) -> None:  # noqa: ANN001
 
     with pytest.raises(SubprocessError):
         edit_pr_base(PR, "main", verbose=False)
+
+
+def test_reset_remote_base_branches_preserves_draft_status(mocker) -> None:  # noqa: ANN001
+    # Resubmitting an existing stack must reset base branches but never toggle
+    # the draft/ready status of the PRs (which is owned by the user).
+    entries = []
+    for i in range(2):
+        e = mocker.Mock()
+        e.has_pr.return_value = True
+        e.pr = f"https://github.com/o/r/pull/{i}"
+        entries.append(e)
+
+    edit = mocker.patch("stack_pr.cli.edit_pr_base")
+    run = mocker.patch("stack_pr.cli.run_shell_command")
+
+    reset_remote_base_branches(entries, target="main", verbose=False)
+
+    # Base branch is reset for every existing PR...
+    assert edit.call_count == 2
+    assert [c.args[0] for c in edit.call_args_list] == [e.pr for e in entries]
+    # ...but no `gh pr ready`/`--undo` (or any other shell command) is issued.
+    run.assert_not_called()
