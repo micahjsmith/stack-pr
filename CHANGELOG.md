@@ -16,10 +16,11 @@
   rebases and re-submits after each merge, and supports `--resume`, `--branch`
   worktrees, and interactive checkpoints). Interactive (`-i`) landing plans
   support `w <workflow>` steps (wait for a named GitHub Actions workflow to
-  complete with the landed code) and `c <message>` confirmation steps between
-  land steps. Repo-specific settings live under `[autoland]` config; requires
-  `autoland.merge_queue=true`. Install the optional `rich` extra for live
-  progress tables. (#3, #7)
+  complete with the landed code) and `c [condition]` confirmation steps between
+  land steps (the optional condition names what to verify before proceeding and
+  is shown in the prompt). Repo-specific settings live under `[autoland]`
+  config; requires `autoland.merge_queue=true`. Install the optional `rich`
+  extra for live progress tables. (#3, #7, #9)
 * Added an `install` command that registers stack-pr as a git alias (e.g.
   `git stack`), plus a `help` command so `git stack help` works (git intercepts
   `git stack --help` for aliases).

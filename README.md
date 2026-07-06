@@ -519,7 +519,11 @@ Options:
 - `-i, --interactive`: Edit the landing plan in `$EDITOR` first, inserting
   `workflow` checkpoints (`w <workflow>` — wait for a named GitHub Actions
   workflow to complete with the landed code) and `confirm` checkpoints (`c
-  <message>` — pause for manual confirmation) between land steps.
+  [condition]` — pause for manual confirmation) between land steps. The
+  `condition` after `c` is optional: it names what you want to verify before
+  proceeding (e.g. `c QA sign-off complete`), and is shown in the prompt when
+  autoland reaches that step (`Confirm "QA sign-off complete" is complete —
+  ready to proceed?`). A bare `c` just prompts `Ready to proceed?`.
 - `--resume`: Resume a previously interrupted run from its checkpoint.
 - `--state-file PATH`: Override the checkpoint path (default:
   `~/.stack-pr/autoland/<branch>.json`).
