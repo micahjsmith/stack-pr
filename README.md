@@ -532,6 +532,16 @@ Options:
 - `--poll-interval`, `--max-check-retries`, `--max-queue-retries`,
   `--workflow-timeout`: Override the corresponding `[autoland]` config values.
 
+Only one `autoland` can run against a given branch at a time: while a run is in
+progress it holds a per-branch lock (`~/.stack-pr/autoland/<branch>.json.lock`)
+next to its checkpoint, so a second `autoland` on the same branch exits
+immediately rather than racing the first. The lock is released automatically
+when the run ends — including on failure or Ctrl+C — while the checkpoint is
+kept so you can `--resume`. If you start a *new* (non-`--resume`) `autoland`
+while a checkpoint from a previous run still exists, `autoland` warns that a
+land is already in progress and asks you to confirm before overwriting it (the
+previous run then can no longer be resumed).
+
 Everything repo-specific is configured under `[autoland]` (see [Config
 files](#config-files)), so a repository captures its workflow in
 `.stack-pr.cfg`:

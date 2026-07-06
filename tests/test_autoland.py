@@ -10,6 +10,7 @@ import pytest
 from stack_pr import autoland
 from stack_pr.autoland import (
     AutolandCheckpointer,
+    AutolandLock,
     AutolandOptions,
     CheckStatus,
     ConfirmStep,
@@ -17,6 +18,7 @@ from stack_pr.autoland import (
     LandStep,
     StackEntry,
     WorkflowStep,
+    _confirm_overwrite_state,
     evaluate_checks,
     generate_default_plan,
     parse_plan,
@@ -253,3 +255,50 @@ def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
     sf.write_text('{"version": 999, "stack": [], "plan": [], "branch": "x", "base": "y"}')
     with pytest.raises(ValueError, match="Unsupported state file version"):
         AutolandCheckpointer.load(sf)
+
+
+# --- concurrency lock ----------------------------------------------------
+
+
+def test_lock_for_state_sits_next_to_state_file(tmp_path) -> None:  # noqa: ANN001
+    lock = AutolandLock.for_state(tmp_path / "async.json")
+    assert lock.path == tmp_path / "async.json.lock"
+
+
+def test_lock_is_exclusive_and_releasable(tmp_path) -> None:  # noqa: ANN001
+    path = tmp_path / "b.lock"
+    first = AutolandLock(path)
+    second = AutolandLock(path)
+
+    assert first.acquire() is True
+    # A second holder (distinct open file) cannot take it while the first holds.
+    assert second.acquire() is False
+
+    # Releasing frees it (and removes the file) so a later run can acquire.
+    first.release()
+    assert not path.exists()
+    assert second.acquire() is True
+    second.release()
+
+
+def test_lock_release_is_idempotent(tmp_path) -> None:  # noqa: ANN001
+    lock = AutolandLock(tmp_path / "b.lock")
+    lock.release()  # never acquired -> no-op
+    assert lock.acquire() is True
+    lock.release()
+    lock.release()  # double release -> no-op
+
+
+def test_confirm_overwrite_state(tmp_path, mocker) -> None:  # noqa: ANN001
+    console = mocker.patch("stack_pr.autoland.console")
+    sf = tmp_path / "state.json"
+
+    console.input.return_value = "y"
+    assert _confirm_overwrite_state(sf) is True
+
+    console.input.return_value = "n"
+    assert _confirm_overwrite_state(sf) is False
+
+    # Non-interactive (EOF) must not overwrite.
+    console.input.side_effect = EOFError
+    assert _confirm_overwrite_state(sf) is False

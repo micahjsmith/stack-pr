@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import contextlib
+import fcntl
 import json
 import os
 import re
@@ -314,6 +315,50 @@ class AutolandCheckpointer:
             last_landed_sha=data.get("last_landed_sha", ""),
         )
         return cls(path=path, branch=data["branch"], base=data["base"]), ctx
+
+
+@dataclass
+class AutolandLock:
+    """Advisory filesystem lock preventing concurrent autolands on a branch.
+
+    The lock is an ``flock`` held for the lifetime of the process, so the OS
+    releases it automatically on exit — including crashes. A failed or
+    interrupted run therefore frees the lock (so it can later be resumed) while
+    its state file persists. The lock *file* is only a handle: a leftover file
+    from a crashed run does not block a future run, because acquisition depends
+    on the flock, not on the file's existence.
+    """
+
+    path: Path
+    _fd: int | None = field(default=None, repr=False)
+
+    @staticmethod
+    def for_state(state_path: Path) -> AutolandLock:
+        """Return the lock sitting next to *state_path* (``<name>.lock``)."""
+        return AutolandLock(state_path.with_name(state_path.name + ".lock"))
+
+    def acquire(self) -> bool:
+        """Try to take the lock; return False if another process holds it."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        """Release the lock and remove the lock file (no-op if not held)."""
+        if self._fd is None:
+            return
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self._fd)
+            self._fd = None
+            self.path.unlink(missing_ok=True)
 
 
 def _current_branch() -> str:
@@ -1692,48 +1737,95 @@ def _finish(
         sys.exit(1)
 
 
+def _confirm_overwrite_state(state_path: Path) -> bool:
+    """Warn about an existing checkpoint and confirm overwriting it."""
+    console.print(
+        "\n[bold yellow]An autoland is already in progress for this "
+        "branch.[/bold yellow]\n"
+        f"[yellow]A checkpoint from that run exists at {state_path}.[/yellow]\n"
+        "[yellow]Starting a new autoland overwrites it — you will no longer be "
+        "able to resume the previous run.[/yellow]\n"
+        "[dim]To continue the previous run instead, re-run with --resume.[/dim]\n"
+    )
+    try:
+        answer = console.input(
+            "[yellow]Overwrite and start a new autoland? Type y/Y to confirm "
+            "(anything else aborts): [/yellow]"
+        ).strip()
+    except EOFError:
+        return False
+    return answer in ("y", "Y")
+
+
 def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
-    worktree: Worktree | None = None
-    if opts.branch:
-        worktree = Worktree(opts.branch)
-        worktree.create()
-        console.print(
-            f"[green]Working in temporary worktree for [bold]{opts.branch}"
-            "[/bold][/green]\n"
+    branch = opts.branch or _current_branch()
+    state_path = opts.state_file or AutolandCheckpointer.default_path(branch)
+
+    # A dry run only previews the plan; it neither writes state nor competes for
+    # the lock, so let it run freely alongside a real autoland.
+    lock: AutolandLock | None = None
+    if not opts.dry_run:
+        lock = AutolandLock.for_state(state_path)
+        if not lock.acquire():
+            console.print(
+                f"[red]An autoland is already running for branch "
+                f"[bold]{branch}[/bold]. Wait for it to finish before starting "
+                "another.[/red]"
+            )
+            sys.exit(1)
+
+    try:
+        # An existing state file means a previous run was interrupted and can be
+        # resumed; starting fresh would clobber it, so confirm first.
+        if (
+            lock is not None
+            and state_path.exists()
+            and not _confirm_overwrite_state(state_path)
+        ):
+            console.print("[red]Aborted — the previous autoland is untouched.[/red]")
+            return
+
+        worktree: Worktree | None = None
+        if opts.branch:
+            worktree = Worktree(opts.branch)
+            worktree.create()
+            console.print(
+                f"[green]Working in temporary worktree for [bold]{opts.branch}"
+                "[/bold][/green]\n"
+            )
+
+        console.print("\n[bold]Discovering stack...[/bold]\n")
+        stack = discover_stack(common)
+        if not stack:
+            console.print("[red]No stack found on the current branch.[/red]")
+            sys.exit(1)
+        enrich_stack(stack)
+
+        plan = (
+            edit_plan_interactive(stack, opts.default_workflow)
+            if opts.interactive
+            else generate_default_plan(stack)
+        )
+        ctx = LandingContext(stack=stack, plan=plan)
+
+        checkpointer = AutolandCheckpointer(
+            path=state_path, branch=branch, base=common.target
         )
 
-    console.print("\n[bold]Discovering stack...[/bold]\n")
-    stack = discover_stack(common)
-    if not stack:
-        console.print("[red]No stack found on the current branch.[/red]")
-        sys.exit(1)
-    enrich_stack(stack)
+        print_status(ctx)
+        if opts.dry_run:
+            console.print("\n[yellow]Dry run — exiting.[/yellow]")
+            return
 
-    plan = (
-        edit_plan_interactive(stack, opts.default_workflow)
-        if opts.interactive
-        else generate_default_plan(stack)
-    )
-    ctx = LandingContext(stack=stack, plan=plan)
-
-    branch = opts.branch or _current_branch()
-    checkpointer = AutolandCheckpointer(
-        path=opts.state_file or AutolandCheckpointer.default_path(branch),
-        branch=branch,
-        base=common.target,
-    )
-
-    print_status(ctx)
-    if opts.dry_run:
-        console.print("\n[yellow]Dry run — exiting.[/yellow]")
-        return
-
-    console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
-    _install_signal_handler(ctx, checkpointer, worktree, opts)
-    _finish(
-        ctx, checkpointer, worktree, opts,
-        success=execute_plan(ctx, common, opts, checkpointer),
-    )
+        console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
+        _install_signal_handler(ctx, checkpointer, worktree, opts)
+        _finish(
+            ctx, checkpointer, worktree, opts,
+            success=execute_plan(ctx, common, opts, checkpointer),
+        )
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
@@ -1748,40 +1840,55 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         console.print(f"[red]No state file found at {sf_path}[/red]")
         sys.exit(1)
 
-    console.print(f"[bold]Resuming from checkpoint: [cyan]{sf_path}[/cyan][/bold]\n")
-    try:
-        checkpointer, ctx = AutolandCheckpointer.load(sf_path)
-    except (ValueError, json.JSONDecodeError, KeyError) as e:
-        console.print(f"[red]Failed to load state file: {e}[/red]")
-        sys.exit(1)
-
-    if opts.branch and opts.branch != checkpointer.branch:
+    lock = AutolandLock.for_state(sf_path)
+    if not lock.acquire():
         console.print(
-            f"[red]--branch {opts.branch} does not match saved branch "
-            f"{checkpointer.branch}[/red]"
+            "[red]An autoland is already running for this branch. Wait for it "
+            "to finish before resuming.[/red]"
         )
         sys.exit(1)
 
-    worktree: Worktree | None = None
-    if opts.branch or checkpointer.branch != _current_branch():
-        worktree = Worktree(opts.branch or checkpointer.branch)
-        worktree.create()
+    try:
+        console.print(
+            f"[bold]Resuming from checkpoint: [cyan]{sf_path}[/cyan][/bold]\n"
+        )
+        try:
+            checkpointer, ctx = AutolandCheckpointer.load(sf_path)
+        except (ValueError, json.JSONDecodeError, KeyError) as e:
+            console.print(f"[red]Failed to load state file: {e}[/red]")
+            sys.exit(1)
 
-    console.print("[dim]Refreshing PR state from GitHub...[/dim]")
-    enrich_stack(ctx.stack)
-    ctx.aborted = False
-    ctx.abort_reason = ""
+        if opts.branch and opts.branch != checkpointer.branch:
+            console.print(
+                f"[red]--branch {opts.branch} does not match saved branch "
+                f"{checkpointer.branch}[/red]"
+            )
+            sys.exit(1)
 
-    if ctx.current_step >= len(ctx.plan):
-        console.print("[green]All steps already completed — nothing to resume.[/green]")
-        checkpointer.delete()
-        _dispose_worktree(worktree, opts, succeeded=True)
-        return
+        worktree: Worktree | None = None
+        if opts.branch or checkpointer.branch != _current_branch():
+            worktree = Worktree(opts.branch or checkpointer.branch)
+            worktree.create()
 
-    print_status(ctx)
-    console.print(f"[dim]State file: {sf_path}[/dim]\n")
-    _install_signal_handler(ctx, checkpointer, worktree, opts)
-    _finish(
-        ctx, checkpointer, worktree, opts,
-        success=execute_plan(ctx, common, opts, checkpointer),
-    )
+        console.print("[dim]Refreshing PR state from GitHub...[/dim]")
+        enrich_stack(ctx.stack)
+        ctx.aborted = False
+        ctx.abort_reason = ""
+
+        if ctx.current_step >= len(ctx.plan):
+            console.print(
+                "[green]All steps already completed — nothing to resume.[/green]"
+            )
+            checkpointer.delete()
+            _dispose_worktree(worktree, opts, succeeded=True)
+            return
+
+        print_status(ctx)
+        console.print(f"[dim]State file: {sf_path}[/dim]\n")
+        _install_signal_handler(ctx, checkpointer, worktree, opts)
+        _finish(
+            ctx, checkpointer, worktree, opts,
+            success=execute_plan(ctx, common, opts, checkpointer),
+        )
+    finally:
+        lock.release()

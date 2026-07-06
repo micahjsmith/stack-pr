@@ -19,7 +19,9 @@
   complete with the landed code) and `c [condition]` confirmation steps between
   land steps (the optional condition names what to verify before proceeding and
   is shown in the prompt); setting `autoland.default_workflow` pre-fills the
-  plan with a trailing `w <default_workflow>` step. Repo-specific settings live
+  plan with a trailing `w <default_workflow>` step. A per-branch filesystem lock prevents
+  two autolands from running on the same branch at once, and starting a fresh
+  run over an existing checkpoint requires confirmation. Repo-specific settings live
   under `[autoland]` config; requires `autoland.merge_queue=true`. Install the
   optional `rich` extra for live progress tables. (#3, #7, #8, #9)
 * Added an `install` command that registers stack-pr as a git alias (e.g.
