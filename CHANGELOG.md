@@ -10,9 +10,12 @@
 * Added an `autoland` command that lands a whole stack through the GitHub merge
   queue (waits for approval/CI with flaky-check retries, enqueues bottom-to-top,
   rebases and re-submits after each merge, and supports `--resume`, `--branch`
-  worktrees, and interactive deploy/confirm checkpoints). Repo-specific settings
-  live under `[autoland]` config; requires `autoland.merge_queue=true`. Install
-  the optional `rich` extra for live progress tables.
+  worktrees, and interactive checkpoints). Interactive (`-i`) landing plans
+  support `w <workflow>` steps (wait for a named GitHub Actions workflow to
+  complete with the landed code) and `c <message>` confirmation steps between
+  land steps. Repo-specific settings live under `[autoland]` config; requires
+  `autoland.merge_queue=true`. Install the optional `rich` extra for live
+  progress tables. (#3)
 * Added an `install` command that registers stack-pr as a git alias (e.g.
   `git stack`), plus a `help` command so `git stack help` works (git intercepts
   `git stack --help` for aliases).

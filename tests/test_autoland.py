@@ -13,10 +13,10 @@ from stack_pr.autoland import (
     AutolandOptions,
     CheckStatus,
     ConfirmStep,
-    DeployStep,
     LandingContext,
     LandStep,
     StackEntry,
+    WorkflowStep,
     evaluate_checks,
     parse_plan,
 )
@@ -28,7 +28,7 @@ def _args(**overrides) -> argparse.Namespace:  # noqa: ANN003
         "poll_interval": None,
         "max_check_retries": None,
         "max_queue_retries": None,
-        "deploy_timeout": None,
+        "workflow_timeout": None,
         "dry_run": False,
         "branch": None,
         "interactive": False,
@@ -166,13 +166,19 @@ def _stack(n: int) -> list:
     ]
 
 
-def test_parse_plan_with_deploy_and_confirm() -> None:
-    text = "l\nd deploy.yaml\nc ship it\nl\n"
+def test_parse_plan_with_workflow_and_confirm() -> None:
+    text = "l\nw deploy.yaml\nc ship it\nl\n"
     steps = parse_plan(text, _stack(2))
-    assert [type(s) for s in steps] == [LandStep, DeployStep, ConfirmStep, LandStep]
+    assert [type(s) for s in steps] == [LandStep, WorkflowStep, ConfirmStep, LandStep]
     assert steps[1].workflow == "deploy.yaml"
     assert steps[2].message == "ship it"
     assert [s.entry_index for s in steps if isinstance(s, LandStep)] == [0, 1]
+
+
+def test_parse_plan_rejects_old_deploy_letter() -> None:
+    # The 'd' letter was renamed to 'w'; it should no longer be recognized.
+    with pytest.raises(ValueError, match="unrecognized step"):
+        parse_plan("l\nd deploy.yaml\n", _stack(1))
 
 
 def test_parse_plan_requires_all_lands() -> None:
@@ -190,7 +196,7 @@ def test_parse_plan_rejects_unknown_step() -> None:
 
 def test_state_round_trip(tmp_path) -> None:  # noqa: ANN001
     ctx = LandingContext(
-        stack=_stack(2), plan=parse_plan("l\nd deploy.yaml\nl\n", _stack(2))
+        stack=_stack(2), plan=parse_plan("l\nw deploy.yaml\nl\n", _stack(2))
     )
     ctx.current_step = 1
     ctx.last_landed_sha = "abc"
@@ -206,7 +212,7 @@ def test_state_round_trip(tmp_path) -> None:  # noqa: ANN001
     assert loaded.last_landed_sha == "abc"
     assert loaded.stack[0].state == autoland.PRState.MERGED
     assert [e.pr_number for e in loaded.stack] == [0, 1]
-    assert [type(s) for s in loaded.plan] == [LandStep, DeployStep, LandStep]
+    assert [type(s) for s in loaded.plan] == [LandStep, WorkflowStep, LandStep]
 
 
 def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
