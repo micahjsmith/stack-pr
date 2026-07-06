@@ -4,7 +4,7 @@
 # subparser and dispatches into `run_autoland` to keep cli.py small.
 #
 # Repo-specific behavior (which CI checks gate a merge, poll intervals,
-# retry counts, deploy timeouts, and whether the repo uses a merge queue at
+# retry counts, workflow timeouts, and whether the repo uses a merge queue at
 # all) is externalized to the `[autoland]` config section and command-line
 # flags, so a repo can reproduce its workflow with configuration alone.
 from __future__ import annotations
@@ -40,7 +40,7 @@ from stack_pr import cli
 DEFAULT_POLL_INTERVAL = 120  # seconds
 DEFAULT_MAX_CHECK_RETRIES = 3
 DEFAULT_MAX_QUEUE_RETRIES = 3
-DEFAULT_DEPLOY_TIMEOUT = 10800  # 3 hours
+DEFAULT_WORKFLOW_TIMEOUT = 10800  # 3 hours
 DEFAULT_MERGE_TIMEOUT = 3600  # 60 minutes
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ class AutolandOptions:
     max_check_retries: int
     max_queue_retries: int
     merge_timeout: int
-    deploy_timeout: int
+    workflow_timeout: int
     dry_run: bool
     branch: str | None
     interactive: bool
@@ -134,10 +134,10 @@ class AutolandOptions:
             merge_timeout=config.getint(
                 "autoland", "merge_timeout", fallback=DEFAULT_MERGE_TIMEOUT
             ),
-            deploy_timeout=_int(
-                getattr(args, "deploy_timeout", None),
-                "deploy_timeout",
-                DEFAULT_DEPLOY_TIMEOUT,
+            workflow_timeout=_int(
+                getattr(args, "workflow_timeout", None),
+                "workflow_timeout",
+                DEFAULT_WORKFLOW_TIMEOUT,
             ),
             dry_run=bool(getattr(args, "dry_run", False)),
             branch=getattr(args, "branch", None),
@@ -158,7 +158,7 @@ class PRState(str, Enum):
     WAITING_FOR_APPROVAL = "waiting_for_approval"
     WAITING_FOR_CHECKS = "waiting_for_checks"
     IN_MERGE_QUEUE = "in_merge_queue"
-    WAITING_FOR_DEPLOY = "waiting_for_deploy"
+    WAITING_FOR_WORKFLOW = "waiting_for_workflow"
     MERGED = "merged"
     FAILED = "failed"
 
@@ -190,8 +190,8 @@ class LandStep:
 
 
 @dataclass
-class DeployStep:
-    """Wait for a deploy workflow to succeed with the landed code."""
+class WorkflowStep:
+    """Wait for a GitHub Actions workflow to succeed with the landed code."""
 
     workflow: str
     state: str = "pending"  # pending, waiting, succeeded, failed
@@ -206,7 +206,7 @@ class ConfirmStep:
     confirmed: bool = False
 
 
-PlanStep = Union[LandStep, DeployStep, ConfirmStep]
+PlanStep = Union[LandStep, WorkflowStep, ConfirmStep]
 
 
 @dataclass
@@ -228,7 +228,7 @@ class LandingContext:
 
 STATE_VERSION = 1
 
-_STEP_TYPES = {LandStep: "land", DeployStep: "deploy", ConfirmStep: "confirm"}
+_STEP_TYPES = {LandStep: "land", WorkflowStep: "workflow", ConfirmStep: "confirm"}
 
 
 def _deserialize_entry(data: dict) -> StackEntry:
@@ -254,8 +254,8 @@ def _deserialize_step(data: dict) -> PlanStep:
     fields = {k: v for k, v in data.items() if k != "type"}
     if data["type"] == "land":
         return LandStep(**fields)
-    if data["type"] == "deploy":
-        return DeployStep(**fields)
+    if data["type"] == "workflow":
+        return WorkflowStep(**fields)
     return ConfirmStep(**fields)
 
 
@@ -785,7 +785,7 @@ def rebase_and_resubmit(common: cli.CommonArgs) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Deploy checkpoint polling
+# Workflow checkpoint polling
 # ---------------------------------------------------------------------------
 
 
@@ -809,18 +809,18 @@ def _is_ancestor(ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
-def wait_for_deploy(
-    step: DeployStep,
+def wait_for_workflow(
+    step: WorkflowStep,
     *,
     opts: AutolandOptions,
     common: cli.CommonArgs,
     ctx: LandingContext,
 ) -> bool:
-    """Wait for a deploy workflow to complete with code at or after the landed SHA."""
+    """Wait for a workflow to complete with code at or after the landed SHA."""
     target_sha = ctx.last_landed_sha
     step.state = "waiting"
     console.print(
-        f"\n[bold blue]Waiting for deploy: {step.workflow}[/bold blue]"
+        f"\n[bold blue]Waiting for workflow: {step.workflow}[/bold blue]"
         f"\n[dim]Target SHA: {target_sha[:12]}[/dim]"
     )
 
@@ -828,17 +828,17 @@ def wait_for_deploy(
     while True:
         if ctx.aborted:
             return False
-        if awake_elapsed > opts.deploy_timeout:
+        if awake_elapsed > opts.workflow_timeout:
             step.state = "failed"
             step.error_message = (
-                f"Deploy timed out after {opts.deploy_timeout / 3600:.0f}h"
+                f"Workflow timed out after {opts.workflow_timeout / 3600:.0f}h"
             )
             return False
 
         try:
             data = github.workflow_runs(step.workflow, common.target)
         except RuntimeError as e:
-            console.print(f"[yellow]Warning: could not poll deploy: {e}[/yellow]")
+            console.print(f"[yellow]Warning: could not poll workflow: {e}[/yellow]")
             resilient_sleep(opts.poll_interval)
             awake_elapsed += opts.poll_interval
             continue
@@ -855,15 +855,15 @@ def wait_for_deploy(
                 step.state = "succeeded"
                 step.error_message = ""
                 console.print(
-                    f"\n[bold green]Deploy {step.workflow} completed "
+                    f"\n[bold green]Workflow {step.workflow} completed "
                     f"with SHA {run_sha[:12]}[/bold green]"
                 )
                 return True
 
         mins = int(awake_elapsed) // 60
-        step.error_message = f"Waiting for deploy ({mins}m elapsed)..."
+        step.error_message = f"Waiting for workflow ({mins}m elapsed)..."
         console.print(
-            f"[dim]Deploy {step.workflow}: waiting ({mins}m) — "
+            f"[dim]Workflow {step.workflow}: waiting ({mins}m) — "
             f"polling in {opts.poll_interval}s[/dim]"
         )
         resilient_sleep(opts.poll_interval)
@@ -883,7 +883,7 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
     lines = [
         "# Autoland plan — edit steps below.",
         "# l             = land the next PR in the stack",
-        "# d <workflow>  = wait for deploy workflow to complete",
+        "# w <workflow>  = wait for a workflow to complete",
         "# c <message>   = pause and wait for manual confirmation",
         "#",
         "# Lines starting with # are comments and are ignored.",
@@ -894,8 +894,8 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
         if isinstance(step, LandStep):
             entry = stack[step.entry_index]
             lines.append(f"l    # PR #{entry.pr_number}: {entry.title}")
-        elif isinstance(step, DeployStep):
-            lines.append(f"d {step.workflow}")
+        elif isinstance(step, WorkflowStep):
+            lines.append(f"w {step.workflow}")
         elif isinstance(step, ConfirmStep):
             lines.append(f"c {step.message}")
     lines.append("")
@@ -922,13 +922,13 @@ def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
                 )
             steps.append(LandStep(entry_index=land_counter))
             land_counter += 1
-        elif line.startswith("d "):
+        elif line.startswith("w "):
             workflow = line[2:].strip()
             if not workflow:
                 raise ValueError(
-                    f"Line {line_num}: 'd' requires a workflow name"
+                    f"Line {line_num}: 'w' requires a workflow name"
                 )
-            steps.append(DeployStep(workflow=workflow))
+            steps.append(WorkflowStep(workflow=workflow))
         elif line == "c" or line.startswith("c "):
             message = (
                 line[2:].strip() if line.startswith("c ") else "Confirm to continue"
@@ -990,7 +990,7 @@ STATE_LABELS = {
     PRState.WAITING_FOR_APPROVAL: "Waiting for approval",
     PRState.WAITING_FOR_CHECKS: "Waiting for checks",
     PRState.IN_MERGE_QUEUE: "In merge queue",
-    PRState.WAITING_FOR_DEPLOY: "Waiting for deploy",
+    PRState.WAITING_FOR_WORKFLOW: "Waiting for workflow",
     PRState.MERGED: "Merged",
     PRState.FAILED: "Failed",
 }
@@ -1000,7 +1000,7 @@ STATE_STYLES = {
     PRState.WAITING_FOR_APPROVAL: "magenta",
     PRState.WAITING_FOR_CHECKS: "yellow",
     PRState.IN_MERGE_QUEUE: "cyan",
-    PRState.WAITING_FOR_DEPLOY: "blue",
+    PRState.WAITING_FOR_WORKFLOW: "blue",
     PRState.MERGED: "green",
     PRState.FAILED: "red bold",
 }
@@ -1011,10 +1011,10 @@ _REVIEW_DECISION_DISPLAY = {
     "CHANGES_REQUESTED": ("Changes requested", "red"),
 }
 
-_DEPLOY_STEP_STYLES = {
+_WORKFLOW_STEP_STYLES = {
     "pending": ("Pending", "dim"),
-    "waiting": ("Waiting for deploy", "blue"),
-    "succeeded": ("Deploy complete", "green"),
+    "waiting": ("Waiting for workflow", "blue"),
+    "succeeded": ("Workflow complete", "green"),
     "failed": ("Failed", "red bold"),
 }
 
@@ -1049,13 +1049,13 @@ def render_status_table(ctx: LandingContext) -> Table:  # pragma: no cover
                 "  Retries",
                 f"CI {entry.check_retries} - MQ {entry.queue_retries}",
             )
-        elif isinstance(step, DeployStep):
+        elif isinstance(step, WorkflowStep):
             table.add_row(
                 f"{pointer} Step {step_idx + 1}/{len(plan)}",
-                Text("Deploy checkpoint", style="bold blue"),
+                Text("Workflow checkpoint", style="bold blue"),
             )
             table.add_row("  Workflow", step.workflow)
-            label, ds_style = _DEPLOY_STEP_STYLES.get(step.state, ("Pending", "dim"))
+            label, ds_style = _WORKFLOW_STEP_STYLES.get(step.state, ("Pending", "dim"))
             table.add_row("  Status", Text(label, style=ds_style))
         elif isinstance(step, ConfirmStep):
             table.add_row(
@@ -1087,10 +1087,10 @@ def render_status_plain(ctx: LandingContext) -> str:
             lines.append(
                 f"      retries: CI {e.check_retries} / MQ {e.queue_retries}"
             )
-        elif isinstance(step, DeployStep):
-            label, _ = _DEPLOY_STEP_STYLES.get(step.state, ("Pending", ""))
+        elif isinstance(step, WorkflowStep):
+            label, _ = _WORKFLOW_STEP_STYLES.get(step.state, ("Pending", ""))
             lines.append(
-                f"{cur} [{i + 1}/{len(plan)}] Deploy: {step.workflow} — {label}"
+                f"{cur} [{i + 1}/{len(plan)}] Workflow: {step.workflow} — {label}"
             )
         elif isinstance(step, ConfirmStep):
             state = (
@@ -1459,17 +1459,17 @@ def execute_plan(
                         f"Rebase failed after merging #{entry.pr_number}: {e}",
                     )
 
-        elif isinstance(step, DeployStep):
+        elif isinstance(step, WorkflowStep):
             console.print(
                 f"\n{'=' * 60}\n[bold]Step {step_idx + 1}/{len(ctx.plan)}: "
-                f"Deploy checkpoint — {step.workflow}[/bold]\n{'=' * 60}"
+                f"Workflow checkpoint — {step.workflow}[/bold]\n{'=' * 60}"
             )
             if not ctx.last_landed_sha:
                 _refresh_last_landed_sha(ctx, common)
-            if not wait_for_deploy(step, opts=opts, common=common, ctx=ctx):
+            if not wait_for_workflow(step, opts=opts, common=common, ctx=ctx):
                 return _abort(
                     ctx, checkpointer,
-                    f"Deploy {step.workflow} failed or timed out",
+                    f"Workflow {step.workflow} failed or timed out",
                 )
 
         elif isinstance(step, ConfirmStep):
@@ -1550,10 +1550,13 @@ def register_parser(
         help="Seconds between status polls (config: autoland.poll_interval).",
     )
     p.add_argument(
-        "--deploy-timeout",
+        "--workflow-timeout",
         type=int,
         default=None,
-        help="Seconds to wait for a deploy checkpoint (config: autoland.deploy_timeout).",
+        help=(
+            "Seconds to wait for a workflow checkpoint "
+            "(config: autoland.workflow_timeout)."
+        ),
     )
     p.add_argument(
         "--branch",
@@ -1570,7 +1573,7 @@ def register_parser(
         "-i",
         "--interactive",
         action="store_true",
-        help="Edit the landing plan in $EDITOR (add deploy/confirm checkpoints).",
+        help="Edit the landing plan in $EDITOR (add workflow/confirm checkpoints).",
     )
     p.add_argument(
         "--resume",

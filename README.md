@@ -517,13 +517,14 @@ Options:
   success and preserved on failure for debugging.
 - `--always-cleanup`: Always remove the temporary worktree, even on failure.
 - `-i, --interactive`: Edit the landing plan in `$EDITOR` first, inserting
-  `deploy` checkpoints (wait for a named workflow to ship the landed code) and
-  `confirm` checkpoints (pause for manual confirmation) between land steps.
+  `workflow` checkpoints (`w <workflow>` — wait for a named GitHub Actions
+  workflow to complete with the landed code) and `confirm` checkpoints (`c
+  <message>` — pause for manual confirmation) between land steps.
 - `--resume`: Resume a previously interrupted run from its checkpoint.
 - `--state-file PATH`: Override the checkpoint path (default:
   `~/.stack-pr/autoland/<branch>.json`).
 - `--poll-interval`, `--max-check-retries`, `--max-queue-retries`,
-  `--deploy-timeout`: Override the corresponding `[autoland]` config values.
+  `--workflow-timeout`: Override the corresponding `[autoland]` config values.
 
 Everything repo-specific is configured under `[autoland]` (see [Config
 files](#config-files)), so a repository captures its workflow in
@@ -645,7 +646,7 @@ poll_interval=120
 max_check_retries=3
 max_queue_retries=3
 merge_timeout=3600
-deploy_timeout=10800
+workflow_timeout=10800
 ```
 
 ## Implementation Details
