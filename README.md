@@ -570,6 +570,37 @@ Richer live progress tables are shown when the optional `rich` dependency is
 installed (`pipx install 'stack-pr[rich]'` or add the `rich` extra); otherwise
 `autoland` prints plain-text status.
 
+##### Example plan
+
+With `-i`, `autoland` opens a plan in `$EDITOR`. Each non-comment line is one
+step, run top to bottom: `l` lands the next PR in the stack, `w <workflow>`
+waits for a named GitHub Actions workflow to finish with the landed code, and
+`c [condition]` pauses for manual confirmation (the condition is optional). For
+a three-PR stack, a plan that lands the bottom PR, waits for a deploy, gets
+manual sign-off, then lands the rest looks like:
+
+```
+# Autoland plan — edit steps below.
+# l             = land the next PR in the stack
+# w <workflow>  = wait for a workflow to complete
+# c [condition] = pause for manual confirmation; the optional
+#                 condition names what to verify before proceeding
+#                 (e.g. 'c QA sign-off complete')
+#
+# Lines starting with # are comments and are ignored.
+# Blank lines are ignored.
+#
+l                        # PR #101: Add /widgets API endpoint
+w deploy.yaml            # wait for the deploy of PR #101 to finish
+c QA sign-off complete   # pause until QA has signed off
+l                        # PR #102: Wire up the widgets UI
+l                        # PR #103: Update the docs
+```
+
+When `autoland` reaches the `c` step it prompts
+`Confirm "QA sign-off complete" is complete — ready to proceed?` and waits for
+`y`/`Y`. A bare `c` with no condition just prompts `Ready to proceed?`.
+
 #### view
 
 Inspect the current stack
