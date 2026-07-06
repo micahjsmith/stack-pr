@@ -335,7 +335,6 @@ class StackEntry:
     _pr: str | None = None
     _base: str | None = None
     _head: str | None = None
-    is_tmp_draft: bool = False
 
     @property
     def pr(self) -> str:
@@ -985,13 +984,6 @@ def add_cross_links(st: list[StackEntry], *, keep_body: bool, verbose: bool) -> 
             raise RuntimeError
 
 
-def is_draft_pr(e: StackEntry) -> bool:
-    out = get_command_output(
-        ["gh", "pr", "view", e.pr, "--json", "isDraft"],
-    )
-    return json.loads(out)["isDraft"]
-
-
 # Temporarily set base branches of existing PRs to the bottom of the stack.
 # This needs to be done to avoid PRs getting closed when commits are
 # rearranged.
@@ -1013,21 +1005,17 @@ def is_draft_pr(e: StackEntry) -> bool:
 # stack/2. If we push stack/1, then PR #2 gets automatically closed, since its
 # head branch will contain all the commits from its base branch.
 #
-# To avoid this, we temporarily set all base branches to point to 'main'. To ensure
-# we don't accidentally notify reviewers in this transient state (where the PRs are
-# pointing to 'main'), we mark the PRs as draft - once all the branches are pushed
-# we can set the actual base branches and undraft the PRs.
+# To avoid this, we temporarily set all base branches to point to 'main'.
+#
+# We intentionally do NOT touch the draft/ready status of existing PRs here:
+# a PR's review state is owned by the user, so re-running 'submit' must never
+# flip a ready PR back to draft (or vice versa).
 def reset_remote_base_branches(
     st: list[StackEntry], target: str, *, verbose: bool
 ) -> None:
     log(h("Resetting remote base branches"), level=2)
 
     for e in filter(lambda e: e.has_pr(), st):
-        # We need to check if the PR is already draft, otherwise we would
-        # unintentionally undo the draft status later.
-        if not is_draft_pr(e):
-            run_shell_command(["gh", "pr", "ready", e.pr, "--undo"], quiet=not verbose)
-            e.is_tmp_draft = True
         edit_pr_base(e.pr, target, verbose=verbose)
 
 
@@ -1286,12 +1274,6 @@ def command_submit(
 
     log(h("Adding cross-links to PRs"), level=1)
     add_cross_links(st, keep_body=keep_body, verbose=args.verbose)
-
-    # Undraft the PRs if they were marked as temporary drafts.
-    for e in st:
-        if e.is_tmp_draft:
-            run_shell_command(["gh", "pr", "ready", e.pr], quiet=not args.verbose)
-            e.is_tmp_draft = False
 
     if need_to_rebase_current:
         log(h(f"Rebasing the original branch '{current_branch}'"), level=2)
