@@ -1,5 +1,11 @@
 # Top of tree
 
+* Fixed `autoland` workflow checkpoints (`w <workflow>`) polling forever in
+  busy repos. The checkpoint targeted the current `origin/<target>` HEAD, which
+  can advance past the landed PR's merge commit (bot commits, other PRs) between
+  merge and the check — so a green workflow run on the actual merge commit was
+  rejected as "too old". The checkpoint now targets the landed PR's exact merge
+  commit.
 * Fixed a crash during `submit` when a PR in the stack had been added to a
   GitHub merge queue. GitHub refuses to change such a PR's base branch, which
   previously aborted the whole submit; now stack-pr warns and leaves that PR's

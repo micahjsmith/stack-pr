@@ -223,7 +223,7 @@ class LandingContext:
     current_index: int = 0  # index into stack for the active land step
     aborted: bool = False
     abort_reason: str = ""
-    last_landed_sha: str = ""  # origin/<target> HEAD after the last merge
+    last_landed_sha: str = ""  # merge commit of the last landed PR
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +577,18 @@ class GitHub:
         assert isinstance(data, list)
         return data
 
+    def merge_commit(self, pr_number: int) -> str | None:
+        """Return the SHA of the commit ``pr_number`` merged as, if any."""
+        try:
+            data = gh_json(["pr", "view", str(pr_number), "--json", "mergeCommit"])
+        except RuntimeError:
+            return None
+        if isinstance(data, dict):
+            merge = data.get("mergeCommit")
+            if isinstance(merge, dict):
+                return merge.get("oid") or None
+        return None
+
 
 github = GitHub()
 
@@ -793,9 +805,27 @@ def rebase_and_resubmit(common: cli.CommonArgs) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _refresh_last_landed_sha(ctx: LandingContext, common: cli.CommonArgs) -> None:
-    try:
+def _refresh_last_landed_sha(
+    ctx: LandingContext, common: cli.CommonArgs, pr_number: int | None = None
+) -> None:
+    """Record the SHA of the most recently landed code.
+
+    When ``pr_number`` is given, prefer that PR's exact merge commit so the
+    workflow checkpoint targets the code we actually landed. In a busy repo,
+    ``origin/<target>`` can advance past our merge commit (bot commits, other
+    PRs) between the merge and this call, so using its HEAD would overshoot and
+    make the checkpoint wait for a deploy of code that was never our own.
+    """
+    with contextlib.suppress(RuntimeError):  # fetch is non-critical
         run(["git", "fetch", common.remote, common.target], quiet=True)
+
+    if pr_number is not None:
+        merge_sha = github.merge_commit(pr_number)
+        if merge_sha:
+            ctx.last_landed_sha = merge_sha
+            return
+
+    try:
         result = run(
             ["git", "rev-parse", f"{common.remote}/{common.target}"], quiet=True
         )
@@ -1429,7 +1459,7 @@ def execute_plan(
                 console.print(
                     f"\n[green]PR #{entry.pr_number} already merged, skipping[/green]"
                 )
-                _refresh_last_landed_sha(ctx, common)
+                _refresh_last_landed_sha(ctx, common, entry.pr_number)
                 continue
 
             console.print(
@@ -1444,7 +1474,7 @@ def execute_plan(
                 )
 
             if entry.state == PRState.MERGED:
-                _refresh_last_landed_sha(ctx, common)
+                _refresh_last_landed_sha(ctx, common, entry.pr_number)
             else:
                 if not wait_for_checks(entry, opts=opts, ctx=ctx):
                     return _abort(
@@ -1453,14 +1483,14 @@ def execute_plan(
                     )
 
                 if entry.state == PRState.MERGED:
-                    _refresh_last_landed_sha(ctx, common)
+                    _refresh_last_landed_sha(ctx, common, entry.pr_number)
                 else:
                     if not enqueue_and_wait(entry, opts=opts, ctx=ctx):
                         return _abort(
                             ctx, checkpointer,
                             f"PR #{entry.pr_number} failed to merge",
                         )
-                    _refresh_last_landed_sha(ctx, common)
+                    _refresh_last_landed_sha(ctx, common, entry.pr_number)
 
             has_more_land_steps = any(
                 isinstance(s, LandStep) for s in ctx.plan[step_idx + 1 :]
