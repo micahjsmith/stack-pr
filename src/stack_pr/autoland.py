@@ -1218,6 +1218,39 @@ def print_status(ctx: LandingContext) -> None:
         console.print(render_status_plain(ctx))
 
 
+def _escape_markup(text: str) -> str:
+    """Escape rich markup so dynamic text (e.g. a PR title like '[1,25]') is
+    rendered literally instead of parsed as a style tag."""
+    if HAVE_RICH:
+        from rich.markup import escape  # noqa: PLC0415
+
+        return escape(text)
+    return text
+
+
+def _describe_step(step: PlanStep, ctx: LandingContext) -> str:
+    """A one-line, human-readable description of a plan step."""
+    if isinstance(step, LandStep):
+        entry = ctx.stack[step.entry_index]
+        return f"Land PR #{entry.pr_number}: {entry.title or '(untitled)'}"
+    if isinstance(step, WorkflowStep):
+        return f"Wait for workflow {step.workflow}"
+    # ConfirmStep
+    if step.condition:
+        return f"Manual confirmation: {step.condition}"
+    return "Manual confirmation"
+
+
+def _next_steps_lines(
+    plan: list[PlanStep], from_index: int, ctx: LandingContext
+) -> list[str]:
+    """Numbered, markup-safe descriptions of the plan steps after `from_index`."""
+    return [
+        f"  {n}. {_escape_markup(_describe_step(s, ctx))}"
+        for n, s in enumerate(plan[from_index + 1 :], 1)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Landing logic
 # ---------------------------------------------------------------------------
@@ -1581,15 +1614,25 @@ def execute_plan(
             if step.confirmed:
                 continue
             question = (
-                f'Confirm "{step.condition}" is complete — ready to proceed?'
+                f'Confirm "{_escape_markup(step.condition)}" is complete — '
+                "ready to proceed?"
                 if step.condition
                 else "Ready to proceed?"
             )
-            console.print(
-                f"\n{'=' * 60}\n[bold yellow]Step {step_idx + 1}/{len(ctx.plan)}: "
-                f"Manual confirmation required[/bold yellow]\n{'=' * 60}\n"
-                f"\n[bold]{question}[/bold]\n"
-            )
+            lines = [
+                f"\n{'=' * 60}",
+                f"[bold yellow]Step {step_idx + 1}/{len(ctx.plan)}: "
+                f"Manual confirmation required[/bold yellow]",
+                f"{'=' * 60}\n",
+                f"[bold]{question}[/bold]\n",
+            ]
+            next_lines = _next_steps_lines(ctx.plan, step_idx, ctx)
+            if next_lines:
+                lines.append("[bold]Next steps:[/bold]")
+                lines.extend(next_lines)
+            else:
+                lines.append("[dim]This is the final step in the plan.[/dim]")
+            console.print("\n".join(lines))
             while True:
                 try:
                     answer = console.input(

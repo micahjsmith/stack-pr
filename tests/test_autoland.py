@@ -20,6 +20,8 @@ from stack_pr.autoland import (
     StackEntry,
     WorkflowStep,
     _confirm_overwrite_state,
+    _describe_step,
+    _next_steps_lines,
     evaluate_checks,
     generate_default_plan,
     parse_plan,
@@ -325,6 +327,48 @@ def test_parse_plan_requires_all_lands() -> None:
 def test_parse_plan_rejects_unknown_step() -> None:
     with pytest.raises(ValueError, match="unrecognized step"):
         parse_plan("frobnicate\n", _stack(1))
+
+
+# --- confirm next-steps preview ------------------------------------------
+
+
+def test_describe_step_variants() -> None:
+    stack = [StackEntry(pr_url="u", pr_number=5, branch="b", title="Scale to [1,25]")]
+    ctx = LandingContext(stack=stack)
+    assert _describe_step(LandStep(entry_index=0), ctx) == "Land PR #5: Scale to [1,25]"
+    assert (
+        _describe_step(WorkflowStep(workflow="deploy.yaml"), ctx)
+        == "Wait for workflow deploy.yaml"
+    )
+    assert (
+        _describe_step(ConfirmStep(condition="QA done"), ctx)
+        == "Manual confirmation: QA done"
+    )
+    assert _describe_step(ConfirmStep(), ctx) == "Manual confirmation"
+
+
+def test_describe_step_untitled_land() -> None:
+    ctx = LandingContext(stack=[StackEntry(pr_url="u", pr_number=9, branch="b")])
+    assert _describe_step(LandStep(entry_index=0), ctx) == "Land PR #9: (untitled)"
+
+
+def test_next_steps_lines_numbers_remaining_only() -> None:
+    stack = [StackEntry(pr_url="u", pr_number=7, branch="b", title="X [1,25] Y")]
+    plan = [ConfirmStep(), LandStep(entry_index=0), WorkflowStep(workflow="d.yaml")]
+    ctx = LandingContext(stack=stack, plan=plan)
+
+    lines = _next_steps_lines(plan, 0, ctx)
+
+    assert len(lines) == 2
+    assert lines[0].startswith("  1. Land PR #7:")
+    assert "1,25" in lines[0]  # the title's content survives (escaped or not)
+    assert lines[1] == "  2. Wait for workflow d.yaml"
+
+
+def test_next_steps_lines_empty_for_final_step() -> None:
+    plan = [LandStep(entry_index=0), ConfirmStep()]
+    ctx = LandingContext(stack=_stack(1), plan=plan)
+    assert _next_steps_lines(plan, 1, ctx) == []
 
 
 # --- state round-trip ----------------------------------------------------

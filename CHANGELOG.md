@@ -1,5 +1,8 @@
 # Top of tree
 
+* `autoland` confirmation (`c`) checkpoints now list the remaining plan steps
+  ("Next steps: …") before prompting, so you can see what you're approving into
+  before confirming. (#16)
 * Fixed `autoland` re-submitting the wrong commit range after each merge. The
   stack base was deduced once at startup; after a PR merged and the stack was
   rebased onto an advanced target, that stale base made `submit` sweep in every
