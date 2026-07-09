@@ -512,6 +512,11 @@ an interrupted run can be resumed.
 Options:
 
 - `--dry-run`: Discover and display the stack, then exit.
+- `-n, --count N`: Land only the bottom `N` PRs of the stack, leaving the rest
+  open (they are rebased onto the newly-landed commits). Defaults to the whole
+  stack. Landing goes bottom-to-top, so this always lands a prefix of the stack
+  — useful for landing one (or a few) ready PRs at a time. In `-i` mode you can
+  do the same by keeping only the bottom PRs' `l` steps.
 - `--branch BRANCH`: Land a stack rooted on `BRANCH` using a temporary worktree
   (so your current checkout is left untouched). The worktree is removed on
   success and preserved on failure for debugging.

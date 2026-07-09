@@ -1,5 +1,11 @@
 # Top of tree
 
+* `autoland` can now land part of a stack instead of requiring the whole stack.
+  Pass `-n/--count N` to land only the bottom `N` PRs (or, in `-i` mode, keep
+  only the bottom PRs' `l` steps); the remaining PRs are rebased onto the landed
+  commits and left open. Landing goes bottom-to-top, so a partial land is always
+  a prefix of the stack. (#19)
+
 * Fixed `autoland` re-submitting the wrong commit range after each merge. The
   stack base was deduced once at startup; after a PR merged and the stack was
   rebased onto an advanced target, that stale base made `submit` sweep in every
