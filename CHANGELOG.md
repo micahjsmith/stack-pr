@@ -3,6 +3,16 @@
 * `autoland` confirmation (`c`) checkpoints now list the remaining plan steps
   ("Next steps: …") before prompting, so you can see what you're approving into
   before confirming. (#16)
+* `autoland` can now land part of a stack instead of requiring the whole stack.
+  Pass `-n/--count N` to land only the bottom `N` PRs (or, in `-i` mode, keep
+  only the bottom PRs' `l` steps); the remaining PRs are rebased onto the landed
+  commits and left open. Landing goes bottom-to-top, so a partial land is always
+  a prefix of the stack. (#19)
+* `submit`/`land`/`autoland` now push PR branches with `--force-with-lease`
+  instead of a plain force-push. A branch changed on the remote out-of-band
+  (e.g. a "Commit suggestion" accepted during review) is no longer silently
+  overwritten — the push is rejected and stack-pr aborts with instructions to
+  reconcile. See "Reconcile upstream changes" in the README. (#17)
 * Fixed `autoland` re-submitting the wrong commit range after each merge. The
   stack base was deduced once at startup; after a PR merged and the stack was
   rebased onto an advanced target, that stale base made `submit` sweep in every

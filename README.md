@@ -371,6 +371,44 @@ Note that generally one doesn't need to specify the base and head branches
 explicitly - `stack-pr` will figure out the correct range based on the current
 branch and the remote `main` by default.
 
+### Reconcile upstream changes
+
+`stack-pr` treats your local commits as the source of truth and force-pushes
+each PR's branch to match. If a PR branch is changed directly on the remote —
+most often by accepting a **"Commit suggestion"** during review, or editing a
+file through the GitHub web UI — that commit exists only on the remote, not in
+your local stack.
+
+`stack-pr` pushes with `--force-with-lease`, so instead of silently discarding
+such a change, the next `submit` (or `land`/`autoland`) stops with an error
+naming the affected branch. Reconcile it by folding the upstream commit into the
+local commit that backs that PR:
+
+1. Fetch the upstream state. This also updates the remote-tracking ref so the
+   next push is allowed to proceed:
+   ```bash
+   git fetch origin
+   ```
+2. Start an interactive rebase over your stack and mark the affected commit
+   `edit` (git stops on it with the commit already applied):
+   ```bash
+   git rebase -i origin/main
+   ```
+3. Apply the upstream commit(s) and fold them into that commit:
+   ```bash
+   git cherry-pick -n origin/<pr-branch>   # the branch named in the error;
+                                           # use a range A^..B for multiple
+   git commit --amend --no-edit
+   git rebase --continue
+   ```
+4. Re-submit the stack:
+   ```bash
+   stack-pr submit
+   ```
+
+The change now lives in the single commit that backs the PR, so the stack stays
+one-commit-per-PR and future updates won't lose it.
+
 ## Command Line Options Reference
 
 ### Common Arguments
@@ -512,6 +550,11 @@ an interrupted run can be resumed.
 Options:
 
 - `--dry-run`: Discover and display the stack, then exit.
+- `-n, --count N`: Land only the bottom `N` PRs of the stack, leaving the rest
+  open (they are rebased onto the newly-landed commits). Defaults to the whole
+  stack. Landing goes bottom-to-top, so this always lands a prefix of the stack
+  — useful for landing one (or a few) ready PRs at a time. In `-i` mode you can
+  do the same by keeping only the bottom PRs' `l` steps.
 - `--branch BRANCH`: Land a stack rooted on `BRANCH` using a temporary worktree
   (so your current checkout is left untouched). The worktree is removed on
   success and preserved on failure for debugging.

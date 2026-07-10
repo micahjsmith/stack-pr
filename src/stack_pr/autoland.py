@@ -93,6 +93,7 @@ class AutolandOptions:
     merge_timeout: int
     workflow_timeout: int
     default_workflow: str | None
+    count: int | None
     dry_run: bool
     branch: str | None
     interactive: bool
@@ -144,6 +145,7 @@ class AutolandOptions:
             default_workflow=(
                 config.get("autoland", "default_workflow", fallback="").strip() or None
             ),
+            count=getattr(args, "count", None),
             dry_run=bool(getattr(args, "dry_run", False)),
             branch=getattr(args, "branch", None),
             interactive=bool(getattr(args, "interactive", False)),
@@ -970,10 +972,15 @@ def wait_for_workflow(
 
 
 def generate_default_plan(
-    stack: list[StackEntry], default_workflow: str | None = None
+    stack: list[StackEntry],
+    default_workflow: str | None = None,
+    count: int | None = None,
 ) -> list[PlanStep]:
-    plan: list[PlanStep] = [LandStep(entry_index=i) for i in range(len(stack))]
-    # If a default workflow is configured, wait for it once the whole stack has
+    # Land the bottom `count` PRs (the whole stack when count is None). Landing
+    # goes bottom-to-top, so a partial land is always a prefix of the stack.
+    n = len(stack) if count is None else count
+    plan: list[PlanStep] = [LandStep(entry_index=i) for i in range(n)]
+    # If a default workflow is configured, wait for it once those PRs have
     # landed. The user can still edit or remove this step in interactive mode.
     if default_workflow:
         plan.append(WorkflowStep(workflow=default_workflow))
@@ -988,6 +995,9 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
         "# c [condition] = pause for manual confirmation; the optional",
         "#                 condition names what to verify before proceeding",
         "#                 (e.g. 'c QA sign-off complete')",
+        "#",
+        "# You don't have to land the whole stack: keep only the bottom PRs'",
+        "# 'l' steps (landing goes bottom-to-top) and the rest stay open.",
         "#",
         "# Lines starting with # are comments and are ignored.",
         "# Blank lines are ignored.",
@@ -1039,20 +1049,22 @@ def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
         else:
             raise ValueError(f"Line {line_num}: unrecognized step: {raw_line!r}")
 
-    if land_counter != len(stack):
-        raise ValueError(
-            f"Plan has {land_counter} land steps but stack has "
-            f"{len(stack)} PRs — all PRs must be landed"
-        )
+    # A partial land is allowed (land only the bottom N PRs), but the plan must
+    # land at least one PR. Because 'l' steps take stack entries bottom-to-top,
+    # the landed PRs are always a prefix of the stack; the rest stay open.
+    if land_counter == 0:
+        raise ValueError("Plan has no 'l' steps — nothing to land")
     return steps
 
 
 def edit_plan_interactive(
-    stack: list[StackEntry], default_workflow: str | None = None
+    stack: list[StackEntry],
+    default_workflow: str | None = None,
+    count: int | None = None,
 ) -> list[PlanStep]:
     """Open the default plan in $EDITOR and return the parsed result."""
     plan_text = format_plan_for_editor(
-        stack, generate_default_plan(stack, default_workflow)
+        stack, generate_default_plan(stack, default_workflow, count)
     )
     editor = os.environ.get("EDITOR", "vim")
 
@@ -1585,10 +1597,12 @@ def execute_plan(
                         )
                     _refresh_last_landed_sha(ctx, common, entry.pr_number)
 
-            has_more_land_steps = any(
-                isinstance(s, LandStep) for s in ctx.plan[step_idx + 1 :]
-            )
-            if has_more_land_steps:
+            # Rebase + resubmit whenever commits remain above the one we just
+            # landed — not only when more *land steps* follow. On a partial
+            # land, the PRs we're leaving open still need their bases rebased
+            # onto the newly-landed commit.
+            has_commits_above = step.entry_index < len(ctx.stack) - 1
+            if has_commits_above:
                 try:
                     rebase_and_resubmit(common)
                 except Exception as e:  # noqa: BLE001 - report any resubmit failure
@@ -1712,6 +1726,14 @@ def register_parser(
         ),
     )
     p.add_argument(
+        "-n",
+        "--count",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Land only the bottom N PRs of the stack (default: the whole stack).",
+    )
+    p.add_argument(
         "--branch",
         default=None,
         metavar="BRANCH",
@@ -1807,7 +1829,17 @@ def _finish(
     console.print("\n")
     print_status(ctx)
     if success:
-        console.print("\n[bold green]All PRs landed successfully![/bold green]\n")
+        landed = sum(1 for s in ctx.plan if isinstance(s, LandStep))
+        total = len(ctx.stack)
+        if landed < total:
+            console.print(
+                f"\n[bold green]Landed {landed} of {total} PRs; "
+                f"{total - landed} still open in the stack.[/bold green]\n"
+            )
+        else:
+            console.print(
+                "\n[bold green]All PRs landed successfully![/bold green]\n"
+            )
         checkpointer.delete()
     else:
         console.print(f"\n[bold red]Landing failed: {ctx.abort_reason}[/bold red]\n")
@@ -1883,10 +1915,17 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             sys.exit(1)
         enrich_stack(stack)
 
+        if opts.count is not None and not 1 <= opts.count <= len(stack):
+            console.print(
+                f"[red]--count must be between 1 and {len(stack)} "
+                f"(the stack has {len(stack)} PRs).[/red]"
+            )
+            sys.exit(1)
+
         plan = (
-            edit_plan_interactive(stack, opts.default_workflow)
+            edit_plan_interactive(stack, opts.default_workflow, opts.count)
             if opts.interactive
-            else generate_default_plan(stack)
+            else generate_default_plan(stack, count=opts.count)
         )
         ctx = LandingContext(stack=stack, plan=plan)
 

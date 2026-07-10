@@ -7,7 +7,12 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from subprocess import SubprocessError
 
-from stack_pr.cli import edit_pr_base, reset_remote_base_branches
+from stack_pr.cli import (
+    edit_pr_base,
+    force_push_with_lease,
+    reset_remote_base_branches,
+    stale_lease_branches,
+)
 
 PR = "https://github.com/o/r/pull/42"
 
@@ -101,3 +106,55 @@ def test_reset_remote_base_branches_preserves_draft_status(mocker) -> None:  # n
     assert [c.args[0] for c in edit.call_args_list] == [e.pr for e in entries]
     # ...but no `gh pr ready`/`--undo` (or any other shell command) is issued.
     run.assert_not_called()
+
+
+# --- force-with-lease push ------------------------------------------------
+
+
+def test_stale_lease_branches_parses_git_stderr() -> None:
+    stderr = (
+        "To github.com:o/r.git\n"
+        " ! [rejected]        micah/stack/2 -> micah/stack/2 (stale info)\n"
+        " ! [rejected]        micah/stack/3 -> micah/stack/3 (stale info)\n"
+        "error: failed to push some refs\n"
+    )
+    assert stale_lease_branches(stderr) == ["micah/stack/2", "micah/stack/3"]
+
+
+def test_force_push_with_lease_uses_lease_flags(mocker) -> None:  # noqa: ANN001
+    run = mocker.patch(
+        "stack_pr.cli.run_shell_command",
+        return_value=mocker.Mock(returncode=0, stderr=b""),
+    )
+
+    force_push_with_lease(["a:a", "b:b"], "origin", "main", verbose=False)
+
+    run.assert_called_once()
+    assert run.call_args.args[0] == [
+        "git", "push", "--force-with-lease", "--atomic", "origin", "a:a", "b:b",
+    ]
+
+
+def test_force_push_with_lease_aborts_on_stale(mocker) -> None:  # noqa: ANN001
+    stderr = b" ! [rejected]        s/2 -> s/2 (stale info)\nerror: failed to push\n"
+    mocker.patch(
+        "stack_pr.cli.run_shell_command",
+        return_value=mocker.Mock(returncode=1, stderr=stderr),
+    )
+    err = mocker.patch("stack_pr.cli.error")
+
+    with pytest.raises(SystemExit):
+        force_push_with_lease(["s/2:s/2"], "origin", "main", verbose=False)
+
+    # The abort message names the diverged branch.
+    assert "s/2" in err.call_args.args[0]
+
+
+def test_force_push_with_lease_reraises_other_errors(mocker) -> None:  # noqa: ANN001
+    mocker.patch(
+        "stack_pr.cli.run_shell_command",
+        return_value=mocker.Mock(returncode=1, stderr=b"fatal: unrelated failure"),
+    )
+
+    with pytest.raises(SubprocessError):
+        force_push_with_lease(["a:a"], "origin", "main", verbose=False)

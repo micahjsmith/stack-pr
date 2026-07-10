@@ -135,6 +135,21 @@ ERROR_CANT_REBASE = """Could not rebase the PR on '{target}'. Failed to land PR:
 
 Failed trying to execute {cmd}
 """
+ERROR_STALE_REMOTE_BRANCHES = """Refused to overwrite remote changes on: {branches}
+
+These PR branches have commit(s) on the remote that aren't in your local stack,
+so stack-pr stopped instead of force-overwriting them. This usually means a
+commit was added to a PR outside of stack-pr — most often a "Commit suggestion"
+accepted during review, or an edit made through the GitHub web UI.
+
+Reconcile by folding the upstream commit into the local commit that backs the
+PR, then re-submit. See "Reconcile upstream changes" in the README:
+    git fetch {remote}
+    git rebase -i {remote}/{target}   # mark the affected commit 'edit'
+    git cherry-pick -n {remote}/<branch> && git commit --amend --no-edit
+    git rebase --continue
+    stack-pr submit
+"""
 ERROR_CANT_CHECKOUT_REMOTE_BRANCH = """Could not checkout remote branch '{e.head}'. Failed to land PR:
     {e}
 
@@ -758,11 +773,55 @@ def init_local_branches(
         )
 
 
-def push_branches(st: list[StackEntry], remote: str, *, verbose: bool) -> None:
+RE_STALE_LEASE = re.compile(r"!\s+\[rejected\]\s+(\S+)\s+->\s+\S+\s+\(stale info\)")
+
+
+def stale_lease_branches(stderr: str) -> list[str]:
+    """Branch names rejected by --force-with-lease as stale, parsed from git's
+    stderr (lines like `! [rejected] foo -> foo (stale info)`)."""
+    return RE_STALE_LEASE.findall(stderr)
+
+
+def force_push_with_lease(
+    refspecs: list[str], remote: str, target: str, *, verbose: bool
+) -> None:
+    """Force-push *refspecs* with --force-with-lease.
+
+    Using a lease means a PR branch that changed on the remote out-of-band (for
+    example, a "Commit suggestion" accepted during review) is rejected rather
+    than silently overwritten. The lease's expected value is the remote-tracking
+    ref, which reflects what stack-pr last pushed (stack-pr does not fetch these
+    branches between runs), so any upstream change since then trips it.
+
+    On a stale-lease rejection, aborts with reconciliation guidance. New
+    branches (no tracking ref) push fine. `--atomic` keeps a rejection from
+    leaving a partially-updated stack.
+    """
+    cmd = ["git", "push", "--force-with-lease", "--atomic", remote, *refspecs]
+    result = run_shell_command(cmd, quiet=not verbose, check=False, stderr=PIPE)
+    if result.returncode == 0:
+        return
+
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+    stale = stale_lease_branches(stderr)
+    if stale or "stale info" in stderr:
+        branches = ", ".join(stale) if stale else "one or more PR branches"
+        error(ERROR_STALE_REMOTE_BRANCHES.format(
+            branches=branches, remote=remote, target=target
+        ))
+        sys.exit(1)
+
+    sys.stderr.write(stderr)
+    raise SubprocessError(f"Failed to push branches (exit code {result.returncode}).")
+
+
+def push_branches(
+    st: list[StackEntry], remote: str, target: str, *, verbose: bool
+) -> None:
     log(h("Updating remote branches"), level=2)
-    cmd = ["git", "push", "-f", remote]
-    cmd.extend([f"{e.head}:{e.head}" for e in st])
-    run_shell_command(cmd, quiet=not verbose)
+    force_push_with_lease(
+        [f"{e.head}:{e.head}" for e in st], remote, target, verbose=verbose
+    )
 
 
 def print_cmd_failure_details(exc: SubprocessError) -> None:
@@ -1244,7 +1303,7 @@ def command_submit(
     reset_remote_base_branches(st, target=args.target, verbose=args.verbose)
 
     # Push local branches to remote
-    push_branches(st, remote=args.remote, verbose=args.verbose)
+    push_branches(st, remote=args.remote, target=args.target, verbose=args.verbose)
 
     # Now we have all the branches, so we can create the corresponding PRs
     log(h("Submitting PRs"), level=1)
@@ -1270,7 +1329,7 @@ def command_submit(
             error(ERROR_CANT_UPDATE_META.format(**locals()))
             raise
 
-    push_branches(st, remote=args.remote, verbose=args.verbose)
+    push_branches(st, remote=args.remote, target=args.target, verbose=args.verbose)
 
     log(h("Adding cross-links to PRs"), level=1)
     add_cross_links(st, keep_body=keep_body, verbose=args.verbose)
@@ -1322,9 +1381,7 @@ def rebase_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None
     except Exception:
         error(ERROR_CANT_REBASE.format(**locals()))
         raise
-    run_shell_command(
-        ["git", "push", remote, "-f", f"{e.head}:{e.head}"], quiet=not verbose
-    )
+    force_push_with_lease([f"{e.head}:{e.head}"], remote, target, verbose=verbose)
 
 
 def land_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None:
