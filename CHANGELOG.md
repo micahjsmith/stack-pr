@@ -1,5 +1,11 @@
 # Top of tree
 
+* `autoland` can now land part of a stack instead of requiring the whole stack.
+  Pass `-n/--count N` to land only the bottom `N` PRs (or, in `-i` mode, keep
+  only the bottom PRs' `l` steps); the remaining PRs are rebased onto the landed
+  commits and left open. Landing goes bottom-to-top, so a partial land is always
+  a prefix of the stack. (#19)
+
 * `submit`/`land`/`autoland` now push PR branches with `--force-with-lease`
   instead of a plain force-push. A branch changed on the remote out-of-band
   (e.g. a "Commit suggestion" accepted during review) is no longer silently

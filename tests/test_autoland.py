@@ -33,6 +33,7 @@ def _args(**overrides) -> argparse.Namespace:  # noqa: ANN003
         "max_check_retries": None,
         "max_queue_retries": None,
         "workflow_timeout": None,
+        "count": None,
         "dry_run": False,
         "branch": None,
         "interactive": False,
@@ -191,6 +192,7 @@ def _opts(**overrides) -> AutolandOptions:  # noqa: ANN003
         "merge_timeout": 0,
         "workflow_timeout": 3600,
         "default_workflow": None,
+        "count": None,
         "dry_run": False,
         "branch": None,
         "interactive": False,
@@ -317,9 +319,28 @@ def test_generate_default_plan_appends_workflow_when_configured() -> None:
     assert with_wf[-1].workflow == "deploy.yaml"
 
 
-def test_parse_plan_requires_all_lands() -> None:
-    with pytest.raises(ValueError, match="all PRs must be landed"):
-        parse_plan("l\n", _stack(2))
+def test_generate_default_plan_count_lands_bottom_n() -> None:
+    # count lands only the bottom N PRs (a prefix of the stack).
+    plan = generate_default_plan(_stack(4), count=2)
+    assert [type(s) for s in plan] == [LandStep, LandStep]
+    assert [s.entry_index for s in plan] == [0, 1]
+
+
+def test_parse_plan_allows_partial_land() -> None:
+    # Landing only the bottom PR of a larger stack is now allowed.
+    steps = parse_plan("l\n", _stack(3))
+    assert [type(s) for s in steps] == [LandStep]
+    assert steps[0].entry_index == 0
+
+
+def test_parse_plan_rejects_no_land_steps() -> None:
+    with pytest.raises(ValueError, match="nothing to land"):
+        parse_plan("c hold\n", _stack(2))
+
+
+def test_parse_plan_rejects_too_many_lands() -> None:
+    with pytest.raises(ValueError, match="too many 'l' steps"):
+        parse_plan("l\nl\nl\n", _stack(2))
 
 
 def test_parse_plan_rejects_unknown_step() -> None:
