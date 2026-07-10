@@ -1,5 +1,10 @@
 # Top of tree
 
+* `submit`/`land`/`autoland` now push PR branches with `--force-with-lease`
+  instead of a plain force-push. A branch changed on the remote out-of-band
+  (e.g. a "Commit suggestion" accepted during review) is no longer silently
+  overwritten — the push is rejected and stack-pr aborts with instructions to
+  reconcile. See "Reconcile upstream changes" in the README. (#17)
 * Fixed `autoland` re-submitting the wrong commit range after each merge. The
   stack base was deduced once at startup; after a PR merged and the stack was
   rebased onto an advanced target, that stale base made `submit` sweep in every
