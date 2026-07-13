@@ -448,28 +448,6 @@ def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     assert submit.call_args.args[0].base == "FRESH_ORIGIN_MASTER"
 
 
-def _opts(**overrides) -> AutolandOptions:  # noqa: ANN003
-    base = {
-        "merge_queue": True,
-        "required_checks": [],
-        "poll_interval": 10,
-        "max_check_retries": 3,
-        "max_queue_retries": 3,
-        "merge_timeout": 600,
-        "workflow_timeout": 600,
-        "default_workflow": None,
-        "count": None,
-        "dry_run": True,
-        "branch": None,
-        "interactive": False,
-        "resume": False,
-        "state_file": None,
-        "always_cleanup": False,
-    }
-    base.update(overrides)
-    return AutolandOptions(**base)
-
-
 def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
     # With --branch, autoland lands in a temporary worktree whose HEAD is the
     # target branch. The base must be deduced *after* that worktree exists,
@@ -504,8 +482,10 @@ def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
 
     mocker.patch("stack_pr.autoland.discover_stack", side_effect=_discover)
 
+    # dry_run keeps _run_fresh off the lock/state-file path so the test stays
+    # hermetic; it still runs worktree setup -> deduce -> discover first.
     with pytest.raises(SystemExit):
-        _run_fresh(stale, _opts(branch="micah/asgi"))
+        _run_fresh(stale, _opts(branch="micah/asgi", dry_run=True))
 
     # The worktree is created before the base is deduced, and discovery runs
     # against the freshly-deduced base rather than the stale primary-HEAD one.
