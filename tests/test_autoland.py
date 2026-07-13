@@ -22,6 +22,7 @@ from stack_pr.autoland import (
     _confirm_overwrite_state,
     _describe_step,
     _next_steps_lines,
+    _run_fresh,
     evaluate_checks,
     generate_default_plan,
     parse_plan,
@@ -504,7 +505,7 @@ def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
     mocker.patch("stack_pr.autoland.discover_stack", side_effect=_discover)
 
     with pytest.raises(SystemExit):
-        autoland._run_fresh(stale, _opts(branch="micah/asgi"))
+        _run_fresh(stale, _opts(branch="micah/asgi"))
 
     # The worktree is created before the base is deduced, and discovery runs
     # against the freshly-deduced base rather than the stale primary-HEAD one.
