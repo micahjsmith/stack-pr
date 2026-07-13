@@ -22,6 +22,7 @@ from stack_pr.autoland import (
     _confirm_overwrite_state,
     _describe_step,
     _next_steps_lines,
+    _run_fresh,
     evaluate_checks,
     generate_default_plan,
     parse_plan,
@@ -71,9 +72,7 @@ def test_options_precedence_flag_over_config_over_default() -> None:
     cfg.set("autoland", "poll_interval", "99")
     cfg.set("autoland", "required_checks", "a, b ,c")
 
-    opts = AutolandOptions.from_config_and_args(
-        cfg, _args(max_check_retries=7)
-    )
+    opts = AutolandOptions.from_config_and_args(cfg, _args(max_check_retries=7))
 
     assert opts.merge_queue is True
     assert opts.poll_interval == 99  # from config
@@ -254,9 +253,7 @@ def test_wait_for_workflow_accepts_run_on_merge_commit(mocker) -> None:  # noqa:
     )
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert autoland.wait_for_workflow(
-        step, opts=_opts(), common=_common(), ctx=ctx
-    )
+    assert autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
     assert step.state == "succeeded"
 
 
@@ -277,18 +274,14 @@ def test_wait_for_workflow_ignores_failed_and_incomplete(mocker) -> None:  # noq
     mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert not autoland.wait_for_workflow(
-        step, opts=_opts(), common=_common(), ctx=ctx
-    )
+    assert not autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
 
 
 # --- plan parsing --------------------------------------------------------
 
 
 def _stack(n: int) -> list:
-    return [
-        StackEntry(pr_url=f"u/{i}", pr_number=i, branch=f"b{i}") for i in range(n)
-    ]
+    return [StackEntry(pr_url=f"u/{i}", pr_number=i, branch=f"b{i}") for i in range(n)]
 
 
 def test_parse_plan_with_workflow_and_confirm() -> None:
@@ -418,7 +411,9 @@ def test_state_round_trip(tmp_path) -> None:  # noqa: ANN001
 
 def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
     sf = tmp_path / "state.json"
-    sf.write_text('{"version": 999, "stack": [], "plan": [], "branch": "x", "base": "y"}')
+    sf.write_text(
+        '{"version": 999, "stack": [], "plan": [], "branch": "x", "base": "y"}'
+    )
     with pytest.raises(ValueError, match="Unsupported state file version"):
         AutolandCheckpointer.load(sf)
 
@@ -445,6 +440,51 @@ def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     assert deduce.call_args.args[0].base == ""
     # ...and command_submit runs with the re-deduced base, never the stale one.
     assert submit.call_args.args[0].base == "FRESH_ORIGIN_MASTER"
+
+
+def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
+    # With --branch, autoland lands in a temporary worktree whose HEAD is the
+    # target branch. The base must be deduced *after* that worktree exists,
+    # otherwise it resolves against the primary checkout's HEAD (a different
+    # branch) and yields a commit that isn't an ancestor of the stack, tripping
+    # the "not an ancestor of HEAD" error. Verify the ordering and that
+    # discover_stack receives the freshly-deduced base.
+    stale = dataclasses.replace(_common(), base="STALE_FROM_PRIMARY_HEAD")
+    fresh = dataclasses.replace(stale, base="FRESH_FROM_WORKTREE_HEAD")
+
+    calls: list[str] = []
+
+    mocker.patch("stack_pr.autoland.console")
+    mocker.patch("stack_pr.autoland.AutolandLock")
+
+    worktree = mocker.Mock()
+    worktree.create.side_effect = lambda: calls.append("worktree_create")
+    mocker.patch("stack_pr.autoland.Worktree", return_value=worktree)
+
+    def _deduce(common):  # noqa: ANN001, ANN202
+        calls.append("deduce")
+        return fresh
+
+    mocker.patch("stack_pr.autoland.cli.deduce_base", side_effect=_deduce)
+
+    seen_base: list[str] = []
+
+    def _discover(common):  # noqa: ANN001, ANN202
+        calls.append("discover")
+        seen_base.append(common.base)
+        return []  # empty stack -> _run_fresh exits early
+
+    mocker.patch("stack_pr.autoland.discover_stack", side_effect=_discover)
+
+    # dry_run keeps _run_fresh off the lock/state-file path so the test stays
+    # hermetic; it still runs worktree setup -> deduce -> discover first.
+    with pytest.raises(SystemExit):
+        _run_fresh(stale, _opts(branch="micah/asgi", dry_run=True))
+
+    # The worktree is created before the base is deduced, and discovery runs
+    # against the freshly-deduced base rather than the stale primary-HEAD one.
+    assert calls == ["worktree_create", "deduce", "discover"]
+    assert seen_base == ["FRESH_FROM_WORKTREE_HEAD"]
 
 
 # --- concurrency lock ----------------------------------------------------
