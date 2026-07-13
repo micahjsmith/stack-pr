@@ -2175,7 +2175,12 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
             error(ERROR_REPO_DIRTY)
             return
         check_target_branch_exists(common_args)
-        common_args = deduce_base(common_args)
+        # autoland deduces its own base: with --branch it operates in a
+        # temporary worktree, so the base must be resolved against that
+        # worktree's HEAD rather than the primary checkout's HEAD (which may be
+        # a different branch entirely).
+        if args.command != "autoland":
+            common_args = deduce_base(common_args)
 
         if args.command in ["submit", "export"]:
             command_submit(

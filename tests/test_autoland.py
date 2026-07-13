@@ -447,6 +447,71 @@ def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     assert submit.call_args.args[0].base == "FRESH_ORIGIN_MASTER"
 
 
+def _opts(**overrides) -> AutolandOptions:  # noqa: ANN003
+    base = {
+        "merge_queue": True,
+        "required_checks": [],
+        "poll_interval": 10,
+        "max_check_retries": 3,
+        "max_queue_retries": 3,
+        "merge_timeout": 600,
+        "workflow_timeout": 600,
+        "default_workflow": None,
+        "count": None,
+        "dry_run": True,
+        "branch": None,
+        "interactive": False,
+        "resume": False,
+        "state_file": None,
+        "always_cleanup": False,
+    }
+    base.update(overrides)
+    return AutolandOptions(**base)
+
+
+def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
+    # With --branch, autoland lands in a temporary worktree whose HEAD is the
+    # target branch. The base must be deduced *after* that worktree exists,
+    # otherwise it resolves against the primary checkout's HEAD (a different
+    # branch) and yields a commit that isn't an ancestor of the stack, tripping
+    # the "not an ancestor of HEAD" error. Verify the ordering and that
+    # discover_stack receives the freshly-deduced base.
+    stale = dataclasses.replace(_common(), base="STALE_FROM_PRIMARY_HEAD")
+    fresh = dataclasses.replace(stale, base="FRESH_FROM_WORKTREE_HEAD")
+
+    calls: list[str] = []
+
+    mocker.patch("stack_pr.autoland.console")
+    mocker.patch("stack_pr.autoland.AutolandLock")
+
+    worktree = mocker.Mock()
+    worktree.create.side_effect = lambda: calls.append("worktree_create")
+    mocker.patch("stack_pr.autoland.Worktree", return_value=worktree)
+
+    def _deduce(common):  # noqa: ANN001, ANN202
+        calls.append("deduce")
+        return fresh
+
+    mocker.patch("stack_pr.autoland.cli.deduce_base", side_effect=_deduce)
+
+    seen_base: list[str] = []
+
+    def _discover(common):  # noqa: ANN001, ANN202
+        calls.append("discover")
+        seen_base.append(common.base)
+        return []  # empty stack -> _run_fresh exits early
+
+    mocker.patch("stack_pr.autoland.discover_stack", side_effect=_discover)
+
+    with pytest.raises(SystemExit):
+        autoland._run_fresh(stale, _opts(branch="micah/asgi"))
+
+    # The worktree is created before the base is deduced, and discovery runs
+    # against the freshly-deduced base rather than the stale primary-HEAD one.
+    assert calls == ["worktree_create", "deduce", "discover"]
+    assert seen_base == ["FRESH_FROM_WORKTREE_HEAD"]
+
+
 # --- concurrency lock ----------------------------------------------------
 
 

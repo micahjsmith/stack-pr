@@ -1908,6 +1908,12 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
                 "[/bold][/green]\n"
             )
 
+        # Deduce the base now that any worktree has been created and we've
+        # switched into it. With --branch, HEAD in the primary checkout points
+        # at a different branch, so deducing earlier would freeze a base that
+        # isn't an ancestor of the stack. deduce_base honors an explicit --base.
+        common = cli.deduce_base(common)
+
         console.print("\n[bold]Discovering stack...[/bold]\n")
         stack = discover_stack(common)
         if not stack:
@@ -1990,6 +1996,11 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         if opts.branch or checkpointer.branch != _current_branch():
             worktree = Worktree(opts.branch or checkpointer.branch)
             worktree.create()
+
+        # Deduce the base against the (possibly worktree) HEAD, for the same
+        # reason as in _run_fresh: the primary checkout's HEAD may be a
+        # different branch than the one being landed.
+        common = cli.deduce_base(common)
 
         console.print("[dim]Refreshing PR state from GitHub...[/dim]")
         enrich_stack(ctx.stack)
