@@ -806,9 +806,11 @@ def force_push_with_lease(
     stale = stale_lease_branches(stderr)
     if stale or "stale info" in stderr:
         branches = ", ".join(stale) if stale else "one or more PR branches"
-        error(ERROR_STALE_REMOTE_BRANCHES.format(
-            branches=branches, remote=remote, target=target
-        ))
+        error(
+            ERROR_STALE_REMOTE_BRANCHES.format(
+                branches=branches, remote=remote, target=target
+            )
+        )
         sys.exit(1)
 
     sys.stderr.write(stderr)
@@ -1722,7 +1724,11 @@ def select_adopt_entry(st: list[StackEntry], commit: str | None) -> StackEntry:
     try:
         sha = get_command_output(["git", "rev-parse", commit])
     except SubprocessError:
-        error(ERROR_ADOPT_BAD_COMMIT.format(commit=commit, cmd=["git", "rev-parse", commit]))
+        error(
+            ERROR_ADOPT_BAD_COMMIT.format(
+                commit=commit, cmd=["git", "rev-parse", commit]
+            )
+        )
         raise
 
     for e in st:
@@ -1764,12 +1770,7 @@ def command_adopt(args: CommonArgs, pr: str | None, commit: str | None) -> None:
     warn_if_content_differs(e, pr_info, remote=args.remote, verbose=args.verbose)
 
     current_branch = get_current_branch_name()
-    log(
-        h(
-            f"Adopting PR {pr_url} (branch '{head_ref}') onto "
-            + e.pprint(links=False)
-        )
-    )
+    log(h(f"Adopting PR {pr_url} (branch '{head_ref}') onto " + e.pprint(links=False)))
     adopt_commit(
         e, pr_url, head_ref, current_branch=current_branch, verbose=args.verbose
     )
@@ -1910,9 +1911,7 @@ def command_install(name: str, *, local: bool) -> None:
     print("\nYou can now invoke stack-pr through git, e.g.:")
     print(f"  git {name} view")
     print(f"  git {name} submit")
-    print(
-        f"  git {name} help     # note: 'git {name} --help' is intercepted by git,"
-    )
+    print(f"  git {name} help     # note: 'git {name} --help' is intercepted by git,")
     print(f"                      # so use 'git {name} help' instead.")
 
 

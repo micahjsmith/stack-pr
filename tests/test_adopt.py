@@ -111,7 +111,9 @@ def test_select_adopt_entry_commit_not_in_stack(mocker) -> None:  # noqa: ANN001
 
 def test_command_adopt_refuses_already_managed(mocker) -> None:  # noqa: ANN001
     msg = "Title\n\nstack-info: PR: https://x/pull/1, branch: feat\n"
-    mocker.patch("stack_pr.cli.get_stack", return_value=_fake_stack(mocker, commit_msg=msg))
+    mocker.patch(
+        "stack_pr.cli.get_stack", return_value=_fake_stack(mocker, commit_msg=msg)
+    )
 
     with pytest.raises(SystemExit):
         cli.command_adopt(_common_args(), None, None)

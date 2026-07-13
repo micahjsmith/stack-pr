@@ -115,9 +115,7 @@ class AutolandOptions:
 
         state_file = getattr(args, "state_file", None)
         return cls(
-            merge_queue=config.getboolean(
-                "autoland", "merge_queue", fallback=False
-            ),
+            merge_queue=config.getboolean("autoland", "merge_queue", fallback=False),
             required_checks=required_checks,
             poll_interval=_int(
                 getattr(args, "poll_interval", None),
@@ -565,7 +563,13 @@ class GitHub:
 
     def checks(self, pr_number: int) -> list[dict]:
         data = gh_json(
-            ["pr", "checks", str(pr_number), "--json", "name,state,bucket,link,workflow"]
+            [
+                "pr",
+                "checks",
+                str(pr_number),
+                "--json",
+                "name,state,bucket,link,workflow",
+            ]
         )
         assert isinstance(data, list)
         return data
@@ -585,11 +589,17 @@ class GitHub:
             owner, repo = self.owner_repo()
             result = run(
                 [
-                    "gh", "api", "graphql",
-                    "-F", f"owner={owner}",
-                    "-F", f"repo={repo}",
-                    "-F", f"number={pr_number}",
-                    "-f", f"query={_MERGE_QUEUE_ENTRY_QUERY}",
+                    "gh",
+                    "api",
+                    "graphql",
+                    "-F",
+                    f"owner={owner}",
+                    "-F",
+                    f"repo={repo}",
+                    "-F",
+                    f"number={pr_number}",
+                    "-f",
+                    f"query={_MERGE_QUEUE_ENTRY_QUERY}",
                 ],
                 quiet=True,
             )
@@ -620,11 +630,16 @@ class GitHub:
     def workflow_runs(self, workflow: str, branch: str) -> list[dict]:
         data = gh_json(
             [
-                "run", "list",
-                "--workflow", workflow,
-                "--branch", branch,
-                "--json", "headSha,status,conclusion",
-                "--limit", "10",
+                "run",
+                "list",
+                "--workflow",
+                workflow,
+                "--branch",
+                branch,
+                "--json",
+                "headSha,status,conclusion",
+                "--limit",
+                "10",
             ]
         )
         assert isinstance(data, list)
@@ -706,8 +721,7 @@ class Worktree:
             f"[cyan]{self.path}[/cyan][/bold yellow]"
         )
         console.print(
-            "[dim]To clean up manually: "
-            f"git worktree remove --force {self.path}[/dim]"
+            f"[dim]To clean up manually: git worktree remove --force {self.path}[/dim]"
         )
 
 
@@ -719,15 +733,11 @@ class Worktree:
 def discover_stack(common: cli.CommonArgs) -> list[StackEntry]:
     """Discover the stack via stack-pr's own parser, bottom-to-top order."""
     entries: list[StackEntry] = []
-    for e in cli.get_stack(
-        base=common.base, head=common.head, verbose=common.verbose
-    ):
+    for e in cli.get_stack(base=common.base, head=common.head, verbose=common.verbose):
         if not e.has_pr():
             continue  # commit not submitted yet — skip
         pr_number = int(cli.last(e.pr))
-        entries.append(
-            StackEntry(pr_url=e.pr, pr_number=pr_number, branch=e.head)
-        )
+        entries.append(StackEntry(pr_url=e.pr, pr_number=pr_number, branch=e.head))
     return entries
 
 
@@ -779,9 +789,7 @@ def evaluate_checks(checks: list[dict], required_checks: list[str]) -> CheckResu
     """
     if required_checks:
         check_map = {
-            c.get("name", ""): c
-            for c in checks
-            if c.get("name", "") in required_checks
+            c.get("name", ""): c for c in checks if c.get("name", "") in required_checks
         }
         missing = [n for n in required_checks if n not in check_map]
         if missing:
@@ -1038,9 +1046,7 @@ def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
         elif line.startswith("w "):
             workflow = line[2:].strip()
             if not workflow:
-                raise ValueError(
-                    f"Line {line_num}: 'w' requires a workflow name"
-                )
+                raise ValueError(f"Line {line_num}: 'w' requires a workflow name")
             steps.append(WorkflowStep(workflow=workflow))
         elif line == "c" or line.startswith("c "):
             # The condition is optional: a bare 'c' just pauses to confirm.
@@ -1202,9 +1208,7 @@ def render_status_plain(ctx: LandingContext) -> str:
             if e.error_message:
                 status += f" — {e.error_message}"
             lines.append(f"      status: {status}")
-            lines.append(
-                f"      retries: CI {e.check_retries} / MQ {e.queue_retries}"
-            )
+            lines.append(f"      retries: CI {e.check_retries} / MQ {e.queue_retries}")
         elif isinstance(step, WorkflowStep):
             label, _ = _WORKFLOW_STEP_STYLES.get(step.state, ("Pending", ""))
             lines.append(
@@ -1349,9 +1353,7 @@ def wait_for_checks(
             entry.error_message = "PR was closed"
             return False
 
-        result = evaluate_checks(
-            github.checks(entry.pr_number), opts.required_checks
-        )
+        result = evaluate_checks(github.checks(entry.pr_number), opts.required_checks)
         entry.error_message = result.summary
 
         if result.status == CheckStatus.ALL_PASSING:
@@ -1574,7 +1576,8 @@ def execute_plan(
 
             if not wait_for_approval(entry, opts=opts, ctx=ctx):
                 return _abort(
-                    ctx, checkpointer,
+                    ctx,
+                    checkpointer,
                     f"PR #{entry.pr_number} approval wait was aborted",
                 )
 
@@ -1583,7 +1586,8 @@ def execute_plan(
             else:
                 if not wait_for_checks(entry, opts=opts, ctx=ctx):
                     return _abort(
-                        ctx, checkpointer,
+                        ctx,
+                        checkpointer,
                         f"PR #{entry.pr_number} checks failed after retries",
                     )
 
@@ -1592,7 +1596,8 @@ def execute_plan(
                 else:
                     if not enqueue_and_wait(entry, opts=opts, ctx=ctx):
                         return _abort(
-                            ctx, checkpointer,
+                            ctx,
+                            checkpointer,
                             f"PR #{entry.pr_number} failed to merge",
                         )
                     _refresh_last_landed_sha(ctx, common, entry.pr_number)
@@ -1607,7 +1612,8 @@ def execute_plan(
                     rebase_and_resubmit(common)
                 except Exception as e:  # noqa: BLE001 - report any resubmit failure
                     return _abort(
-                        ctx, checkpointer,
+                        ctx,
+                        checkpointer,
                         f"Rebase failed after merging #{entry.pr_number}: {e}",
                     )
 
@@ -1620,7 +1626,8 @@ def execute_plan(
                 _refresh_last_landed_sha(ctx, common)
             if not wait_for_workflow(step, opts=opts, common=common, ctx=ctx):
                 return _abort(
-                    ctx, checkpointer,
+                    ctx,
+                    checkpointer,
                     f"Workflow {step.workflow} failed or timed out",
                 )
 
@@ -1655,7 +1662,8 @@ def execute_plan(
                     ).strip()
                 except EOFError:
                     return _abort(
-                        ctx, checkpointer,
+                        ctx,
+                        checkpointer,
                         "Confirm step received EOF — cannot confirm in "
                         "non-interactive mode",
                     )
@@ -1837,9 +1845,7 @@ def _finish(
                 f"{total - landed} still open in the stack.[/bold green]\n"
             )
         else:
-            console.print(
-                "\n[bold green]All PRs landed successfully![/bold green]\n"
-            )
+            console.print("\n[bold green]All PRs landed successfully![/bold green]\n")
         checkpointer.delete()
     else:
         console.print(f"\n[bold red]Landing failed: {ctx.abort_reason}[/bold red]\n")
@@ -1947,7 +1953,10 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
         _install_signal_handler(ctx, checkpointer, worktree, opts)
         _finish(
-            ctx, checkpointer, worktree, opts,
+            ctx,
+            checkpointer,
+            worktree,
+            opts,
             success=execute_plan(ctx, common, opts, checkpointer),
         )
     finally:
@@ -2019,7 +2028,10 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         console.print(f"[dim]State file: {sf_path}[/dim]\n")
         _install_signal_handler(ctx, checkpointer, worktree, opts)
         _finish(
-            ctx, checkpointer, worktree, opts,
+            ctx,
+            checkpointer,
+            worktree,
+            opts,
             success=execute_plan(ctx, common, opts, checkpointer),
         )
     finally:

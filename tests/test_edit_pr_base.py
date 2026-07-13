@@ -70,7 +70,18 @@ def test_edit_pr_base_merge_queue_retries_without_base(mocker) -> None:  # noqa:
 
     assert run.call_count == 2
     first, second = run.call_args_list
-    assert first.args[0] == ["gh", "pr", "edit", PR, "-B", "main", "-t", "title", "-F", "-"]
+    assert first.args[0] == [
+        "gh",
+        "pr",
+        "edit",
+        PR,
+        "-B",
+        "main",
+        "-t",
+        "title",
+        "-F",
+        "-",
+    ]
     # Retry omits "-B" / "main" but keeps the other edits and the piped body.
     assert second.args[0] == ["gh", "pr", "edit", PR, "-t", "title", "-F", "-"]
     assert second.kwargs["input"] == b"body"
@@ -131,7 +142,13 @@ def test_force_push_with_lease_uses_lease_flags(mocker) -> None:  # noqa: ANN001
 
     run.assert_called_once()
     assert run.call_args.args[0] == [
-        "git", "push", "--force-with-lease", "--atomic", "origin", "a:a", "b:b",
+        "git",
+        "push",
+        "--force-with-lease",
+        "--atomic",
+        "origin",
+        "a:a",
+        "b:b",
     ]
 
 

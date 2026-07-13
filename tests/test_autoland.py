@@ -72,9 +72,7 @@ def test_options_precedence_flag_over_config_over_default() -> None:
     cfg.set("autoland", "poll_interval", "99")
     cfg.set("autoland", "required_checks", "a, b ,c")
 
-    opts = AutolandOptions.from_config_and_args(
-        cfg, _args(max_check_retries=7)
-    )
+    opts = AutolandOptions.from_config_and_args(cfg, _args(max_check_retries=7))
 
     assert opts.merge_queue is True
     assert opts.poll_interval == 99  # from config
@@ -255,9 +253,7 @@ def test_wait_for_workflow_accepts_run_on_merge_commit(mocker) -> None:  # noqa:
     )
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert autoland.wait_for_workflow(
-        step, opts=_opts(), common=_common(), ctx=ctx
-    )
+    assert autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
     assert step.state == "succeeded"
 
 
@@ -278,18 +274,14 @@ def test_wait_for_workflow_ignores_failed_and_incomplete(mocker) -> None:  # noq
     mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert not autoland.wait_for_workflow(
-        step, opts=_opts(), common=_common(), ctx=ctx
-    )
+    assert not autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
 
 
 # --- plan parsing --------------------------------------------------------
 
 
 def _stack(n: int) -> list:
-    return [
-        StackEntry(pr_url=f"u/{i}", pr_number=i, branch=f"b{i}") for i in range(n)
-    ]
+    return [StackEntry(pr_url=f"u/{i}", pr_number=i, branch=f"b{i}") for i in range(n)]
 
 
 def test_parse_plan_with_workflow_and_confirm() -> None:
@@ -419,7 +411,9 @@ def test_state_round_trip(tmp_path) -> None:  # noqa: ANN001
 
 def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
     sf = tmp_path / "state.json"
-    sf.write_text('{"version": 999, "stack": [], "plan": [], "branch": "x", "base": "y"}')
+    sf.write_text(
+        '{"version": 999, "stack": [], "plan": [], "branch": "x", "base": "y"}'
+    )
     with pytest.raises(ValueError, match="Unsupported state file version"):
         AutolandCheckpointer.load(sf)
 
