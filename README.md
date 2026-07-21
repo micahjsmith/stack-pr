@@ -712,8 +712,8 @@ Arguments:
 ### Config files
 
 Default values for command line options can be specified via a config file.
-Path to the config file can be specified via `STACKPR_CONFIG` envvar, and by
-default it's assumed to be `.stack-pr.cfg` in the current folder.
+Path to the config file can be specified via the `STACKPR_CONFIG` envvar, and by
+default it's assumed to be `.stack-pr.cfg` in the repo root.
 
 An example of a config file:
 
@@ -722,7 +722,8 @@ An example of a config file:
 verbose=True
 hyperlinks=True
 draft=False
-keep_body=False
+keep_body=True
+keep_title=True
 stash=False
 show_tips=True
 
