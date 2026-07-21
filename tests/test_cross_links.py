@@ -5,6 +5,8 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from stack_pr import cli
 from stack_pr.cli import (
+    CROSS_LINKS_DELIMETER,
+    add_cross_links,
     build_stack_pr_list,
     extract_toc_pr_ids,
     generate_toc,
@@ -14,6 +16,15 @@ from stack_pr.cli import (
 def _entry(mocker, pr_num: int):  # noqa: ANN001, ANN202
     e = mocker.Mock()
     e.pr = f"https://github.com/o/r/pull/{pr_num}"
+    return e
+
+
+def _commit_entry(mocker, pr_num: int, title: str, body: str):  # noqa: ANN001, ANN202
+    e = _entry(mocker, pr_num)
+    e.base = "main"
+    e.has_base.return_value = True
+    e.commit.title.return_value = title
+    e.commit.commit_msg.return_value = f"{title}\n\n{body}"
     return e
 
 
@@ -108,3 +119,41 @@ def test_generate_toc_single_active_with_history(mocker) -> None:  # noqa: ANN00
 
     pr_ids = cli.build_stack_pr_list(st)
     assert generate_toc(pr_ids, "2") == "Stacked PRs:\n * __->__#2\n * #1\n\n"
+
+
+def _body_written(edit_mock) -> str:  # noqa: ANN001
+    """The PR body sent to `gh pr edit` on the (single) edit_pr_base call."""
+    return edit_mock.call_args.kwargs["input"].decode()
+
+
+def test_add_cross_links_single_pr_omits_title_from_body(mocker) -> None:  # noqa: ANN001
+    # A single-PR stack has no TOC; the body is just the commit body, and the
+    # commit title is NOT copied into the description (it's the PR title).
+    e = _commit_entry(mocker, 1, "My feature", "Line one\nLine two")
+    mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
+    edit = mocker.patch("stack_pr.cli.edit_pr_base")
+
+    add_cross_links([e], keep_body=False, verbose=False)
+
+    body = _body_written(edit)
+    assert "My feature" not in body
+    assert "###" not in body
+    assert body.strip() == "Line one\nLine two"
+    # The title still drives the PR title field.
+    assert edit.call_args.kwargs["extra_args"] == ["-t", "My feature", "-F", "-"]
+
+
+def test_add_cross_links_multi_pr_has_toc_but_no_title_heading(mocker) -> None:  # noqa: ANN001
+    e = _commit_entry(mocker, 1, "Bottom PR", "Body of bottom PR")
+    mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1", "2"])
+    edit = mocker.patch("stack_pr.cli.edit_pr_base")
+
+    add_cross_links([e], keep_body=False, verbose=False)
+
+    body = _body_written(edit)
+    # Cross-links table and delimiter are present...
+    assert "Stacked PRs:" in body
+    assert CROSS_LINKS_DELIMETER in body
+    # ...but the title is not repeated as a `### ` heading in the body.
+    assert "### Bottom PR" not in body
+    assert body.split(CROSS_LINKS_DELIMETER, 1)[-1].strip() == "Body of bottom PR"
