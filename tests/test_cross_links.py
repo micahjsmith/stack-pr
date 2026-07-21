@@ -133,7 +133,7 @@ def test_add_cross_links_single_pr_omits_title_from_body(mocker) -> None:  # noq
     mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
     edit = mocker.patch("stack_pr.cli.edit_pr_base")
 
-    add_cross_links([e], keep_body=False, verbose=False)
+    add_cross_links([e], keep_body=False, keep_title=False, verbose=False)
 
     body = _body_written(edit)
     assert "My feature" not in body
@@ -148,7 +148,7 @@ def test_add_cross_links_multi_pr_has_toc_but_no_title_heading(mocker) -> None: 
     mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1", "2"])
     edit = mocker.patch("stack_pr.cli.edit_pr_base")
 
-    add_cross_links([e], keep_body=False, verbose=False)
+    add_cross_links([e], keep_body=False, keep_title=False, verbose=False)
 
     body = _body_written(edit)
     # Cross-links table and delimiter are present...
@@ -157,3 +157,23 @@ def test_add_cross_links_multi_pr_has_toc_but_no_title_heading(mocker) -> None: 
     # ...but the title is not repeated as a `### ` heading in the body.
     assert "### Bottom PR" not in body
     assert body.split(CROSS_LINKS_DELIMETER, 1)[-1].strip() == "Body of bottom PR"
+
+
+def test_add_cross_links_keep_title_preserves_pr_title(mocker) -> None:  # noqa: ANN001
+    # With keep_title, the PR title field is taken from the existing PR (e.g. a
+    # hand-edited title on GitHub), not the local commit subject.
+    e = _commit_entry(mocker, 1, "Local commit subject", "Body")
+    mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
+    mocker.patch("stack_pr.cli.get_pr_title", return_value="[ABC-123] Curated title")
+    edit = mocker.patch("stack_pr.cli.edit_pr_base")
+
+    add_cross_links([e], keep_body=False, keep_title=True, verbose=False)
+
+    assert edit.call_args.kwargs["extra_args"] == [
+        "-t",
+        "[ABC-123] Curated title",
+        "-F",
+        "-",
+    ]
+    # keep_title only affects the title; the body still comes from the commit.
+    assert _body_written(edit).strip() == "Body"
