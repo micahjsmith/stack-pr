@@ -570,6 +570,14 @@ Options:
   ready to proceed?`). A bare `c` just prompts `Ready to proceed?`. When
   `autoland.default_workflow` is configured, the pre-filled plan already ends
   with a `w <default_workflow>` step, which you can edit or delete.
+- `--plan-file PATH`: Load the landing plan from a file instead of editing it
+  interactively. The file uses the exact same format as the `-i` editor (`l` /
+  `w <workflow>` / `c [condition]` lines, with `#` comments and blank lines
+  ignored — see [Example plan](#example-plan) below), so you can save a plan
+  from `-i`, or write one by hand, and reuse it for repeatable/scripted runs.
+  Mutually exclusive with `-i`; can't be combined with `-n/--count` (the file
+  already specifies which PRs to land) or `--resume` (which restores the plan
+  from a checkpoint).
 - `--resume`: Resume a previously interrupted run from its checkpoint.
 - `--state-file PATH`: Override the checkpoint path (default:
   `~/.stack-pr/autoland/<branch>.json`).
@@ -644,6 +652,11 @@ l                        # PR #103: Update the docs
 When `autoland` reaches the `c` step it prompts
 `Confirm "QA sign-off complete" is complete — ready to proceed?` and waits for
 `y`/`Y`. A bare `c` with no condition just prompts `Ready to proceed?`.
+
+The same format can be loaded from a file with `--plan-file` instead of editing
+it interactively — for example, save the block above to `plan.txt` and run
+`stack-pr autoland --plan-file plan.txt`. This is handy for repeatable or
+scripted landings.
 
 #### view
 

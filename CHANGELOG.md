@@ -1,5 +1,11 @@
 # Top of tree
 
+* `autoland` gained `--plan-file PATH`: load the landing plan from a file
+  instead of editing it interactively. The file uses the exact same format as
+  the `-i` editor (`l` / `w <workflow>` / `c [condition]` lines, `#` comments
+  and blank lines ignored), so a plan saved from `-i` — or written by hand —
+  can be reused for repeatable or scripted runs. Mutually exclusive with `-i`,
+  and can't be combined with `--count` or `--resume`.
 * **Breaking:** `submit` now keeps the existing PR title and body by default.
   `--keep-body` and the new `--keep-title` (and the `common.keep_body` /
   `common.keep_title` config keys) now default to `true`, where they previously

@@ -100,6 +100,7 @@ class AutolandOptions:
     resume: bool
     state_file: Path | None
     always_cleanup: bool
+    plan_file: Path | None = None
 
     @classmethod
     def from_config_and_args(
@@ -114,6 +115,10 @@ class AutolandOptions:
         required_checks = [c.strip() for c in raw_checks.split(",") if c.strip()]
 
         state_file = getattr(args, "state_file", None)
+        # Resolve the plan file to an absolute path now, while the cwd is still
+        # the user's invocation directory: autoland may later chdir into a
+        # temporary worktree (--branch), where a relative path would not resolve.
+        plan_file = getattr(args, "plan_file", None)
         return cls(
             merge_queue=config.getboolean("autoland", "merge_queue", fallback=False),
             required_checks=required_checks,
@@ -150,6 +155,7 @@ class AutolandOptions:
             resume=bool(getattr(args, "resume", False)),
             state_file=Path(state_file) if state_file else None,
             always_cleanup=bool(getattr(args, "always_cleanup", False)),
+            plan_file=Path(plan_file).resolve() if plan_file else None,
         )
 
 
@@ -1068,6 +1074,27 @@ def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
     return steps
 
 
+def plan_from_file(path: Path, stack: list[StackEntry]) -> list[PlanStep]:
+    """Load a landing plan from a file.
+
+    The file uses the exact same format as the interactive editor (see
+    ``format_plan_for_editor``): ``l`` / ``w <workflow>`` / ``c [condition]``
+    steps, with ``#`` comments and blank lines ignored. It is parsed by the
+    same ``parse_plan`` the editor uses, so a file saved from ``-i`` (or written
+    by hand in that format) round-trips.
+    """
+    try:
+        text = path.read_text()
+    except OSError as e:
+        console.print(f"[red]Could not read plan file {path}: {e}[/red]")
+        sys.exit(1)
+    try:
+        return parse_plan(text, stack)
+    except ValueError as e:
+        console.print(f"[red]Invalid plan in {path}: {e}[/red]")
+        sys.exit(1)
+
+
 def edit_plan_interactive(
     stack: list[StackEntry],
     default_workflow: str | None = None,
@@ -1757,11 +1784,24 @@ def register_parser(
         action="store_true",
         help="Always remove the temporary worktree, even on failure.",
     )
-    p.add_argument(
+    # The plan comes from one source: the default, the interactive editor, or a
+    # file. -i and --plan-file are therefore mutually exclusive.
+    plan_source = p.add_mutually_exclusive_group()
+    plan_source.add_argument(
         "-i",
         "--interactive",
         action="store_true",
         help="Edit the landing plan in $EDITOR (add workflow/confirm checkpoints).",
+    )
+    plan_source.add_argument(
+        "--plan-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Load the landing plan from a file (same format as the -i editor: "
+            "'l' / 'w <workflow>' / 'c [condition]' lines)."
+        ),
     )
     p.add_argument(
         "--resume",
@@ -1792,6 +1832,22 @@ def run_autoland(
             "the GitHub merge queue. Enable it with:\n"
             "    stack-pr config autoland.merge_queue=true"
         )
+
+    # A file plan replaces the whole plan, so --count (which only shapes the
+    # generated default) and --resume (which restores the plan from a
+    # checkpoint) have nothing to act on.
+    if opts.plan_file is not None and opts.count is not None:
+        console.print(
+            "[red]--plan-file and --count can't be combined: the file already "
+            "specifies which PRs to land.[/red]"
+        )
+        sys.exit(1)
+    if opts.plan_file is not None and opts.resume:
+        console.print(
+            "[red]--plan-file and --resume can't be combined: a resumed run "
+            "restores its plan from the checkpoint.[/red]"
+        )
+        sys.exit(1)
 
     if opts.resume:
         _run_resume(common, opts)
@@ -1939,11 +1995,12 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             )
             sys.exit(1)
 
-        plan = (
-            edit_plan_interactive(stack, opts.default_workflow, opts.count)
-            if opts.interactive
-            else generate_default_plan(stack, count=opts.count)
-        )
+        if opts.plan_file is not None:
+            plan = plan_from_file(opts.plan_file, stack)
+        elif opts.interactive:
+            plan = edit_plan_interactive(stack, opts.default_workflow, opts.count)
+        else:
+            plan = generate_default_plan(stack, count=opts.count)
         ctx = LandingContext(stack=stack, plan=plan)
 
         checkpointer = AutolandCheckpointer(
