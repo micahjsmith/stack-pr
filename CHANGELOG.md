@@ -1,11 +1,14 @@
 # Top of tree
 
-* `submit` gained a `--keep-title` flag (and `common.keep_title` config,
-  default false), mirroring `--keep-body`. When set, the existing PR title on
-  GitHub is preserved instead of being overwritten from the commit subject on
-  every submit — useful when you curate the title upstream (ticket prefixes,
-  tags) and don't want a local reword to clobber it. `--keep-title` affects only
-  the title; the body still tracks the commit unless `--keep-body` is also set.
+* **Breaking:** `submit` now keeps the existing PR title and body by default.
+  `--keep-body` and the new `--keep-title` (and the `common.keep_body` /
+  `common.keep_title` config keys) now default to `true`, where they previously
+  defaulted to `false`. These flags apply only to subsequent submits: the first
+  submit always creates the PR title and body from the local commit, and after
+  that submits leave your GitHub-side edits alone rather than overwriting them
+  from the commit on every run. Pass `--no-keep-body` / `--no-keep-title` to
+  restore the old behavior of overwriting from the commit. `--keep-title` is
+  independent of `--keep-body`, so you can keep one and overwrite the other.
 * **Breaking:** `submit` no longer copies the commit title into the PR
   description. Previously a multi-PR stack rendered its body as `### <title>`
   followed by the commit body; the title is already the PR title, so repeating

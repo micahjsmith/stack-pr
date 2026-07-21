@@ -434,8 +434,8 @@ Submit a stack of PRs.
 
 Options:
 
-- `--keep-body`: Keep current PR body, only update cross-links (default: false)
-- `--keep-title`: Keep current PR title instead of overwriting it from the commit subject (default: false)
+- `--keep-body` / `--no-keep-body`: Keep the current PR body instead of regenerating it from the commit message on every submit (default: true). Pass `--no-keep-body` to overwrite the body from the commit.
+- `--keep-title` / `--no-keep-title`: Keep the current PR title instead of overwriting it from the commit subject on every submit (default: true). Pass `--no-keep-title` to overwrite the title from the commit.
 - `-d, --draft`: Submit PRs in draft mode (default: false)
 - `--draft-bitmask`: Bitmask for setting draft status per PR
 - `--reviewer`: List of reviewers for the PRs (default: from $STACK_PR_DEFAULT_REVIEWER or config)

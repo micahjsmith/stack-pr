@@ -847,6 +847,18 @@ def print_cmd_failure_details(exc: SubprocessError) -> None:
     print(f"Stderr: {cmd_stderr}")
 
 
+def commit_body_for_pr(e: StackEntry) -> str:
+    """Derive a PR description from a commit message.
+
+    Drops the first line (it becomes the PR title, so repeating it in the body
+    is redundant) and the ``stack-info`` trailer. This is the body
+    ``add_cross_links`` writes unless it is asked to keep the existing one.
+    """
+    body = e.commit.commit_msg()
+    body = "\n".join(body.splitlines()[1:])
+    return RE_STACK_INFO_LINE.sub("", body)
+
+
 def create_pr(e: StackEntry, *, is_draft: bool, reviewer: str = "") -> None:
     # Don't do anything if the PR already exists
     if e.has_pr():
@@ -1006,28 +1018,35 @@ def edit_pr_base(
 
 
 def add_cross_links(
-    st: list[StackEntry], *, keep_body: bool, keep_title: bool, verbose: bool
+    st: list[StackEntry],
+    *,
+    keep_body: bool,
+    keep_title: bool,
+    verbose: bool,
+    created: set[str] | None = None,
 ) -> None:
     # Build the maintained list of PRs once - it's identical for every PR in
     # the stack (apart from which one is marked as current).
     pr_ids = build_stack_pr_list(st)
+    created = created or set()
 
     for e in st:
         pr_id = last(e.pr)
         pr_toc = generate_toc(pr_ids, pr_id)
 
+        # keep_body/keep_title only apply to PRs that already existed before
+        # this submit. A PR created in this run has nothing curated upstream to
+        # preserve, so its title and body always come from the commit — the
+        # commit is the source of truth on the first submit, GitHub thereafter.
+        is_new = pr_id in created
+        keep_this_title = keep_title and not is_new
+        keep_this_body = keep_body and not is_new
+
         # By default the PR title tracks the commit subject. With keep_title the
         # existing PR title on GitHub is preserved instead (e.g. a hand-edited
         # title with a ticket prefix), so a local reword doesn't overwrite it.
-        title = get_pr_title(e) if keep_title else e.commit.title()
-        body = e.commit.commit_msg()
-
-        # Strip the title (the first commit line) from the body: it becomes the
-        # PR title, so repeating it in the description is redundant.
-        body = "\n".join(body.splitlines()[1:])
-
-        # Strip stack-info from the body, nothing interesting there.
-        body = RE_STACK_INFO_LINE.sub("", body)
+        title = get_pr_title(e) if keep_this_title else e.commit.title()
+        body = commit_body_for_pr(e)
 
         # Build PR body components
         header = []
@@ -1037,7 +1056,7 @@ def add_cross_links(
             # Multi-PR stack: add the cross-links TOC header above the body.
             header = [pr_toc, f"{CROSS_LINKS_DELIMETER}\n"]
 
-        if keep_body:
+        if keep_this_body:
             # Keep current body of the PR after the cross links component
             current_pr_body = get_pr_body(e)
             body_content = current_pr_body.split(CROSS_LINKS_DELIMETER, 1)[-1].lstrip()
@@ -1253,8 +1272,8 @@ def command_submit(
     *,
     draft: bool,
     reviewer: str,
-    keep_body: bool,
-    keep_title: bool = False,
+    keep_body: bool = True,
+    keep_title: bool = True,
     draft_bitmask: list[bool] | None = None,
 ) -> None:
     """Entry point for 'submit' command.
@@ -1321,11 +1340,17 @@ def command_submit(
     # Push local branches to remote
     push_branches(st, remote=args.remote, target=args.target, verbose=args.verbose)
 
-    # Now we have all the branches, so we can create the corresponding PRs
+    # Now we have all the branches, so we can create the corresponding PRs.
+    # Track which PRs are created in this run: their title/body come from the
+    # commit regardless of keep_body/keep_title (there is nothing to keep yet).
     log(h("Submitting PRs"), level=1)
+    created_prs: set[str] = set()
     for e_idx, e in enumerate(st):
+        was_new = not e.has_pr()
         is_pr_draft = draft or ((draft_bitmask is not None) and draft_bitmask[e_idx])
         create_pr(e, is_draft=is_pr_draft, reviewer=reviewer)
+        if was_new:
+            created_prs.add(last(e.pr))
 
     # Verify consistency in everything we have so far
     verify(st)
@@ -1349,7 +1374,11 @@ def command_submit(
 
     log(h("Adding cross-links to PRs"), level=1)
     add_cross_links(
-        st, keep_body=keep_body, keep_title=keep_title, verbose=args.verbose
+        st,
+        keep_body=keep_body,
+        keep_title=keep_title,
+        verbose=args.verbose,
+        created=created_prs,
     )
 
     if need_to_rebase_current:
@@ -2004,15 +2033,23 @@ def create_argparser(
     )
     parser_submit.add_argument(
         "--keep-body",
-        action="store_true",
-        default=config.getboolean("common", "keep_body", fallback=False),
-        help="Keep current PR body and only add/update cross links",
+        action=argparse.BooleanOptionalAction,
+        default=config.getboolean("common", "keep_body", fallback=True),
+        help=(
+            "Keep the current PR body instead of regenerating it from the "
+            "commit (default: true; pass --no-keep-body to overwrite from the "
+            "commit message on every submit)"
+        ),
     )
     parser_submit.add_argument(
         "--keep-title",
-        action="store_true",
-        default=config.getboolean("common", "keep_title", fallback=False),
-        help="Keep current PR title instead of overwriting it from the commit",
+        action=argparse.BooleanOptionalAction,
+        default=config.getboolean("common", "keep_title", fallback=True),
+        help=(
+            "Keep the current PR title instead of overwriting it from the "
+            "commit (default: true; pass --no-keep-title to overwrite from the "
+            "commit subject on every submit)"
+        ),
     )
     parser_submit.add_argument(
         "-d",

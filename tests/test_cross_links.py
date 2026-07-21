@@ -8,7 +8,9 @@ from stack_pr.cli import (
     CROSS_LINKS_DELIMETER,
     add_cross_links,
     build_stack_pr_list,
+    commit_body_for_pr,
     extract_toc_pr_ids,
+    format_stack_info,
     generate_toc,
 )
 
@@ -126,6 +128,16 @@ def _body_written(edit_mock) -> str:  # noqa: ANN001
     return edit_mock.call_args.kwargs["input"].decode()
 
 
+def test_commit_body_for_pr_drops_title_and_stack_info(mocker) -> None:  # noqa: ANN001
+    e = mocker.Mock()
+    trailer = format_stack_info("https://github.com/o/r/pull/1", "user/branch")
+    e.commit.commit_msg.return_value = f"The title\n\nReal body.\n\n{trailer}"
+    body = commit_body_for_pr(e)
+    assert "The title" not in body
+    assert "stack-info:" not in body
+    assert body.strip() == "Real body."
+
+
 def test_add_cross_links_single_pr_omits_title_from_body(mocker) -> None:  # noqa: ANN001
     # A single-PR stack has no TOC; the body is just the commit body, and the
     # commit title is NOT copied into the description (it's the PR title).
@@ -159,15 +171,16 @@ def test_add_cross_links_multi_pr_has_toc_but_no_title_heading(mocker) -> None: 
     assert body.split(CROSS_LINKS_DELIMETER, 1)[-1].strip() == "Body of bottom PR"
 
 
-def test_add_cross_links_keep_title_preserves_pr_title(mocker) -> None:  # noqa: ANN001
-    # With keep_title, the PR title field is taken from the existing PR (e.g. a
-    # hand-edited title on GitHub), not the local commit subject.
+def test_add_cross_links_keep_title_preserves_existing_pr_title(mocker) -> None:  # noqa: ANN001
+    # On a re-submit (PR already exists, not in `created`) keep_title takes the
+    # title from the existing PR (e.g. a hand-edited ticket prefix), not the
+    # local commit subject.
     e = _commit_entry(mocker, 1, "Local commit subject", "Body")
     mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
     mocker.patch("stack_pr.cli.get_pr_title", return_value="[ABC-123] Curated title")
     edit = mocker.patch("stack_pr.cli.edit_pr_base")
 
-    add_cross_links([e], keep_body=False, keep_title=True, verbose=False)
+    add_cross_links([e], keep_body=False, keep_title=True, verbose=False, created=set())
 
     assert edit.call_args.kwargs["extra_args"] == [
         "-t",
@@ -177,3 +190,39 @@ def test_add_cross_links_keep_title_preserves_pr_title(mocker) -> None:  # noqa:
     ]
     # keep_title only affects the title; the body still comes from the commit.
     assert _body_written(edit).strip() == "Body"
+
+
+def test_add_cross_links_keep_body_preserves_existing_on_resubmit(mocker) -> None:  # noqa: ANN001
+    # On a re-submit keep_body keeps whatever is currently on the PR (below the
+    # cross-links delimiter), ignoring the local commit body.
+    e = _commit_entry(mocker, 1, "Commit title", "New local commit body")
+    mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
+    mocker.patch("stack_pr.cli.get_pr_body", return_value="Edited on GitHub")
+    edit = mocker.patch("stack_pr.cli.edit_pr_base")
+
+    add_cross_links([e], keep_body=True, keep_title=False, verbose=False, created=set())
+
+    assert _body_written(edit).strip() == "Edited on GitHub"
+    # keep_title=False -> the title still comes from the commit.
+    assert edit.call_args.kwargs["extra_args"] == ["-t", "Commit title", "-F", "-"]
+
+
+def test_add_cross_links_new_pr_ignores_keep_flags(mocker) -> None:  # noqa: ANN001
+    # A PR created in this run (in `created`) always takes its title and body
+    # from the commit, even with keep_body/keep_title on: there is nothing
+    # curated upstream to keep on the first submit.
+    e = _commit_entry(mocker, 1, "Commit title", "Commit body")
+    mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
+    title_spy = mocker.patch("stack_pr.cli.get_pr_title", return_value="Upstream title")
+    body_spy = mocker.patch("stack_pr.cli.get_pr_body", return_value="Upstream body")
+    edit = mocker.patch("stack_pr.cli.edit_pr_base")
+
+    add_cross_links(
+        [e], keep_body=True, keep_title=True, verbose=False, created={"1"}
+    )
+
+    assert edit.call_args.kwargs["extra_args"] == ["-t", "Commit title", "-F", "-"]
+    assert _body_written(edit).strip() == "Commit body"
+    # The upstream title/body are not even fetched for a freshly created PR.
+    title_spy.assert_not_called()
+    body_spy.assert_not_called()
