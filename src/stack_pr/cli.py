@@ -1010,7 +1010,8 @@ def add_cross_links(st: list[StackEntry], *, keep_body: bool, verbose: bool) -> 
         title = e.commit.title()
         body = e.commit.commit_msg()
 
-        # Strip title from the body - we will print it separately.
+        # Strip the title (the first commit line) from the body: it becomes the
+        # PR title, so repeating it in the description is redundant.
         body = "\n".join(body.splitlines()[1:])
 
         # Strip stack-info from the body, nothing interesting there.
@@ -1021,9 +1022,8 @@ def add_cross_links(st: list[StackEntry], *, keep_body: bool, verbose: bool) -> 
         body_content = body
 
         if pr_toc:
-            # Multi-PR stack: add TOC header and format body with title
+            # Multi-PR stack: add the cross-links TOC header above the body.
             header = [pr_toc, f"{CROSS_LINKS_DELIMETER}\n"]
-            body_content = f"### {title}\n\n{body}"
 
         if keep_body:
             # Keep current body of the PR after the cross links component

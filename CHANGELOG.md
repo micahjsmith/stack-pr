@@ -1,5 +1,11 @@
 # Top of tree
 
+* **Breaking:** `submit` no longer copies the commit title into the PR
+  description. Previously a multi-PR stack rendered its body as `### <title>`
+  followed by the commit body; the title is already the PR title, so repeating
+  it was redundant. PR bodies now contain only the cross-links table (for
+  multi-PR stacks) and the commit body. Existing PRs pick up the new layout on
+  the next `submit` (unless `--keep-body` is set).
 * `autoland` confirmation (`c`) checkpoints now list the remaining plan steps
   ("Next steps: …") before prompting, so you can see what you're approving into
   before confirming. (#16)
