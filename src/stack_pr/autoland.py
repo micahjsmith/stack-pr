@@ -866,7 +866,12 @@ def rebase_and_resubmit(common: cli.CommonArgs) -> None:
 
     console.print("[bold]Re-submitting stack...[/bold]")
     cli.command_submit(
-        resubmit_common, draft=False, reviewer="", keep_body=True, draft_bitmask=None
+        resubmit_common,
+        draft=False,
+        reviewer="",
+        keep_body=True,
+        keep_title=True,
+        draft_bitmask=None,
     )
 
 
