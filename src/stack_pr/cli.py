@@ -955,6 +955,13 @@ def get_pr_body(e: StackEntry) -> str:
     return str(json.loads(out)["body"] or "").strip()
 
 
+def get_pr_title(e: StackEntry) -> str:
+    out = get_command_output(
+        ["gh", "pr", "view", e.pr, "--json", "title"],
+    )
+    return str(json.loads(out)["title"] or "").strip()
+
+
 def edit_pr_base(
     pr: str,
     base: str,
@@ -998,7 +1005,9 @@ def edit_pr_base(
         )
 
 
-def add_cross_links(st: list[StackEntry], *, keep_body: bool, verbose: bool) -> None:
+def add_cross_links(
+    st: list[StackEntry], *, keep_body: bool, keep_title: bool, verbose: bool
+) -> None:
     # Build the maintained list of PRs once - it's identical for every PR in
     # the stack (apart from which one is marked as current).
     pr_ids = build_stack_pr_list(st)
@@ -1007,7 +1016,10 @@ def add_cross_links(st: list[StackEntry], *, keep_body: bool, verbose: bool) -> 
         pr_id = last(e.pr)
         pr_toc = generate_toc(pr_ids, pr_id)
 
-        title = e.commit.title()
+        # By default the PR title tracks the commit subject. With keep_title the
+        # existing PR title on GitHub is preserved instead (e.g. a hand-edited
+        # title with a ticket prefix), so a local reword doesn't overwrite it.
+        title = get_pr_title(e) if keep_title else e.commit.title()
         body = e.commit.commit_msg()
 
         # Strip the title (the first commit line) from the body: it becomes the
@@ -1242,6 +1254,7 @@ def command_submit(
     draft: bool,
     reviewer: str,
     keep_body: bool,
+    keep_title: bool = False,
     draft_bitmask: list[bool] | None = None,
 ) -> None:
     """Entry point for 'submit' command.
@@ -1251,6 +1264,7 @@ def command_submit(
         draft: Boolean flag indicating if the PRs should be created as drafts.
         reviewer: String representing the reviewer of the PRs.
         keep_body: Boolean flag indicating if the body of the PRs should be kept.
+        keep_title: Boolean flag indicating if the title of the PRs should be kept.
         draft_bitmask: List of boolean values indicating if each PR should be created as
             a draft.
     """
@@ -1334,7 +1348,9 @@ def command_submit(
     push_branches(st, remote=args.remote, target=args.target, verbose=args.verbose)
 
     log(h("Adding cross-links to PRs"), level=1)
-    add_cross_links(st, keep_body=keep_body, verbose=args.verbose)
+    add_cross_links(
+        st, keep_body=keep_body, keep_title=keep_title, verbose=args.verbose
+    )
 
     if need_to_rebase_current:
         log(h(f"Rebasing the original branch '{current_branch}'"), level=2)
@@ -1993,6 +2009,12 @@ def create_argparser(
         help="Keep current PR body and only add/update cross links",
     )
     parser_submit.add_argument(
+        "--keep-title",
+        action="store_true",
+        default=config.getboolean("common", "keep_title", fallback=False),
+        help="Keep current PR title instead of overwriting it from the commit",
+    )
+    parser_submit.add_argument(
         "-d",
         "--draft",
         action="store_true",
@@ -2187,6 +2209,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
                 draft=args.draft,
                 reviewer=args.reviewer,
                 keep_body=args.keep_body,
+                keep_title=args.keep_title,
                 draft_bitmask=args.draft_bitmask,
             )
         elif args.command == "land":
