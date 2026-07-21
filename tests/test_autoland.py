@@ -24,8 +24,10 @@ from stack_pr.autoland import (
     _next_steps_lines,
     _run_fresh,
     evaluate_checks,
+    format_plan_for_editor,
     generate_default_plan,
     parse_plan,
+    plan_from_file,
 )
 from stack_pr.cli import CommonArgs
 
@@ -341,6 +343,102 @@ def test_parse_plan_rejects_too_many_lands() -> None:
 def test_parse_plan_rejects_unknown_step() -> None:
     with pytest.raises(ValueError, match="unrecognized step"):
         parse_plan("frobnicate\n", _stack(1))
+
+
+# --- plan from file ------------------------------------------------------
+
+
+def test_editor_format_round_trips_through_plan_from_file(tmp_path) -> None:  # noqa: ANN001
+    # The file format is exactly what the $EDITOR shows: rendering the default
+    # plan and loading it back must reproduce the same steps.
+    stack = _stack(2)
+    plan = generate_default_plan(stack, default_workflow="deploy.yaml")
+    path = tmp_path / "plan.txt"
+    path.write_text(format_plan_for_editor(stack, plan))
+
+    loaded = plan_from_file(path, stack)
+    assert [type(s) for s in loaded] == [type(s) for s in plan]
+    assert [s.entry_index for s in loaded if isinstance(s, LandStep)] == [0, 1]
+    assert loaded[-1].workflow == "deploy.yaml"
+
+
+def test_plan_from_file_parses_hand_written_plan(tmp_path) -> None:  # noqa: ANN001
+    path = tmp_path / "plan.txt"
+    path.write_text(
+        "# a hand-written plan\n"
+        "l          # PR #0\n"
+        "w deploy.yaml\n"
+        "c QA sign-off complete\n"
+        "\n"
+        "l\n"
+    )
+    steps = plan_from_file(path, _stack(2))
+    assert [type(s) for s in steps] == [LandStep, WorkflowStep, ConfirmStep, LandStep]
+    assert steps[1].workflow == "deploy.yaml"
+    assert steps[2].condition == "QA sign-off complete"
+
+
+def test_plan_from_file_missing_file_exits(tmp_path, mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    with pytest.raises(SystemExit) as exc:
+        plan_from_file(tmp_path / "nope.txt", _stack(1))
+    assert exc.value.code == 1
+
+
+def test_plan_from_file_invalid_content_exits(tmp_path, mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    path = tmp_path / "plan.txt"
+    path.write_text("frobnicate\n")
+    with pytest.raises(SystemExit) as exc:
+        plan_from_file(path, _stack(1))
+    assert exc.value.code == 1
+
+
+def test_plan_file_arg_parses_and_is_exclusive_with_interactive() -> None:
+    import configparser  # noqa: PLC0415
+
+    from stack_pr import cli  # noqa: PLC0415
+
+    parser = cli.create_argparser(configparser.ConfigParser())
+    args = parser.parse_args(["autoland", "--plan-file", "plan.txt"])
+    assert str(args.plan_file) == "plan.txt"
+
+    # -i and --plan-file both set the plan source, so they're mutually exclusive.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["autoland", "-i", "--plan-file", "plan.txt"])
+
+
+def test_from_config_and_args_resolves_plan_file_to_absolute() -> None:
+    opts = AutolandOptions.from_config_and_args(
+        configparser.ConfigParser(), _args(plan_file="plan.txt")
+    )
+    assert opts.plan_file is not None
+    assert opts.plan_file.is_absolute()
+
+
+def _merge_queue_cfg() -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    cfg.add_section("autoland")
+    cfg.set("autoland", "merge_queue", "true")
+    return cfg
+
+
+def test_run_autoland_rejects_plan_file_with_count(mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    with pytest.raises(SystemExit) as exc:
+        autoland.run_autoland(
+            _common(), _args(plan_file="plan.txt", count=2), _merge_queue_cfg()
+        )
+    assert exc.value.code == 1
+
+
+def test_run_autoland_rejects_plan_file_with_resume(mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    with pytest.raises(SystemExit) as exc:
+        autoland.run_autoland(
+            _common(), _args(plan_file="plan.txt", resume=True), _merge_queue_cfg()
+        )
+    assert exc.value.code == 1
 
 
 # --- confirm next-steps preview ------------------------------------------
