@@ -374,12 +374,39 @@ def test_parse_plan_pins_land_steps_to_named_prs() -> None:
 
 @pytest.mark.parametrize(
     "ref",
-    ["101", "https://github.com/user/repo/pull/101"],
+    [
+        "101",
+        "https://github.com/user/repo/pull/101",
+        "https://github.com/USER/Repo/pull/101",  # owner/repo are case-insensitive
+        "https://github.com/user/repo/pull/101/",
+    ],
 )
-def test_parse_plan_accepts_pr_reference_forms(ref: str) -> None:
+def test_parse_plan_accepts_pr_reference_forms(ref: str, mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.github, "owner_repo", return_value=("user", "repo"))
     steps = parse_plan(f"l {ref}\n", _pinned_stack([101]))
     assert steps[0].pr_number == 101
     assert steps[0].entry_index == 0
+
+
+def test_parse_plan_rejects_pr_url_from_another_repo(mocker) -> None:  # noqa: ANN001
+    # The number would resolve against *this* repo, landing an unrelated PR.
+    mocker.patch.object(autoland.github, "owner_repo", return_value=("user", "repo"))
+    with pytest.raises(ValueError, match="across repositories is not currently"):
+        parse_plan(
+            "l https://github.com/other/project/pull/101\n", _pinned_stack([101])
+        )
+
+
+def test_parse_plan_rejects_duplicate_pinned_pr() -> None:
+    # Regression: this used to index past the stack and raise IndexError, which
+    # no caller catches.
+    with pytest.raises(ValueError, match="already landed by an earlier 'l' step"):
+        parse_plan("l 101\nl 101\n", _pinned_stack([101]))
+
+
+def test_parse_plan_rejects_duplicate_pinned_pr_mid_stack() -> None:
+    with pytest.raises(ValueError, match="already landed by an earlier 'l' step"):
+        parse_plan("l 101\nl 102\nl 101\n", _pinned_stack([101, 102, 103]))
 
 
 def test_parse_plan_treats_hash_pr_reference_as_a_comment() -> None:
@@ -689,6 +716,25 @@ def test_execute_plan_skips_landed_prefix_and_targets_last_landed_sha(mocker) ->
     # landed prefix is looked up, not every PR in it.
     pinned = [c.args[2] for c in refresh.call_args_list if len(c.args) > 2]
     assert pinned == [102]
+
+
+def test_confirm_step_banner_is_a_single_line(mocker) -> None:  # noqa: ANN001
+    # Regression: the banner was once built as two list elements, so the join
+    # split "Step 1/1: Manual confirmation required" across two lines.
+    console = mocker.patch("stack_pr.autoland.console")
+    console.input.return_value = "y"
+    mocker.patch("stack_pr.autoland._refresh_last_landed_sha")
+
+    ctx = LandingContext(stack=_pinned_stack([101]), plan=[ConfirmStep(condition="QA")])
+    checkpointer = AutolandCheckpointer(
+        path=Path("/dev/null"), branch="feat", base="main"
+    )
+    mocker.patch.object(checkpointer, "save")
+
+    assert autoland.execute_plan(ctx, _common(), _opts(), checkpointer) is True
+
+    printed = "\n".join(str(c.args[0]) for c in console.print.call_args_list if c.args)
+    assert "Step 1/1: Manual confirmation required" in printed
 
 
 def test_execute_plan_lands_a_pinned_step_that_is_still_open(mocker) -> None:  # noqa: ANN001

@@ -676,13 +676,6 @@ l 2                     # PR #2, already landed upstream
 l 3                     # <- autoland will land this PR next
 ```
 
-Skipping is checked, not assumed. If a PR named by an `l` step is neither in
-the stack nor merged, or if the next PR in the stack isn't the one the next
-live `l` step names, `autoland` fails before touching anything rather than
-landing a PR the plan didn't call for. So a plan can be re-run after each
-partial land, and it either continues exactly where it left off or tells you
-the stack no longer matches it.
-
 You can also write a plan by PR number for a stack that has not started landing
 yet — `l 1`, `l 2`, `l 3` — and it behaves identically to the bare-`l` form
 until the first PR merges.

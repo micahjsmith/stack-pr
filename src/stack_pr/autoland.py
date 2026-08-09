@@ -1053,17 +1053,43 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
     return "\n".join(lines)
 
 
-# A pinned PR reference: a bare number, or the PR's GitHub URL. Note that the
-# '#123' spelling is deliberately unsupported: '#' starts a comment, so 'l #123'
-# is indistinguishable from a bare 'l' with a comment after it.
-RE_PR_URL = re.compile(r"^https?://\S+/pull/(\d+)/?$")
+# A pinned PR reference: a bare number, or the PR's URL. The owner and repo are
+# captured so a URL can be checked against the repo being landed into. Note that
+# the '#123' spelling is deliberately unsupported: '#' starts a comment, so
+# 'l #123' is indistinguishable from a bare 'l' with a comment after it.
+RE_PR_URL = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$")
+
+
+def _current_owner_repo() -> tuple[str, str]:
+    """The repository autoland is landing into, as ``(owner, name)``."""
+    try:
+        return github.owner_repo()
+    except (RuntimeError, KeyError, json.JSONDecodeError) as e:
+        raise ValueError(f"Could not determine the current repository: {e}") from e
 
 
 def _parse_pr_ref(ref: str, line_num: int) -> int:
-    """Parse the argument of an ``l`` step into a PR number."""
+    """Parse the argument of an ``l`` step into a PR number.
+
+    A URL must point at the repository being landed into. Everything downstream
+    — the merge check, the merge queue, the stack itself — is resolved against
+    that single repo, so a PR elsewhere could not be landed even if its number
+    were understood; saying so beats silently landing whatever PR happens to
+    carry the same number here.
+    """
     m = RE_PR_URL.match(ref)
     if m:
-        return int(m.group(1))
+        owner, repo, number = m.groups()
+        this_owner, this_repo = _current_owner_repo()
+        # GitHub treats owner/repo case-insensitively, so a URL that differs
+        # only in case still points at this repo.
+        if (owner.lower(), repo.lower()) != (this_owner.lower(), this_repo.lower()):
+            raise ValueError(
+                f"Line {line_num}: {ref} points at {owner}/{repo}, but this "
+                f"stack lands into {this_owner}/{this_repo} — landing PRs "
+                "across repositories is not currently supported"
+            )
+        return int(number)
     if ref.isdigit():
         return int(ref)
     raise ValueError(
@@ -1212,6 +1238,15 @@ def _resolve_land_step(
                 "which is still open — the stack no longer matches this plan"
             )
         return LandStep(entry_index=-1, pr_number=pr_number)
+
+    if index < next_index:
+        # An earlier 'l' step already claimed this stack entry. Catching this
+        # here also keeps `stack[next_index]` below in range: every remaining
+        # case has next_index < index < len(stack).
+        raise ValueError(
+            f"Line {line_num}: PR #{pr_number} is already landed by an earlier "
+            "'l' step — each PR can be landed only once"
+        )
 
     if index != next_index:
         expected = stack[next_index].pr_number
@@ -1865,8 +1900,10 @@ def execute_plan(
             )
             lines = [
                 f"\n{'=' * 60}",
-                f"[bold yellow]Step {step_idx + 1}/{len(ctx.plan)}: ",
-                "Manual confirmation required[/bold yellow]",
+                (
+                    f"[bold yellow]Step {step_idx + 1}/{len(ctx.plan)}: "
+                    "Manual confirmation required[/bold yellow]"
+                ),
                 f"{'=' * 60}\n",
                 f"[bold]{question}[/bold]\n",
             ]
