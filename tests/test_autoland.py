@@ -64,6 +64,12 @@ def _common() -> CommonArgs:
     )
 
 
+def _opts(**overrides) -> AutolandOptions:  # noqa: ANN003
+    return AutolandOptions.from_config_and_args(
+        configparser.ConfigParser(), _args(**overrides)
+    )
+
+
 # --- options -------------------------------------------------------------
 
 
@@ -345,7 +351,170 @@ def test_parse_plan_rejects_unknown_step() -> None:
         parse_plan("frobnicate\n", _stack(1))
 
 
+# --- pinned land steps ---------------------------------------------------
+
+
+def _pinned_stack(numbers: list[int]) -> list:
+    return [
+        StackEntry(pr_url=f"u/{n}", pr_number=n, branch=f"b{n}", title=f"PR {n}")
+        for n in numbers
+    ]
+
+
+def _never_merged(_pr: int) -> bool:
+    return False
+
+
+def test_parse_plan_pins_land_steps_to_named_prs() -> None:
+    steps = parse_plan("l 101\nl 102\n", _pinned_stack([101, 102]))
+    assert [s.entry_index for s in steps] == [0, 1]
+    assert [s.pr_number for s in steps] == [101, 102]
+    assert not any(s.already_landed for s in steps)
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "101",
+        "https://github.com/user/repo/pull/101",
+        "https://github.com/USER/Repo/pull/101",  # owner/repo are case-insensitive
+        "https://github.com/user/repo/pull/101/",
+    ],
+)
+def test_parse_plan_accepts_pr_reference_forms(ref: str, mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.github, "owner_repo", return_value=("user", "repo"))
+    steps = parse_plan(f"l {ref}\n", _pinned_stack([101]))
+    assert steps[0].pr_number == 101
+    assert steps[0].entry_index == 0
+
+
+def test_parse_plan_rejects_pr_url_from_another_repo(mocker) -> None:  # noqa: ANN001
+    # The number would resolve against *this* repo, landing an unrelated PR.
+    mocker.patch.object(autoland.github, "owner_repo", return_value=("user", "repo"))
+    with pytest.raises(ValueError, match="across repositories is not currently"):
+        parse_plan(
+            "l https://github.com/other/project/pull/101\n", _pinned_stack([101])
+        )
+
+
+def test_parse_plan_rejects_duplicate_pinned_pr() -> None:
+    # Regression: this used to index past the stack and raise IndexError, which
+    # no caller catches.
+    with pytest.raises(ValueError, match="already landed by an earlier 'l' step"):
+        parse_plan("l 101\nl 101\n", _pinned_stack([101]))
+
+
+def test_parse_plan_rejects_duplicate_pinned_pr_mid_stack() -> None:
+    with pytest.raises(ValueError, match="already landed by an earlier 'l' step"):
+        parse_plan("l 101\nl 102\nl 101\n", _pinned_stack([101, 102, 103]))
+
+
+def test_parse_plan_treats_hash_pr_reference_as_a_comment() -> None:
+    # '#' starts a comment, so 'l #102' cannot pin a PR — it is a bare 'l'
+    # with a trailing comment, and lands the next PR in the stack.
+    steps = parse_plan("l #102\n", _pinned_stack([101, 102]))
+    assert steps[0].entry_index == 0
+    assert steps[0].pr_number == 101
+
+
+def test_parse_plan_skips_land_steps_whose_prs_already_landed() -> None:
+    # #101 and #102 have merged and been rebased away, so only #103 remains in
+    # the stack — but the plan that named all three still has to work.
+    steps = parse_plan(
+        "l 101\nc QA sign-off complete\nl 102\nl 103\n",
+        _pinned_stack([103]),
+        pr_is_merged=lambda pr: pr in (101, 102),
+    )
+    lands = [s for s in steps if isinstance(s, LandStep)]
+    assert [s.already_landed for s in lands] == [True, True, False]
+    assert [s.pr_number for s in lands] == [101, 102, 103]
+    assert lands[-1].entry_index == 0
+
+
+def test_parse_plan_marks_steps_before_the_landed_prefix_done() -> None:
+    # A workflow and a confirmation sandwiched between two landed PRs must have
+    # happened already — re-running the plan shouldn't ask for them again.
+    steps = parse_plan(
+        "l 101\nw deploy.yaml\nc QA sign-off complete\nl 102\nw deploy.yaml\nl 103\n",
+        _pinned_stack([103]),
+        pr_is_merged=lambda pr: pr in (101, 102),
+    )
+    assert steps[1].state == "skipped"
+    assert steps[2].confirmed is True
+    # The workflow *after* the last landed PR still has to run.
+    assert steps[4].state == "pending"
+
+
+def test_parse_plan_marks_nothing_done_when_nothing_has_landed() -> None:
+    # Regression: with no landed steps there is no completed prefix, and the
+    # workflow/confirmation steps must all still run.
+    steps = parse_plan(
+        "l 101\nw deploy.yaml\nc QA sign-off complete\nl 102\n",
+        _pinned_stack([101, 102]),
+    )
+    assert steps[1].state == "pending"
+    assert steps[2].confirmed is False
+
+
+def test_parse_plan_rejects_pinned_pr_that_is_neither_open_nor_merged() -> None:
+    with pytest.raises(ValueError, match="not in the stack and has not been merged"):
+        parse_plan("l 999\n", _pinned_stack([101]), pr_is_merged=_never_merged)
+
+
+def test_parse_plan_rejects_land_step_out_of_stack_order() -> None:
+    # The plan wants #102 next, but #101 is still below it in the stack.
+    with pytest.raises(ValueError, match=r"lands PR #102 next.*stack is #101"):
+        parse_plan("l 102\n", _pinned_stack([101, 102]), pr_is_merged=_never_merged)
+
+
+def test_parse_plan_rejects_landed_step_after_a_still_open_one() -> None:
+    # #102 merged out of order, ahead of #101 which the plan lands first.
+    with pytest.raises(ValueError, match=r"#102 has already merged.*after PR #101"):
+        parse_plan(
+            "l 101\nl 102\n",
+            _pinned_stack([101]),
+            pr_is_merged=lambda pr: pr == 102,
+        )
+
+
+def test_parse_plan_rejects_malformed_pr_reference() -> None:
+    with pytest.raises(ValueError, match="takes a PR number or URL"):
+        parse_plan("l next-one\n", _pinned_stack([101]))
+
+
+def test_parse_plan_pinned_and_bare_land_steps_can_mix() -> None:
+    # A bare 'l' keeps taking the next stack entry, pinned or not.
+    steps = parse_plan("l 101\nl\n", _pinned_stack([101, 102]))
+    assert [s.entry_index for s in steps] == [0, 1]
+    assert [s.pr_number for s in steps] == [101, 102]
+
+
+def test_parse_plan_land_steps_survive_a_fully_landed_prefix() -> None:
+    # Nothing left to land, but a trailing workflow still needs to be waited on.
+    steps = parse_plan(
+        "l 101\nw deploy.yaml\n",
+        _pinned_stack([102]),
+        pr_is_merged=lambda pr: pr == 101,
+    )
+    assert steps[0].already_landed
+    assert steps[1].state == "pending"
+
+
+def test_parse_plan_consults_github_for_unknown_prs(mocker) -> None:  # noqa: ANN001
+    pr_state = mocker.patch.object(autoland.github, "pr_state", return_value="MERGED")
+    steps = parse_plan("l 101\nl 102\n", _pinned_stack([102]))
+    assert steps[0].already_landed
+    pr_state.assert_called_once_with(101)
+
+
 # --- plan from file ------------------------------------------------------
+
+
+def test_editor_format_pins_pr_numbers() -> None:
+    stack = _pinned_stack([101, 102])
+    text = format_plan_for_editor(stack, generate_default_plan(stack))
+    assert "l 101    # PR 101" in text
+    assert "l 102    # PR 102" in text
 
 
 def test_editor_format_round_trips_through_plan_from_file(tmp_path) -> None:  # noqa: ANN001
@@ -464,6 +633,39 @@ def test_describe_step_untitled_land() -> None:
     assert _describe_step(LandStep(entry_index=0), ctx) == "Land PR #9: (untitled)"
 
 
+def test_describe_step_already_landed_land() -> None:
+    # No stack entry to read a title from — the step still has to describe itself.
+    ctx = LandingContext(stack=_stack(1))
+    step = LandStep(entry_index=-1, pr_number=101)
+    assert _describe_step(step, ctx) == "Land PR #101 (already landed)"
+
+
+def test_render_status_plain_shows_already_landed_step() -> None:
+    ctx = LandingContext(
+        stack=_pinned_stack([102]),
+        plan=[LandStep(entry_index=-1, pr_number=101), LandStep(entry_index=0)],
+    )
+    assert "Land PR #101 — already landed" in autoland.render_status_plain(ctx)
+
+
+@pytest.mark.skipif(not autoland.HAVE_RICH, reason="requires the rich extra")
+def test_render_status_table_handles_already_landed_step() -> None:
+    # The already-landed step has no stack entry behind it; rendering it must
+    # not reach into ctx.stack.
+    ctx = LandingContext(
+        stack=_pinned_stack([102]),
+        plan=[LandStep(entry_index=-1, pr_number=101), LandStep(entry_index=0)],
+    )
+    rendered = autoland.render_status_table(ctx)
+    from rich.console import Console as RichConsole  # noqa: PLC0415
+
+    with RichConsole(record=True, width=100) as rich_console:
+        rich_console.print(rendered)
+    text = rich_console.export_text()
+    assert "Land PR #101" in text
+    assert "Already landed" in text
+
+
 def test_next_steps_lines_numbers_remaining_only() -> None:
     stack = [StackEntry(pr_url="u", pr_number=7, branch="b", title="X [1,25] Y")]
     plan = [ConfirmStep(), LandStep(entry_index=0), WorkflowStep(workflow="d.yaml")]
@@ -481,6 +683,79 @@ def test_next_steps_lines_empty_for_final_step() -> None:
     plan = [LandStep(entry_index=0), ConfirmStep()]
     ctx = LandingContext(stack=_stack(1), plan=plan)
     assert _next_steps_lines(plan, 1, ctx) == []
+
+
+# --- executing a partially-landed plan -----------------------------------
+
+
+def test_execute_plan_skips_landed_prefix_and_targets_last_landed_sha(mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    refresh = mocker.patch("stack_pr.autoland._refresh_last_landed_sha")
+    wait_for_workflow = mocker.patch(
+        "stack_pr.autoland.wait_for_workflow", return_value=True
+    )
+
+    stack = _pinned_stack([103])
+    plan = parse_plan(
+        "l 101\nw deploy.yaml\nc QA sign-off complete\nl 102\nw deploy.yaml\n",
+        stack,
+        pr_is_merged=lambda pr: pr in (101, 102),
+    )
+    ctx = LandingContext(stack=stack, plan=plan)
+    checkpointer = AutolandCheckpointer(
+        path=Path("/dev/null"), branch="feat", base="main"
+    )
+    mocker.patch.object(checkpointer, "save")
+
+    assert autoland.execute_plan(ctx, _common(), _opts(), checkpointer) is True
+
+    # Only the trailing workflow runs; the skipped one and the confirmation
+    # (which would otherwise block on stdin) are passed over.
+    wait_for_workflow.assert_called_once()
+    # The trailing workflow waits for #102's code: only the last PR of the
+    # landed prefix is looked up, not every PR in it.
+    pinned = [c.args[2] for c in refresh.call_args_list if len(c.args) > 2]
+    assert pinned == [102]
+
+
+def test_confirm_step_banner_is_a_single_line(mocker) -> None:  # noqa: ANN001
+    # Regression: the banner was once built as two list elements, so the join
+    # split "Step 1/1: Manual confirmation required" across two lines.
+    console = mocker.patch("stack_pr.autoland.console")
+    console.input.return_value = "y"
+    mocker.patch("stack_pr.autoland._refresh_last_landed_sha")
+
+    ctx = LandingContext(stack=_pinned_stack([101]), plan=[ConfirmStep(condition="QA")])
+    checkpointer = AutolandCheckpointer(
+        path=Path("/dev/null"), branch="feat", base="main"
+    )
+    mocker.patch.object(checkpointer, "save")
+
+    assert autoland.execute_plan(ctx, _common(), _opts(), checkpointer) is True
+
+    printed = "\n".join(str(c.args[0]) for c in console.print.call_args_list if c.args)
+    assert "Step 1/1: Manual confirmation required" in printed
+
+
+def test_execute_plan_lands_a_pinned_step_that_is_still_open(mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    mocker.patch("stack_pr.autoland._refresh_last_landed_sha")
+    approval = mocker.patch("stack_pr.autoland.wait_for_approval", return_value=True)
+    checks = mocker.patch("stack_pr.autoland.wait_for_checks", return_value=True)
+    enqueue = mocker.patch("stack_pr.autoland.enqueue_and_wait", return_value=True)
+
+    stack = _pinned_stack([103])
+    plan = parse_plan("l 102\nl 103\n", stack, pr_is_merged=lambda pr: pr == 102)
+    ctx = LandingContext(stack=stack, plan=plan)
+    checkpointer = AutolandCheckpointer(
+        path=Path("/dev/null"), branch="feat", base="main"
+    )
+    mocker.patch.object(checkpointer, "save")
+
+    assert autoland.execute_plan(ctx, _common(), _opts(), checkpointer) is True
+
+    for mock in (approval, checks, enqueue):
+        assert mock.call_args.args[0] is stack[0]
 
 
 # --- state round-trip ----------------------------------------------------

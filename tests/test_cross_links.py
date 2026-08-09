@@ -217,9 +217,7 @@ def test_add_cross_links_new_pr_ignores_keep_flags(mocker) -> None:  # noqa: ANN
     body_spy = mocker.patch("stack_pr.cli.get_pr_body", return_value="Upstream body")
     edit = mocker.patch("stack_pr.cli.edit_pr_base")
 
-    add_cross_links(
-        [e], keep_body=True, keep_title=True, verbose=False, created={"1"}
-    )
+    add_cross_links([e], keep_body=True, keep_title=True, verbose=False, created={"1"})
 
     assert edit.call_args.kwargs["extra_args"] == ["-t", "Commit title", "-F", "-"]
     assert _body_written(edit).strip() == "Commit body"
