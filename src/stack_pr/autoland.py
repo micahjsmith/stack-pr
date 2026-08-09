@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -195,9 +196,23 @@ class StackEntry:
 
 @dataclass
 class LandStep:
-    """Land the next PR in the stack through the merge queue."""
+    """Land a PR in the stack through the merge queue.
+
+    ``entry_index`` indexes into ``LandingContext.stack``, or is ``-1`` for a
+    PR that has already landed: such a PR is no longer part of the stack, so
+    the step is skipped at execution time.
+
+    ``pr_number`` is set when the plan pinned a specific PR (``l 123``) and is
+    ``None`` for a bare, positional ``l``. It is the only thing identifying an
+    already-landed step, so it is always set when ``entry_index`` is ``-1``.
+    """
 
     entry_index: int
+    pr_number: int | None = None
+
+    @property
+    def already_landed(self) -> bool:
+        return self.entry_index < 0
 
 
 @dataclass
@@ -205,7 +220,7 @@ class WorkflowStep:
     """Wait for a GitHub Actions workflow to succeed with the landed code."""
 
     workflow: str
-    state: str = "pending"  # pending, waiting, succeeded, failed
+    state: str = "pending"  # pending, waiting, succeeded, failed, skipped
     error_message: str = ""
 
 
@@ -998,7 +1013,9 @@ def generate_default_plan(
     # Land the bottom `count` PRs (the whole stack when count is None). Landing
     # goes bottom-to-top, so a partial land is always a prefix of the stack.
     n = len(stack) if count is None else count
-    plan: list[PlanStep] = [LandStep(entry_index=i) for i in range(n)]
+    plan: list[PlanStep] = [
+        LandStep(entry_index=i, pr_number=stack[i].pr_number) for i in range(n)
+    ]
     # If a default workflow is configured, wait for it once those PRs have
     # landed. The user can still edit or remove this step in interactive mode.
     if default_workflow:
@@ -1009,14 +1026,12 @@ def generate_default_plan(
 def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str:
     lines = [
         "# Autoland plan — edit steps below.",
-        "# l             = land the next PR in the stack",
-        "# w <workflow>  = wait for a workflow to complete",
-        "# c [condition] = pause for manual confirmation; the optional",
-        "#                 condition names what to verify before proceeding",
-        "#                 (e.g. 'c QA sign-off complete')",
-        "#",
-        "# You don't have to land the whole stack: keep only the bottom PRs'",
-        "# 'l' steps (landing goes bottom-to-top) and the rest stay open.",
+        "# l [<pr>]        = land that PR (a number, or its URL); a bare 'l'",
+        "#                   lands the next PR in the stack instead",
+        "# w <workflow>    = wait for a workflow to complete",
+        "# c [<condition>] = pause for manual confirmation; the optional",
+        "#                   condition names what to verify before proceeding",
+        "#                   (e.g. 'c QA sign-off complete')",
         "#",
         "# Lines starting with # are comments and are ignored.",
         "# Blank lines are ignored.",
@@ -1024,8 +1039,12 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
     ]
     for step in plan:
         if isinstance(step, LandStep):
+            if step.already_landed:
+                lines.append(f"l {step.pr_number}    # already landed")
+                continue
             entry = stack[step.entry_index]
-            lines.append(f"l    # PR #{entry.pr_number}: {entry.title}")
+            comment = f"    # {entry.title}" if entry.title else ""
+            lines.append(f"l {entry.pr_number}{comment}")
         elif isinstance(step, WorkflowStep):
             lines.append(f"w {step.workflow}")
         elif isinstance(step, ConfirmStep):
@@ -1034,10 +1053,61 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
     return "\n".join(lines)
 
 
-def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
-    """Parse an edited plan back into steps. Raises ValueError if malformed."""
+# A pinned PR reference: a bare number, or the PR's GitHub URL. Note that the
+# '#123' spelling is deliberately unsupported: '#' starts a comment, so 'l #123'
+# is indistinguishable from a bare 'l' with a comment after it.
+RE_PR_URL = re.compile(r"^https?://\S+/pull/(\d+)/?$")
+
+
+def _parse_pr_ref(ref: str, line_num: int) -> int:
+    """Parse the argument of an ``l`` step into a PR number."""
+    m = RE_PR_URL.match(ref)
+    if m:
+        return int(m.group(1))
+    if ref.isdigit():
+        return int(ref)
+    raise ValueError(
+        f"Line {line_num}: 'l' takes a PR number or URL, not {ref!r} "
+        "(use a bare 'l' to land the next PR in the stack)"
+    )
+
+
+def _pr_is_merged(pr_number: int) -> bool:
+    """Whether GitHub reports *pr_number* as merged."""
+    try:
+        return github.pr_state(pr_number) == "MERGED"
+    except RuntimeError as e:
+        raise ValueError(f"Could not look up PR #{pr_number} on GitHub: {e}") from e
+
+
+def _mark_skipped(step: PlanStep) -> None:
+    """Mark a step as already satisfied by an earlier, partial run."""
+    if isinstance(step, WorkflowStep):
+        step.state = "skipped"
+    elif isinstance(step, ConfirmStep):
+        step.confirmed = True
+
+
+def parse_plan(
+    text: str,
+    stack: list[StackEntry],
+    *,
+    pr_is_merged: Callable[[int], bool] = _pr_is_merged,
+) -> list[PlanStep]:
+    """Parse an edited plan back into steps. Raises ValueError if malformed.
+
+    An ``l`` step may pin the PR it lands (``l 123`` or ``l <pr url>``) instead
+    of taking the next PR in the stack positionally. A pinned PR that has
+    already landed is no longer in the stack; such a step resolves to
+    ``entry_index=-1`` and is skipped at execution time, so one plan file stays
+    valid as the stack lands piece by piece. *pr_is_merged* checks that claim
+    against GitHub and is injectable for testing.
+    """
     steps: list[PlanStep] = []
-    land_counter = 0
+    # The next stack entry an 'l' step may claim. Landing goes bottom-to-top,
+    # so live land steps must take stack entries in order, starting at 0.
+    next_index = 0
+    land_steps = 0
 
     for line_num, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
@@ -1046,14 +1116,21 @@ def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
         if " #" in line:
             line = line[: line.index(" #")].strip()
 
-        if line == "l":
-            if land_counter >= len(stack):
-                raise ValueError(
-                    f"Line {line_num}: too many 'l' steps — "
-                    f"only {len(stack)} PRs in stack"
-                )
-            steps.append(LandStep(entry_index=land_counter))
-            land_counter += 1
+        if line == "l" or line.startswith("l "):
+            ref = line[2:].strip() if line.startswith("l ") else ""
+            land = _resolve_land_step(
+                ref,
+                line_num,
+                stack=stack,
+                next_index=next_index,
+                pr_is_merged=pr_is_merged,
+            )
+            steps.append(land)
+            land_steps += 1
+            # An already-landed step claims no stack entry, so the next live
+            # 'l' still expects the PR currently at the bottom of the stack.
+            if not land.already_landed:
+                next_index += 1
         elif line.startswith("w "):
             workflow = line[2:].strip()
             if not workflow:
@@ -1069,19 +1146,91 @@ def parse_plan(text: str, stack: list[StackEntry]) -> list[PlanStep]:
     # A partial land is allowed (land only the bottom N PRs), but the plan must
     # land at least one PR. Because 'l' steps take stack entries bottom-to-top,
     # the landed PRs are always a prefix of the stack; the rest stay open.
-    if land_counter == 0:
+    if land_steps == 0:
         raise ValueError("Plan has no 'l' steps — nothing to land")
+
+    # Everything up to the last already-landed 'l' step happened in an earlier
+    # run: the workflows ran and the confirmations were given before those PRs
+    # could have merged. Mark them done so a re-run picks up where it left off
+    # rather than re-prompting for sign-off on work that already shipped.
+    # Note the `default=0`: with nothing landed there is no prefix to mark, and
+    # a negative index here would slice from the *end* of the plan instead.
+    last_landed = max(
+        (
+            i
+            for i, s in enumerate(steps)
+            if isinstance(s, LandStep) and s.already_landed
+        ),
+        default=0,
+    )
+    for step in steps[:last_landed]:
+        _mark_skipped(step)
+
     return steps
+
+
+def _resolve_land_step(
+    ref: str,
+    line_num: int,
+    *,
+    stack: list[StackEntry],
+    next_index: int,
+    pr_is_merged: Callable[[int], bool],
+) -> LandStep:
+    """Resolve one ``l`` line against the stack. Raises ValueError if it can't."""
+    if not ref:
+        # Bare 'l': take the next PR in the stack, as plans always have.
+        if next_index >= len(stack):
+            raise ValueError(
+                f"Line {line_num}: too many 'l' steps — only {len(stack)} PRs in stack"
+            )
+        return LandStep(entry_index=next_index, pr_number=stack[next_index].pr_number)
+
+    pr_number = _parse_pr_ref(ref, line_num)
+    index = next(
+        (i for i, e in enumerate(stack) if e.pr_number == pr_number),
+        None,
+    )
+
+    if index is None:
+        # Not in the stack: the only benign explanation is that it already
+        # landed and was rebased away. Confirm that with GitHub rather than
+        # silently skipping a typo'd or unrelated PR number.
+        if not pr_is_merged(pr_number):
+            raise ValueError(
+                f"Line {line_num}: PR #{pr_number} is not in the stack and has "
+                "not been merged — check the PR number, or that you are landing "
+                "the stack this plan was written for"
+            )
+        if next_index:
+            # Already-landed steps are the completed prefix of a plan, so one
+            # appearing after a step we still have to land means the stack
+            # merged out of the order the plan describes.
+            raise ValueError(
+                f"Line {line_num}: PR #{pr_number} has already merged, but the "
+                f"plan lands it after PR #{stack[next_index - 1].pr_number}, "
+                "which is still open — the stack no longer matches this plan"
+            )
+        return LandStep(entry_index=-1, pr_number=pr_number)
+
+    if index != next_index:
+        expected = stack[next_index].pr_number
+        raise ValueError(
+            f"Line {line_num}: plan lands PR #{pr_number} next, but the next PR "
+            f"in the stack is #{expected} — the stack no longer matches this plan"
+        )
+
+    return LandStep(entry_index=index, pr_number=pr_number)
 
 
 def plan_from_file(path: Path, stack: list[StackEntry]) -> list[PlanStep]:
     """Load a landing plan from a file.
 
     The file uses the exact same format as the interactive editor (see
-    ``format_plan_for_editor``): ``l`` / ``w <workflow>`` / ``c [condition]``
-    steps, with ``#`` comments and blank lines ignored. It is parsed by the
-    same ``parse_plan`` the editor uses, so a file saved from ``-i`` (or written
-    by hand in that format) round-trips.
+    ``format_plan_for_editor``): ``l [pr]`` / ``w <workflow>`` /
+    ``c [condition]`` steps, with ``#`` comments and blank lines ignored. It is
+    parsed by the same ``parse_plan`` the editor uses, so a file saved from
+    ``-i`` (or written by hand in that format) round-trips.
     """
     try:
         text = path.read_text()
@@ -1172,7 +1321,15 @@ _WORKFLOW_STEP_STYLES = {
     "waiting": ("Waiting for workflow", "blue"),
     "succeeded": ("Workflow complete", "green"),
     "failed": ("Failed", "red bold"),
+    "skipped": ("Skipped (ran before an earlier land)", "dim"),
 }
+
+
+def _land_entry(ctx: LandingContext, step: LandStep) -> StackEntry | None:
+    """The stack entry a land step targets, or None if its PR already landed."""
+    if step.already_landed:
+        return None
+    return ctx.stack[step.entry_index]
 
 
 def render_status_table(ctx: LandingContext) -> Table:  # pragma: no cover
@@ -1187,7 +1344,13 @@ def render_status_table(ctx: LandingContext) -> Table:  # pragma: no cover
             table.add_section()
         pointer = "->" if step_idx == ctx.current_step else " "
 
-        if isinstance(step, LandStep):
+        if isinstance(step, LandStep) and step.already_landed:
+            table.add_row(
+                f"{pointer} Step {step_idx + 1}/{len(plan)}",
+                Text(f"Land PR #{step.pr_number}", style="bold"),
+            )
+            table.add_row("  Status", Text("Already landed", style="green"))
+        elif isinstance(step, LandStep):
             entry = ctx.stack[step.entry_index]
             table.add_row(
                 f"{pointer} Step {step_idx + 1}/{len(plan)}",
@@ -1230,7 +1393,12 @@ def render_status_plain(ctx: LandingContext) -> str:
     plan = ctx.plan or generate_default_plan(ctx.stack)
     for i, step in enumerate(plan):
         cur = "->" if i == ctx.current_step else "  "
-        if isinstance(step, LandStep):
+        if isinstance(step, LandStep) and step.already_landed:
+            lines.append(
+                f"{cur} [{i + 1}/{len(plan)}] Land PR #{step.pr_number} — "
+                "already landed"
+            )
+        elif isinstance(step, LandStep):
             e = ctx.stack[step.entry_index]
             lines.append(
                 f"{cur} [{i + 1}/{len(plan)}] Land PR #{e.pr_number}: "
@@ -1279,7 +1447,9 @@ def _escape_markup(text: str) -> str:
 def _describe_step(step: PlanStep, ctx: LandingContext) -> str:
     """A one-line, human-readable description of a plan step."""
     if isinstance(step, LandStep):
-        entry = ctx.stack[step.entry_index]
+        entry = _land_entry(ctx, step)
+        if entry is None:
+            return f"Land PR #{step.pr_number} (already landed)"
         return f"Land PR #{entry.pr_number}: {entry.title or '(untitled)'}"
     if isinstance(step, WorkflowStep):
         return f"Wait for workflow {step.workflow}"
@@ -1585,12 +1755,31 @@ def execute_plan(
     checkpointer: AutolandCheckpointer,
 ) -> bool:
     """Execute the landing plan from ctx.current_step. Returns True on success."""
+    # A workflow checkpoint after the already-landed prefix of a plan should
+    # wait for the code of the last PR that prefix landed. Only that last one
+    # matters, so don't pay for a fetch + lookup on each of the others.
+    last_prelanded = max(
+        (
+            i
+            for i, s in enumerate(ctx.plan)
+            if isinstance(s, LandStep) and s.already_landed
+        ),
+        default=-1,
+    )
+
     for step_idx in range(ctx.current_step, len(ctx.plan)):
         step = ctx.plan[step_idx]
         ctx.current_step = step_idx
         checkpointer.save(ctx)
 
-        if isinstance(step, LandStep):
+        if isinstance(step, LandStep) and step.already_landed:
+            console.print(
+                f"\n[green]PR #{step.pr_number} already landed, skipping[/green]"
+            )
+            if step_idx == last_prelanded:
+                _refresh_last_landed_sha(ctx, common, step.pr_number)
+
+        elif isinstance(step, LandStep):
             entry = ctx.stack[step.entry_index]
             ctx.current_index = step.entry_index
 
@@ -1650,6 +1839,8 @@ def execute_plan(
                     )
 
         elif isinstance(step, WorkflowStep):
+            if step.state == "skipped":
+                continue
             console.print(
                 f"\n{'=' * 60}\n[bold]Step {step_idx + 1}/{len(ctx.plan)}: "
                 f"Workflow checkpoint — {step.workflow}[/bold]\n{'=' * 60}"
@@ -1898,7 +2089,11 @@ def _finish(
     console.print("\n")
     print_status(ctx)
     if success:
-        landed = sum(1 for s in ctx.plan if isinstance(s, LandStep))
+        # Count only the steps this run actually landed: a step whose PR landed
+        # in an earlier run has no entry in today's stack to count against.
+        landed = sum(
+            1 for s in ctx.plan if isinstance(s, LandStep) and not s.already_landed
+        )
         total = len(ctx.stack)
         if landed < total:
             console.print(

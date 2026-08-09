@@ -586,13 +586,12 @@ Options:
 
 Only one `autoland` can run against a given branch at a time: while a run is in
 progress it holds a per-branch lock (`~/.stack-pr/autoland/<branch>.json.lock`)
-next to its checkpoint, so a second `autoland` on the same branch exits
-immediately rather than racing the first. The lock is released automatically
-when the run ends — including on failure or Ctrl+C — while the checkpoint is
-kept so you can `--resume`. If you start a *new* (non-`--resume`) `autoland`
-while a checkpoint from a previous run still exists, `autoland` warns that a
-land is already in progress and asks you to confirm before overwriting it (the
-previous run then can no longer be resumed).
+next to its checkpoint. The lock is released automatically when the run ends —
+including on failure or Ctrl+C — while the checkpoint is kept so you can
+`--resume`. If you start a *new* (non-`--resume`) `autoland` while a checkpoint
+from a previous run still exists, `autoland` warns that a land is already in
+progress and asks you to confirm before overwriting it (the previous run then
+can no longer be resumed).
 
 Everything repo-specific is configured under `[autoland]` (see [Config
 files](#config-files)), so a repository captures its workflow in
@@ -625,15 +624,16 @@ installed (`pipx install 'stack-pr[rich]'` or add the `rich` extra); otherwise
 ##### Example plan
 
 With `-i`, `autoland` opens a plan in `$EDITOR`. Each non-comment line is one
-step, run top to bottom: `l` lands the next PR in the stack, `w <workflow>`
-waits for a named GitHub Actions workflow to finish with the landed code, and
+step, run top to bottom: `l <pr>` lands that PR, `w <workflow>` waits for a
+named GitHub Actions workflow to finish with the landed code, and
 `c [condition]` pauses for manual confirmation (the condition is optional). For
 a three-PR stack, a plan that lands the bottom PR, waits for a deploy, gets
 manual sign-off, then lands the rest looks like:
 
 ```
 # Autoland plan — edit steps below.
-# l             = land the next PR in the stack
+# l <pr>        = land that PR (a number, or its URL); a bare 'l'
+#                 lands the next PR in the stack instead
 # w <workflow>  = wait for a workflow to complete
 # c [condition] = pause for manual confirmation; the optional
 #                 condition names what to verify before proceeding
@@ -642,12 +642,16 @@ manual sign-off, then lands the rest looks like:
 # Lines starting with # are comments and are ignored.
 # Blank lines are ignored.
 #
-l                        # PR #101: Add /widgets API endpoint
+l 101                    # Add /widgets API endpoint
 w deploy.yaml            # wait for the deploy of PR #101 to finish
 c QA sign-off complete   # pause until QA has signed off
-l                        # PR #102: Wire up the widgets UI
-l                        # PR #103: Update the docs
+l 102                    # Wire up the widgets UI
+l 103                    # Update the docs
 ```
+
+A bare `l` with no PR number lands whatever PR is next in the stack, which is
+what plans looked like before `l` learned to name its PR. Both forms can appear
+in the same plan.
 
 When `autoland` reaches the `c` step it prompts
 `Confirm "QA sign-off complete" is complete — ready to proceed?` and waits for
@@ -657,6 +661,37 @@ The same format can be loaded from a file with `--plan-file` instead of editing
 it interactively — for example, save the block above to `plan.txt` and run
 `stack-pr autoland --plan-file plan.txt`. This is handy for repeatable or
 scripted landings.
+
+##### Re-using a plan across a partially-landed stack
+
+Because each `l` step names the PR it lands, one plan file stays valid as the
+stack lands piece by piece. A PR that has already merged is no longer part of
+the stack, so `autoland` skips its `l` step — along with any `w` and `c` steps
+that come before it, since those must have run before that PR could merge:
+
+```
+l 1                     # PR #1, already landed upstream
+c QA sign-off complete  # assumed completed
+l 2                     # PR #2, already landed upstream
+l 3                     # <- autoland will land this PR next
+```
+
+Skipping is checked, not assumed. If a PR named by an `l` step is neither in
+the stack nor merged, or if the next PR in the stack isn't the one the next
+live `l` step names, `autoland` fails before touching anything rather than
+landing a PR the plan didn't call for. So a plan can be re-run after each
+partial land, and it either continues exactly where it left off or tells you
+the stack no longer matches it.
+
+You can also write a plan by PR number for a stack that has not started landing
+yet — `l 1`, `l 2`, `l 3` — and it behaves identically to the bare-`l` form
+until the first PR merges.
+
+One workflow this enables: keep a design doc and an autoland plan together in
+the final PR of the stack. The design doc is updated as the stack changes
+during development, and the plan is re-used and updated as the stack lands.
+That gives you an "as implemented" design doc alongside a self-documenting
+deploy/rollout plan that others can review.
 
 #### view
 
