@@ -1865,8 +1865,8 @@ def execute_plan(
             )
             lines = [
                 f"\n{'=' * 60}",
-                f"[bold yellow]Step {step_idx + 1}/{len(ctx.plan)}: "
-                f"Manual confirmation required[/bold yellow]",
+                f"[bold yellow]Step {step_idx + 1}/{len(ctx.plan)}: ",
+                "Manual confirmation required[/bold yellow]",
                 f"{'=' * 60}\n",
                 f"[bold]{question}[/bold]\n",
             ]
