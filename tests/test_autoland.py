@@ -10,6 +10,11 @@ import pytest
 
 from stack_pr import autoland
 from stack_pr.autoland import (
+    _ASCII_GLYPHS,
+    _ICON_CELLS,
+    _POINTER_CELLS,
+    _RE_MARKUP,
+    _UNICODE_GLYPHS,
     AutolandCheckpointer,
     AutolandLock,
     AutolandOptions,
@@ -22,6 +27,7 @@ from stack_pr.autoland import (
     _confirm_overwrite_state,
     _describe_step,
     _next_steps_lines,
+    _pick_glyphs,
     _plan_rows,
     _run_fresh,
     _StepRow,
@@ -693,21 +699,21 @@ def test_pointer_starts_after_the_landed_prefix() -> None:
     # Regression: the pointer sat on step 1, implying autoland was about to
     # re-land a PR that merged in an earlier run.
     rows = _plan_rows(_partly_landed_ctx())
-    assert [r.number for r in rows if r.pointer == "→"] == ["5."]
+    assert [r.number for r in rows if r.is_next] == ["5."]
 
 
 def test_pointer_follows_current_step_once_a_run_is_under_way() -> None:
     ctx = _partly_landed_ctx()
     ctx.current_step = 5
     rows = _plan_rows(ctx)
-    assert [r.number for r in rows if r.pointer == "→"] == ["6."]
+    assert [r.number for r in rows if r.is_next] == ["6."]
 
 
 def test_pointer_starts_at_step_one_when_nothing_has_landed() -> None:
     stack = _pinned_stack([101, 102])
     ctx = LandingContext(stack=stack, plan=parse_plan("l 101\nl 102\n", stack))
     rows = _plan_rows(ctx)
-    assert [r.number for r in rows if r.pointer == "→"] == ["1."]
+    assert [r.number for r in rows if r.is_next] == ["1."]
 
 
 def test_land_row_detail_omits_retries_until_something_is_retried() -> None:
@@ -773,6 +779,97 @@ def test_render_status_rich_does_not_parse_a_pr_title_as_markup() -> None:
     with RichConsole(record=True, width=100) as rich_console:
         rich_console.print(autoland.render_status_rich(ctx))
     assert "Scale to [1,25]" in rich_console.export_text()
+
+
+# --- display: encoding, alignment, and truncation -------------------------
+
+
+def test_plain_console_keeps_bracketed_text_that_is_not_a_style() -> None:
+    # Regression: the markup stripper ate any bracketed lowercase word, so a PR
+    # titled "[wip] make it fast" lost its tag on the no-rich path.
+    assert _RE_MARKUP.sub("", "[bold red]x[/bold red] [wip] [1,25]") == (
+        "x [wip] [1,25]"
+    )
+
+
+def test_ascii_glyphs_are_used_when_stdout_cannot_encode_emoji(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.sys, "stdout", mocker.Mock(encoding="cp1252"))
+    assert _pick_glyphs() is _ASCII_GLYPHS
+
+
+def test_unicode_glyphs_are_used_on_a_utf8_stdout(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.sys, "stdout", mocker.Mock(encoding="utf-8"))
+    assert _pick_glyphs() is _UNICODE_GLYPHS
+
+
+def test_plain_status_is_encodable_on_a_legacy_code_page(mocker) -> None:  # noqa: ANN001
+    # Printing an un-encodable glyph raises UnicodeEncodeError, and print_status
+    # runs from the SIGINT handler and from _finish — so even a successful run
+    # would die on the way out, stranding its checkpoint and worktree.
+    mocker.patch.object(autoland, "GLYPHS", _ASCII_GLYPHS)
+    autoland.render_status_plain(_partly_landed_ctx()).encode("cp1252")
+
+
+@pytest.mark.parametrize(
+    "glyphs",
+    [_UNICODE_GLYPHS, _ASCII_GLYPHS],
+    ids=["unicode", "ascii"],
+)
+def test_every_icon_occupies_the_width_the_layout_assumes(glyphs) -> None:  # noqa: ANN001
+    # The columns after the icon are aligned by padding alone, so an icon of the
+    # wrong display width shifts every field on that row.
+    cell_len = len
+    if autoland.HAVE_RICH:
+        from rich.cells import cell_len  # noqa: PLC0415
+
+    for icon in (glyphs.done, glyphs.active, glyphs.pending, glyphs.failed):
+        assert cell_len(icon) == _ICON_CELLS
+    assert cell_len(glyphs.pointer) == _POINTER_CELLS
+
+
+def test_detail_line_hangs_under_the_status_column() -> None:
+    # Regression: the indent was computed with len() over a two-cell emoji, so
+    # every detail line sat one column left of the status it belongs to.
+    stack = _pinned_stack([101])
+    stack[0].error_message = "boom"
+    ctx = LandingContext(stack=stack, plan=[LandStep(entry_index=0, pr_number=101)])
+    header, detail = autoland.render_status_plain(ctx).splitlines()[3:5]
+
+    cell_len = len
+    if autoland.HAVE_RICH:
+        from rich.cells import cell_len  # noqa: PLC0415
+
+    status = _rows_by_number(ctx)["1."].status
+    assert cell_len(header[: header.index(status)]) == cell_len(
+        detail[: len(detail) - len(detail.lstrip())]
+    )
+
+
+@pytest.mark.skipif(not autoland.HAVE_RICH, reason="requires the rich extra")
+def test_rich_status_truncates_titles_but_never_the_failure_reason() -> None:
+    # A piped autoland gets rich's default 80-column width; the abort reason and
+    # the per-step error are the whole point of the output when a land fails.
+    stack = _pinned_stack([101])
+    stack[0].title = "A very long pull request title that will not fit " * 3
+    stack[0].error_message = (
+        "Checks failed after 3 retries: build-and-test, lint, typecheck, "
+        "integration-tests, docs, and a few more besides"
+    )
+    ctx = LandingContext(stack=stack, plan=[LandStep(entry_index=0, pr_number=101)])
+    ctx.aborted = True
+    ctx.abort_reason = (
+        "Rebase failed after merging #101: Command failed: git rebase --onto "
+        "origin/main abc123 def456 -- error: could not apply def456"
+    )
+    from rich.console import Console as RichConsole  # noqa: PLC0415
+
+    with RichConsole(record=True, width=80) as rich_console:
+        rich_console.print(autoland.render_status_rich(ctx))
+    text = rich_console.export_text()
+
+    assert "…" in text  # the title was clipped
+    assert ctx.abort_reason in " ".join(text.split())
+    assert stack[0].error_message in " ".join(text.split())
 
 
 def test_next_steps_lines_numbers_remaining_only() -> None:
