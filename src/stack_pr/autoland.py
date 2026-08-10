@@ -66,13 +66,11 @@ class _PlainConsole:
 
 try:
     from rich.console import Console
-    from rich.table import Table
     from rich.text import Text
 
     HAVE_RICH = True
 except ImportError:  # pragma: no cover - exercised only without the extra
     Console = _PlainConsole  # type: ignore[assignment,misc]
-    Table = None  # type: ignore[assignment,misc]
     Text = None  # type: ignore[assignment,misc]
     HAVE_RICH = False
 
@@ -1179,20 +1177,26 @@ def parse_plan(
     # run: the workflows ran and the confirmations were given before those PRs
     # could have merged. Mark them done so a re-run picks up where it left off
     # rather than re-prompting for sign-off on work that already shipped.
-    # Note the `default=0`: with nothing landed there is no prefix to mark, and
-    # a negative index here would slice from the *end* of the plan instead.
-    last_landed = max(
-        (
-            i
-            for i, s in enumerate(steps)
-            if isinstance(s, LandStep) and s.already_landed
-        ),
-        default=0,
-    )
-    for step in steps[:last_landed]:
+    # Note the `max(..., 0)`: with nothing landed there is no prefix to mark,
+    # and a negative index here would slice from the *end* of the plan instead.
+    for step in steps[: max(landed_prefix_end(steps), 0)]:
         _mark_skipped(step)
 
     return steps
+
+
+def landed_prefix_end(plan: list[PlanStep]) -> int:
+    """Index of the last ``l`` step whose PR had already landed, or -1 for none.
+
+    Every step at or before this index is complete: the PR merged, and the
+    workflow/confirm steps ahead of it must have run before it could. This is
+    the boundary ``parse_plan`` marks done, the display calls "assumed
+    completed", and ``execute_plan`` resumes from.
+    """
+    return max(
+        (i for i, s in enumerate(plan) if isinstance(s, LandStep) and s.already_landed),
+        default=-1,
+    )
 
 
 def _resolve_land_step(
@@ -1351,13 +1355,38 @@ _REVIEW_DECISION_DISPLAY = {
     "CHANGES_REQUESTED": ("Changes requested", "red"),
 }
 
-_WORKFLOW_STEP_STYLES = {
-    "pending": ("Pending", "dim"),
-    "waiting": ("Waiting for workflow", "blue"),
-    "succeeded": ("Workflow complete", "green"),
-    "failed": ("Failed", "red bold"),
-    "skipped": ("Skipped (ran before an earlier land)", "dim"),
+# One glyph per broad outcome, so a plan scans as a column of icons before any
+# of the words are read. All four are East Asian Wide (two cells), which keeps
+# the columns after them aligned without measuring anything.
+_ICON_DONE = "✅"
+_ICON_ACTIVE = "⏳"
+_ICON_PENDING = "⬜"
+_ICON_FAILED = "❌"
+
+_PR_STATE_ICONS = {
+    PRState.PENDING: _ICON_PENDING,
+    PRState.WAITING_FOR_APPROVAL: _ICON_ACTIVE,
+    PRState.WAITING_FOR_CHECKS: _ICON_ACTIVE,
+    PRState.IN_MERGE_QUEUE: _ICON_ACTIVE,
+    PRState.WAITING_FOR_WORKFLOW: _ICON_ACTIVE,
+    PRState.MERGED: _ICON_DONE,
+    PRState.FAILED: _ICON_FAILED,
 }
+
+# "skipped" is set only by _mark_skipped, i.e. for a workflow that sits inside a
+# plan's already-landed prefix — it must have run before those PRs could merge,
+# so the plan assumes it did rather than claiming it was deliberately skipped.
+_WORKFLOW_STEP_STATUS = {
+    "pending": (_ICON_PENDING, "Pending", "dim"),
+    "waiting": (_ICON_ACTIVE, "Waiting for workflow", "blue"),
+    "succeeded": (_ICON_DONE, "Workflow complete", "green"),
+    "failed": (_ICON_FAILED, "Failed", "red bold"),
+    "skipped": (_ICON_DONE, "Assumed completed", "green"),
+}
+
+_STEP_KINDS = {LandStep: "Land", WorkflowStep: "Workflow", ConfirmStep: "Confirm"}
+
+_DONE_ICONS = frozenset({_ICON_DONE})
 
 
 def _land_entry(ctx: LandingContext, step: LandStep) -> StackEntry | None:
@@ -1367,104 +1396,206 @@ def _land_entry(ctx: LandingContext, step: LandStep) -> StackEntry | None:
     return ctx.stack[step.entry_index]
 
 
-def render_status_table(ctx: LandingContext) -> Table:  # pragma: no cover
-    """Render plan progress as a rich table (rich-only path)."""
-    table = Table(title="Autoland Progress", show_header=False, show_lines=True)
-    table.add_column("Field", style="bold dim", width=14, no_wrap=True)
-    table.add_column("Value", min_width=40)
+@dataclass(frozen=True)
+class _StepRow:
+    """One plan step, flattened into the fields the display lays out."""
 
+    pointer: str  # "→" on the next step with work left, else " "
+    icon: str
+    number: str  # "1.", "2." ...
+    status: str
+    status_style: str
+    kind: str  # Land / Workflow / Confirm
+    key: str  # "#103", "deploy.yaml", the confirm condition
+    note: str  # PR title, or "" when there is nothing to add
+    detail: str  # second line: error message, retry counts, ...
+
+    @property
+    def done(self) -> bool:
+        return self.icon in _DONE_ICONS
+
+    @property
+    def target(self) -> str:
+        return f"{self.key} - {self.note}" if self.note else self.key
+
+
+def _pointer_index(ctx: LandingContext, plan: list[PlanStep]) -> int:
+    """Index of the step the "→" marks: the first one with work left to do.
+
+    A plan replayed against a partially-landed stack opens with a prefix of
+    steps that are already satisfied (see ``landed_prefix_end``). Pointing at
+    step 1 there reads as "about to redo work that shipped last week", so the
+    pointer starts past the prefix. Once a run is under way ``current_step`` has
+    moved further along and wins.
+    """
+    return max(ctx.current_step, landed_prefix_end(plan) + 1)
+
+
+def _step_status(
+    step: PlanStep, ctx: LandingContext, *, index: int, prefix_end: int, pointer: int
+) -> tuple[str, str, str]:
+    """The (icon, label, style) a step shows in the status column."""
+    if isinstance(step, LandStep):
+        if step.already_landed:
+            return _ICON_DONE, "Landed", "green"
+        entry = ctx.stack[step.entry_index]
+        return (
+            _PR_STATE_ICONS.get(entry.state, _ICON_PENDING),
+            STATE_LABELS.get(entry.state, str(entry.state)),
+            STATE_STYLES.get(entry.state, ""),
+        )
+    if isinstance(step, WorkflowStep):
+        return _WORKFLOW_STEP_STATUS.get(step.state, (_ICON_PENDING, "Pending", "dim"))
+    # ConfirmStep. A confirmation inside the landed prefix was never actually
+    # given in this run — it is inferred from the fact that later PRs merged —
+    # so say so rather than claiming the user confirmed it.
+    if step.confirmed:
+        if index < prefix_end:
+            return _ICON_DONE, "Assumed completed", "green"
+        return _ICON_DONE, "Confirmed", "green"
+    if index == pointer:
+        return _ICON_ACTIVE, "Awaiting confirmation", "yellow"
+    return _ICON_PENDING, "Pending", "dim"
+
+
+def _step_target(step: PlanStep, ctx: LandingContext) -> tuple[str, str]:
+    """The step's subject as a (key, note) pair — e.g. ("#103", "Fix the thing")."""
+    if isinstance(step, LandStep):
+        entry = _land_entry(ctx, step)
+        if entry is None:
+            return f"#{step.pr_number}", ""
+        return f"#{entry.pr_number}", entry.title or "(untitled)"
+    if isinstance(step, WorkflowStep):
+        return step.workflow, ""
+    return step.condition or "(no condition)", ""
+
+
+def _step_detail(step: PlanStep, ctx: LandingContext) -> str:
+    """The step's second line, or "" when the header says everything."""
+    parts: list[str] = []
+    if isinstance(step, LandStep):
+        entry = _land_entry(ctx, step)
+        if entry is None:
+            return ""
+        if entry.error_message:
+            parts.append(entry.error_message)
+        # Retry counts only matter once something has been retried.
+        if entry.check_retries or entry.queue_retries:
+            parts.append(f"retries CI {entry.check_retries} / MQ {entry.queue_retries}")
+    elif isinstance(step, WorkflowStep) and step.error_message:
+        parts.append(step.error_message)
+    return " · ".join(parts)
+
+
+def _plan_rows(ctx: LandingContext) -> list[_StepRow]:
     plan = ctx.plan or generate_default_plan(ctx.stack)
-    for step_idx, step in enumerate(plan):
-        if step_idx > 0:
-            table.add_section()
-        pointer = "->" if step_idx == ctx.current_step else " "
+    pointer = _pointer_index(ctx, plan)
+    prefix_end = landed_prefix_end(plan)
+    rows = []
+    for index, step in enumerate(plan):
+        icon, status, style = _step_status(
+            step, ctx, index=index, prefix_end=prefix_end, pointer=pointer
+        )
+        key, note = _step_target(step, ctx)
+        rows.append(
+            _StepRow(
+                pointer="→" if index == pointer else " ",
+                icon=icon,
+                number=f"{index + 1}.",
+                status=status,
+                status_style=style,
+                kind=_STEP_KINDS[type(step)],
+                key=key,
+                note=note,
+                detail=_step_detail(step, ctx),
+            )
+        )
+    return rows
 
-        if isinstance(step, LandStep) and step.already_landed:
-            table.add_row(
-                f"{pointer} Step {step_idx + 1}/{len(plan)}",
-                Text(f"Land PR #{step.pr_number}", style="bold"),
-            )
-            table.add_row("  Status", Text("Already landed", style="green"))
-        elif isinstance(step, LandStep):
-            entry = ctx.stack[step.entry_index]
-            table.add_row(
-                f"{pointer} Step {step_idx + 1}/{len(plan)}",
-                Text(f"Land PR #{entry.pr_number}", style="bold"),
-            )
-            table.add_row("  Title", entry.title or "(untitled)")
-            status_text = STATE_LABELS.get(entry.state, str(entry.state))
-            if entry.error_message:
-                status_text += f"\n  {entry.error_message}"
-            table.add_row(
-                "  Status",
-                Text(status_text, style=STATE_STYLES.get(entry.state, "")),
-            )
-            table.add_row(
-                "  Retries",
-                f"CI {entry.check_retries} - MQ {entry.queue_retries}",
-            )
-        elif isinstance(step, WorkflowStep):
-            table.add_row(
-                f"{pointer} Step {step_idx + 1}/{len(plan)}",
-                Text("Workflow checkpoint", style="bold blue"),
-            )
-            table.add_row("  Workflow", step.workflow)
-            label, ds_style = _WORKFLOW_STEP_STYLES.get(step.state, ("Pending", "dim"))
-            table.add_row("  Status", Text(label, style=ds_style))
-        elif isinstance(step, ConfirmStep):
-            table.add_row(
-                f"{pointer} Step {step_idx + 1}/{len(plan)}",
-                Text("Manual confirmation", style="bold yellow"),
-            )
-            table.add_row("  Condition", step.condition or "(none)")
 
+def _plan_headline(rows: list[_StepRow]) -> str:
+    done = sum(1 for r in rows if r.done)
+    noun = "step" if len(rows) == 1 else "steps"
+    parts = [f"Autoland plan · {len(rows)} {noun}"]
+    if done:
+        parts += [f"{done} done", f"{len(rows) - done} remaining"]
+    return " · ".join(parts)
+
+
+def _column_widths(rows: list[_StepRow]) -> tuple[int, int, int]:
+    """Widths of the number, status, and kind columns (0s for an empty plan)."""
+    return (
+        max((len(r.number) for r in rows), default=0),
+        max((len(r.status) for r in rows), default=0),
+        max((len(r.kind) for r in rows), default=0),
+    )
+
+
+def _detail_indent(num_width: int) -> int:
+    """Column the "↳" detail line starts at: under the status field."""
+    return len("→ ") + len("⬜ ") + num_width + 1
+
+
+def render_status_rich(ctx: LandingContext) -> Text:  # pragma: no cover
+    """Render plan progress as compact, styled lines (rich-only path).
+
+    Text is appended rather than parsed as markup, so a PR title containing
+    something like "[1,25]" renders literally instead of being read as a style.
+    """
+    rows = _plan_rows(ctx)
+    num_w, status_w, kind_w = _column_widths(rows)
+    indent = " " * _detail_indent(num_w)
+
+    # A long PR title would otherwise wrap back to column 0 and destroy the
+    # alignment the format is built on. The plan is a scannable overview, so
+    # trim the overflowing line instead — the full title is on the PR.
+    out = Text(no_wrap=True, overflow="ellipsis")
+    out.append(_plan_headline(rows), style="bold")
+    out.append("\n")
+    for row in rows:
+        dim = "dim " if row.done else ""
+        out.append("\n")
+        out.append(f"{row.pointer} ", style="bold cyan")
+        out.append(f"{row.icon} ")
+        out.append(f"{row.number:<{num_w}} ", style=f"{dim}bold")
+        out.append(f"{row.status:<{status_w}}", style=row.status_style)
+        out.append(" | ", style="dim")
+        out.append(f"{row.kind:<{kind_w}}", style=f"{dim}bold")
+        out.append(" | ", style="dim")
+        out.append(row.key, style=f"{dim}cyan")
+        if row.note:
+            out.append(f" - {row.note}", style=dim.strip())
+        if row.detail:
+            out.append(f"\n{indent}↳ {row.detail}", style="dim")
     if ctx.aborted:
-        table.caption = f"ABORTED: {ctx.abort_reason}"
-    return table
+        out.append(f"\n\nABORTED: {ctx.abort_reason}", style="red bold")
+    return out
 
 
 def render_status_plain(ctx: LandingContext) -> str:
-    lines = ["", "Autoland Progress", "================="]
-    plan = ctx.plan or generate_default_plan(ctx.stack)
-    for i, step in enumerate(plan):
-        cur = "->" if i == ctx.current_step else "  "
-        if isinstance(step, LandStep) and step.already_landed:
-            lines.append(
-                f"{cur} [{i + 1}/{len(plan)}] Land PR #{step.pr_number} — "
-                "already landed"
-            )
-        elif isinstance(step, LandStep):
-            e = ctx.stack[step.entry_index]
-            lines.append(
-                f"{cur} [{i + 1}/{len(plan)}] Land PR #{e.pr_number}: "
-                f"{e.title or '(untitled)'}"
-            )
-            status = STATE_LABELS.get(e.state, str(e.state))
-            if e.error_message:
-                status += f" — {e.error_message}"
-            lines.append(f"      status: {status}")
-            lines.append(f"      retries: CI {e.check_retries} / MQ {e.queue_retries}")
-        elif isinstance(step, WorkflowStep):
-            label, _ = _WORKFLOW_STEP_STYLES.get(step.state, ("Pending", ""))
-            lines.append(
-                f"{cur} [{i + 1}/{len(plan)}] Workflow: {step.workflow} — {label}"
-            )
-        elif isinstance(step, ConfirmStep):
-            state = (
-                "confirmed"
-                if step.confirmed
-                else ("waiting" if i == ctx.current_step else "pending")
-            )
-            desc = f"Confirm: {step.condition}" if step.condition else "Confirm"
-            lines.append(f"{cur} [{i + 1}/{len(plan)}] {desc} — {state}")
+    """Render plan progress as plain text (the no-rich fallback)."""
+    rows = _plan_rows(ctx)
+    num_w, status_w, kind_w = _column_widths(rows)
+    indent = " " * _detail_indent(num_w)
+
+    lines = ["", _plan_headline(rows), ""]
+    for row in rows:
+        lines.append(
+            f"{row.pointer} {row.icon} {row.number:<{num_w}} "
+            f"{row.status:<{status_w}} | {row.kind:<{kind_w}} | {row.target}"
+        )
+        if row.detail:
+            lines.append(f"{indent}↳ {row.detail}")
     if ctx.aborted:
-        lines.append(f"ABORTED: {ctx.abort_reason}")
+        lines += ["", f"ABORTED: {ctx.abort_reason}"]
     return "\n".join(lines)
 
 
 def print_status(ctx: LandingContext) -> None:
     if HAVE_RICH:
-        console.print(render_status_table(ctx))
+        # no_wrap/overflow have to be given to print(): a Text's own settings
+        # only apply when it is nested inside another renderable.
+        console.print(render_status_rich(ctx), no_wrap=True, overflow="ellipsis")
     else:
         console.print(render_status_plain(ctx))
 
@@ -1793,14 +1924,7 @@ def execute_plan(
     # A workflow checkpoint after the already-landed prefix of a plan should
     # wait for the code of the last PR that prefix landed. Only that last one
     # matters, so don't pay for a fetch + lookup on each of the others.
-    last_prelanded = max(
-        (
-            i
-            for i, s in enumerate(ctx.plan)
-            if isinstance(s, LandStep) and s.already_landed
-        ),
-        default=-1,
-    )
+    last_prelanded = landed_prefix_end(ctx.plan)
 
     for step_idx in range(ctx.current_step, len(ctx.plan)):
         step = ctx.plan[step_idx]
