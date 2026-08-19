@@ -2,6 +2,7 @@ import argparse
 import configparser
 import dataclasses
 import sys
+import unicodedata
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -10,6 +11,11 @@ import pytest
 
 from stack_pr import autoland
 from stack_pr.autoland import (
+    _ASCII_GLYPHS,
+    _ICON_CELLS,
+    _POINTER_CELLS,
+    _RE_MARKUP,
+    _UNICODE_GLYPHS,
     AutolandCheckpointer,
     AutolandLock,
     AutolandOptions,
@@ -22,7 +28,10 @@ from stack_pr.autoland import (
     _confirm_overwrite_state,
     _describe_step,
     _next_steps_lines,
+    _pick_glyphs,
+    _plan_rows,
     _run_fresh,
+    _StepRow,
     evaluate_checks,
     format_plan_for_editor,
     generate_default_plan,
@@ -640,30 +649,234 @@ def test_describe_step_already_landed_land() -> None:
     assert _describe_step(step, ctx) == "Land PR #101 (already landed)"
 
 
+# --- plan display ---------------------------------------------------------
+
+
+def _partly_landed_ctx() -> LandingContext:
+    """A plan whose first two PRs landed in an earlier run, replayed today."""
+    stack = _pinned_stack([103])
+    plan = parse_plan(
+        "l 101\nw deploy.yaml\nc QA sign-off complete\nl 102\nw deploy.yaml\nl 103\n",
+        stack,
+        pr_is_merged=lambda pr: pr in (101, 102),
+    )
+    return LandingContext(stack=stack, plan=plan)
+
+
+def _rows_by_number(ctx: LandingContext) -> dict[str, _StepRow]:
+    return {row.number: row for row in _plan_rows(ctx)}
+
+
+def test_landed_prefix_end_finds_the_last_already_landed_step() -> None:
+    plan = _partly_landed_ctx().plan
+    assert autoland.landed_prefix_end(plan) == 3  # the 'l 102' step
+
+
+def test_landed_prefix_end_is_negative_when_nothing_landed() -> None:
+    # -1, not 0: callers slice with it, and 0 would wrongly name step 1.
+    assert autoland.landed_prefix_end([LandStep(entry_index=0), ConfirmStep()]) == -1
+
+
+def test_status_says_assumed_completed_inside_the_landed_prefix() -> None:
+    # The workflow and confirmation between #101 and #102 could not have been
+    # outstanding while those PRs merged, so the plan credits them as done
+    # rather than showing them as pending work.
+    rows = _rows_by_number(_partly_landed_ctx())
+    assert rows["2."].status == "Assumed completed"
+    assert rows["3."].status == "Assumed completed"
+    # The workflow *after* the landed prefix still has to run.
+    assert rows["5."].status == "Pending"
+
+
+def test_status_distinguishes_a_real_confirmation_from_an_assumed_one() -> None:
+    ctx = LandingContext(
+        stack=_pinned_stack([101]),
+        plan=[ConfirmStep(condition="QA", confirmed=True), LandStep(entry_index=0)],
+    )
+    assert _rows_by_number(ctx)["1."].status == "Confirmed"
+
+
+def test_pointer_starts_after_the_landed_prefix() -> None:
+    # Regression: the pointer sat on step 1, implying autoland was about to
+    # re-land a PR that merged in an earlier run.
+    rows = _plan_rows(_partly_landed_ctx())
+    assert [r.number for r in rows if r.is_next] == ["5."]
+
+
+def test_pointer_follows_current_step_once_a_run_is_under_way() -> None:
+    ctx = _partly_landed_ctx()
+    ctx.current_step = 5
+    rows = _plan_rows(ctx)
+    assert [r.number for r in rows if r.is_next] == ["6."]
+
+
+def test_pointer_starts_at_step_one_when_nothing_has_landed() -> None:
+    stack = _pinned_stack([101, 102])
+    ctx = LandingContext(stack=stack, plan=parse_plan("l 101\nl 102\n", stack))
+    rows = _plan_rows(ctx)
+    assert [r.number for r in rows if r.is_next] == ["1."]
+
+
+def test_land_row_detail_omits_retries_until_something_is_retried() -> None:
+    stack = _pinned_stack([101])
+    stack[0].error_message = "Checks in progress..."
+    ctx = LandingContext(stack=stack, plan=[LandStep(entry_index=0, pr_number=101)])
+    assert _rows_by_number(ctx)["1."].detail == "Checks in progress..."
+
+    stack[0].check_retries = 2
+    assert (
+        _rows_by_number(ctx)["1."].detail
+        == "Checks in progress... · retries CI 2 / MQ 0"
+    )
+
+
 def test_render_status_plain_shows_already_landed_step() -> None:
     ctx = LandingContext(
         stack=_pinned_stack([102]),
         plan=[LandStep(entry_index=-1, pr_number=101), LandStep(entry_index=0)],
     )
-    assert "Land PR #101 — already landed" in autoland.render_status_plain(ctx)
+    rendered = autoland.render_status_plain(ctx)
+    assert "Landed" in rendered
+    assert "| Land" in rendered
+    assert "#101" in rendered
+
+
+def test_render_status_plain_headline_counts_completed_steps() -> None:
+    rendered = autoland.render_status_plain(_partly_landed_ctx())
+    assert "Autoland plan · 6 steps · 4 done · 2 remaining" in rendered
+
+
+def test_render_status_plain_reports_an_abort() -> None:
+    ctx = _partly_landed_ctx()
+    ctx.aborted = True
+    ctx.abort_reason = "PR #103 checks failed"
+    assert "ABORTED: PR #103 checks failed" in autoland.render_status_plain(ctx)
 
 
 @pytest.mark.skipif(not autoland.HAVE_RICH, reason="requires the rich extra")
-def test_render_status_table_handles_already_landed_step() -> None:
+def test_render_status_rich_handles_already_landed_step() -> None:
     # The already-landed step has no stack entry behind it; rendering it must
     # not reach into ctx.stack.
     ctx = LandingContext(
         stack=_pinned_stack([102]),
         plan=[LandStep(entry_index=-1, pr_number=101), LandStep(entry_index=0)],
     )
-    rendered = autoland.render_status_table(ctx)
+    rendered = autoland.render_status_rich(ctx)
     from rich.console import Console as RichConsole  # noqa: PLC0415
 
     with RichConsole(record=True, width=100) as rich_console:
         rich_console.print(rendered)
     text = rich_console.export_text()
-    assert "Land PR #101" in text
-    assert "Already landed" in text
+    assert "#101" in text
+    assert "Landed" in text
+
+
+@pytest.mark.skipif(not autoland.HAVE_RICH, reason="requires the rich extra")
+def test_render_status_rich_does_not_parse_a_pr_title_as_markup() -> None:
+    stack = [StackEntry(pr_url="u", pr_number=7, branch="b", title="Scale to [1,25]")]
+    ctx = LandingContext(stack=stack, plan=[LandStep(entry_index=0, pr_number=7)])
+    from rich.console import Console as RichConsole  # noqa: PLC0415
+
+    with RichConsole(record=True, width=100) as rich_console:
+        rich_console.print(autoland.render_status_rich(ctx))
+    assert "Scale to [1,25]" in rich_console.export_text()
+
+
+# --- display: encoding, alignment, and truncation -------------------------
+
+
+def test_plain_console_keeps_bracketed_text_that_is_not_a_style() -> None:
+    # Regression: the markup stripper ate any bracketed lowercase word, so a PR
+    # titled "[wip] make it fast" lost its tag on the no-rich path.
+    assert _RE_MARKUP.sub("", "[bold red]x[/bold red] [wip] [1,25]") == (
+        "x [wip] [1,25]"
+    )
+
+
+def test_ascii_glyphs_are_used_when_stdout_cannot_encode_emoji(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.sys, "stdout", mocker.Mock(encoding="cp1252"))
+    assert _pick_glyphs() is _ASCII_GLYPHS
+
+
+def test_unicode_glyphs_are_used_on_a_utf8_stdout(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.sys, "stdout", mocker.Mock(encoding="utf-8"))
+    assert _pick_glyphs() is _UNICODE_GLYPHS
+
+
+def test_plain_status_is_encodable_on_a_legacy_code_page(mocker) -> None:  # noqa: ANN001
+    # Printing an un-encodable glyph raises UnicodeEncodeError, and print_status
+    # runs from the SIGINT handler and from _finish — so even a successful run
+    # would die on the way out, stranding its checkpoint and worktree.
+    mocker.patch.object(autoland, "GLYPHS", _ASCII_GLYPHS)
+    autoland.render_status_plain(_partly_landed_ctx()).encode("cp1252")
+
+
+def _cell_len(text: str) -> int:
+    """Display width of *text* in terminal cells.
+
+    rich measures this itself; without the extra installed, fall back to the
+    East Asian width table it derives from, so the alignment tests still run on
+    the no-rich path — where len() undercounts every wide glyph by one.
+    """
+    if autoland.HAVE_RICH:
+        from rich.cells import cell_len  # noqa: PLC0415
+
+        return cell_len(text)
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+
+
+@pytest.mark.parametrize(
+    "glyphs",
+    [_UNICODE_GLYPHS, _ASCII_GLYPHS],
+    ids=["unicode", "ascii"],
+)
+def test_every_icon_occupies_the_width_the_layout_assumes(glyphs) -> None:  # noqa: ANN001
+    # The columns after the icon are aligned by padding alone, so an icon of the
+    # wrong display width shifts every field on that row.
+    for icon in (glyphs.done, glyphs.active, glyphs.pending, glyphs.failed):
+        assert _cell_len(icon) == _ICON_CELLS
+    assert _cell_len(glyphs.pointer) == _POINTER_CELLS
+
+
+def test_detail_line_hangs_under_the_status_column() -> None:
+    # Regression: the indent was computed with len() over a two-cell emoji, so
+    # every detail line sat one column left of the status it belongs to.
+    stack = _pinned_stack([101])
+    stack[0].error_message = "boom"
+    ctx = LandingContext(stack=stack, plan=[LandStep(entry_index=0, pr_number=101)])
+    header, detail = autoland.render_status_plain(ctx).splitlines()[3:5]
+
+    status = _rows_by_number(ctx)["1."].status
+    assert _cell_len(header[: header.index(status)]) == _cell_len(
+        detail[: len(detail) - len(detail.lstrip())]
+    )
+
+
+@pytest.mark.skipif(not autoland.HAVE_RICH, reason="requires the rich extra")
+def test_rich_status_truncates_titles_but_never_the_failure_reason() -> None:
+    # A piped autoland gets rich's default 80-column width; the abort reason and
+    # the per-step error are the whole point of the output when a land fails.
+    stack = _pinned_stack([101])
+    stack[0].title = "A very long pull request title that will not fit " * 3
+    stack[0].error_message = (
+        "Checks failed after 3 retries: build-and-test, lint, typecheck, "
+        "integration-tests, docs, and a few more besides"
+    )
+    ctx = LandingContext(stack=stack, plan=[LandStep(entry_index=0, pr_number=101)])
+    ctx.aborted = True
+    ctx.abort_reason = (
+        "Rebase failed after merging #101: Command failed: git rebase --onto "
+        "origin/main abc123 def456 -- error: could not apply def456"
+    )
+    from rich.console import Console as RichConsole  # noqa: PLC0415
+
+    with RichConsole(record=True, width=80) as rich_console:
+        rich_console.print(autoland.render_status_rich(ctx))
+    text = rich_console.export_text()
+
+    assert "…" in text  # the title was clipped
+    assert ctx.abort_reason in " ".join(text.split())
+    assert stack[0].error_message in " ".join(text.split())
 
 
 def test_next_steps_lines_numbers_remaining_only() -> None:
