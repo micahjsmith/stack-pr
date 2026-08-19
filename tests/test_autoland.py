@@ -2,6 +2,7 @@ import argparse
 import configparser
 import dataclasses
 import sys
+import unicodedata
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -810,6 +811,20 @@ def test_plain_status_is_encodable_on_a_legacy_code_page(mocker) -> None:  # noq
     autoland.render_status_plain(_partly_landed_ctx()).encode("cp1252")
 
 
+def _cell_len(text: str) -> int:
+    """Display width of *text* in terminal cells.
+
+    rich measures this itself; without the extra installed, fall back to the
+    East Asian width table it derives from, so the alignment tests still run on
+    the no-rich path — where len() undercounts every wide glyph by one.
+    """
+    if autoland.HAVE_RICH:
+        from rich.cells import cell_len  # noqa: PLC0415
+
+        return cell_len(text)
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+
+
 @pytest.mark.parametrize(
     "glyphs",
     [_UNICODE_GLYPHS, _ASCII_GLYPHS],
@@ -818,13 +833,9 @@ def test_plain_status_is_encodable_on_a_legacy_code_page(mocker) -> None:  # noq
 def test_every_icon_occupies_the_width_the_layout_assumes(glyphs) -> None:  # noqa: ANN001
     # The columns after the icon are aligned by padding alone, so an icon of the
     # wrong display width shifts every field on that row.
-    cell_len = len
-    if autoland.HAVE_RICH:
-        from rich.cells import cell_len  # noqa: PLC0415
-
     for icon in (glyphs.done, glyphs.active, glyphs.pending, glyphs.failed):
-        assert cell_len(icon) == _ICON_CELLS
-    assert cell_len(glyphs.pointer) == _POINTER_CELLS
+        assert _cell_len(icon) == _ICON_CELLS
+    assert _cell_len(glyphs.pointer) == _POINTER_CELLS
 
 
 def test_detail_line_hangs_under_the_status_column() -> None:
@@ -835,12 +846,8 @@ def test_detail_line_hangs_under_the_status_column() -> None:
     ctx = LandingContext(stack=stack, plan=[LandStep(entry_index=0, pr_number=101)])
     header, detail = autoland.render_status_plain(ctx).splitlines()[3:5]
 
-    cell_len = len
-    if autoland.HAVE_RICH:
-        from rich.cells import cell_len  # noqa: PLC0415
-
     status = _rows_by_number(ctx)["1."].status
-    assert cell_len(header[: header.index(status)]) == cell_len(
+    assert _cell_len(header[: header.index(status)]) == _cell_len(
         detail[: len(detail) - len(detail.lstrip())]
     )
 
