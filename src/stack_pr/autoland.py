@@ -955,10 +955,7 @@ def _refresh_last_landed_sha(
         pass  # non-critical; will retry when needed
 
 
-# git's own minimum abbreviation length. A shorter prefix does not identify a
-# commit, so comparing on fewer characters than this could match two unrelated
-# SHAs — and here a false match would declare a workflow checkpoint satisfied
-# by a deploy of the wrong code.
+# git's own minimum abbreviation length
 _MIN_SHA_LEN = 7
 
 
