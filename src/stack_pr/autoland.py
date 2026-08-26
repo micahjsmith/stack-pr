@@ -684,6 +684,31 @@ class GitHub:
                 return merge.get("oid") or None
         return None
 
+    def contains(self, ancestor: str, descendant: str) -> bool | None:
+        """Whether ``ancestor`` is an ancestor of ``descendant``, per GitHub.
+
+        Asks the compare API for the merge base of the two commits, so this
+        works for commits that were never fetched into the local clone.
+        Returns ``None`` if GitHub could not answer (network error, or a commit
+        it does not know either) — that is "unknown", not "no".
+        """
+        try:
+            owner, repo = self.owner_repo()
+            # per_page=1 trims the (unused) commit list in the response.
+            path = f"repos/{owner}/{repo}/compare/{ancestor}...{descendant}"
+            result = run(
+                ["gh", "api", f"{path}?per_page=1", "--jq", ".merge_base_commit.sha"],
+                quiet=True,
+            )
+        except RuntimeError:
+            return None
+        merge_base = result.stdout.strip()
+        if not merge_base or merge_base == "null":  # jq prints null for a miss
+            return None
+        # ancestor is an ancestor of descendant exactly when it *is* the merge
+        # base of the two (this also covers the identical-commit case).
+        return _sha_eq(merge_base, ancestor)
+
 
 github = GitHub()
 
@@ -936,13 +961,94 @@ def _refresh_last_landed_sha(
         pass  # non-critical; will retry when needed
 
 
-def _is_ancestor(ancestor: str, descendant: str) -> bool:
+# git's own minimum abbreviation length
+_MIN_SHA_LEN = 7
+
+
+def _sha_eq(a: str, b: str) -> bool:
+    """Whether two (possibly abbreviated) SHAs name the same commit.
+
+    Comparison is on the shorter SHA's length; anything shorter than
+    ``_MIN_SHA_LEN`` is too ambiguous to call equal, so it is reported as
+    different.
+    """
+    n = min(len(a), len(b))
+    if n < _MIN_SHA_LEN:
+        return False
+    return a[:n].lower() == b[:n].lower()
+
+
+def _local_is_ancestor(ancestor: str, descendant: str) -> bool | None:
+    """Whether ``ancestor`` is an ancestor of ``descendant``, per this clone.
+
+    ``None`` means the local repo cannot answer: ``git merge-base
+    --is-ancestor`` exits 128 ("Not a valid commit name") when either commit is
+    missing from this clone, rather than 1 for a genuine "no". The two must not
+    be conflated — a workflow run's head commit is routinely absent here,
+    because ``origin/<target>`` advances while we poll.
+    """
     result = run(
         ["git", "merge-base", "--is-ancestor", ancestor, descendant],
         check=False,
         quiet=True,
     )
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+class _Ancestry:
+    """Answers "does this workflow run's commit include the code we landed?".
+
+    Tries the local repo first, then a fetch of the target branch, then the
+    GitHub compare API. The fetch is what usually resolves it: the run's head
+    commit is a commit on ``<remote>/<target>`` that this clone has not seen
+    yet. The API call covers the rest (e.g. a merge-queue commit that never
+    landed on the target branch, or a clone that cannot fetch).
+
+    Commits are immutable, so a definitive verdict is cached for the rest of
+    the wait; the poll loop re-examines the same runs every interval.
+    """
+
+    def __init__(self, common: cli.CommonArgs) -> None:
+        self._common = common
+        self._verdicts: dict[tuple[str, str], bool] = {}
+        self._fetched_for: set[str] = set()
+
+    def contains(self, ancestor: str, descendant: str) -> bool | None:
+        """Whether ``descendant`` is ``ancestor`` or a commit after it.
+
+        ``None`` if neither git nor GitHub could tell us.
+        """
+        if _sha_eq(ancestor, descendant):
+            return True
+        key = (ancestor, descendant)
+        if key in self._verdicts:
+            return self._verdicts[key]
+
+        verdict = _local_is_ancestor(ancestor, descendant)
+        if verdict is None and descendant not in self._fetched_for:
+            # A commit is missing locally. Fetch the target branch once for
+            # this commit and retry; fetching again for the same commit would
+            # not tell us anything new.
+            self._fetched_for.add(descendant)
+            self._fetch_target()
+            verdict = _local_is_ancestor(ancestor, descendant)
+        if verdict is None:
+            verdict = github.contains(ancestor, descendant)
+
+        if verdict is not None:
+            self._verdicts[key] = verdict
+        return verdict
+
+    def _fetch_target(self) -> None:
+        with contextlib.suppress(RuntimeError):  # fetch is non-critical
+            run(
+                ["git", "fetch", self._common.remote, self._common.target],
+                quiet=True,
+            )
 
 
 def wait_for_workflow(
@@ -960,6 +1066,7 @@ def wait_for_workflow(
         f"\n[dim]Target SHA: {target_sha[:12]}[/dim]"
     )
 
+    ancestry = _Ancestry(common)
     awake_elapsed = 0.0
     while True:
         if ctx.aborted:
@@ -987,7 +1094,15 @@ def wait_for_workflow(
             run_sha = wf_run.get("headSha", "")
             if not run_sha:
                 continue
-            if run_sha == target_sha or _is_ancestor(target_sha, run_sha):
+            verdict = ancestry.contains(target_sha, run_sha)
+            if verdict is None:
+                console.print(
+                    f"[yellow]Warning: could not tell whether run "
+                    f"{run_sha[:12]} includes {target_sha[:12]}; "
+                    "will retry[/yellow]"
+                )
+                continue
+            if verdict:
                 step.state = "succeeded"
                 step.error_message = ""
                 console.print(

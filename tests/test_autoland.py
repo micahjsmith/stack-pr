@@ -274,6 +274,129 @@ def test_wait_for_workflow_accepts_run_on_merge_commit(mocker) -> None:  # noqa:
     assert step.state == "succeeded"
 
 
+def test_wait_for_workflow_fetches_when_run_sha_is_unknown_locally(mocker) -> None:  # noqa: ANN001
+    # Regression: origin/<target> had advanced past our last fetch, so the
+    # completed run's head commit was not in this clone. `git merge-base
+    # --is-ancestor` then exits 128 ("Not a valid commit name"), which used to
+    # read as "not an ancestor" and made the checkpoint poll forever. A fetch
+    # must resolve it.
+    mocker.patch.object(
+        autoland.github,
+        "workflow_runs",
+        return_value=[
+            {"headSha": "newersha", "status": "completed", "conclusion": "success"}
+        ],
+    )
+    calls: list[list] = []
+
+    def _run(cmd, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        calls.append(cmd)
+        if cmd[:3] == ["git", "merge-base", "--is-ancestor"]:
+            # Unknown commit before the fetch, a genuine answer after it.
+            fetched = ["git", "fetch", "origin", "main"] in calls
+            return argparse.Namespace(stdout="", returncode=0 if fetched else 128)
+        return argparse.Namespace(stdout="", returncode=0)
+
+    mocker.patch.object(autoland, "run", side_effect=_run)
+    contains = mocker.patch.object(autoland.github, "contains")
+    step = WorkflowStep(workflow="deploy.yaml")
+    ctx = LandingContext(last_landed_sha="mergesha")
+    assert autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
+    assert step.state == "succeeded"
+    assert ["git", "fetch", "origin", "main"] in calls
+    contains.assert_not_called()  # the fetch answered it; no API call needed
+
+
+def test_wait_for_workflow_falls_back_to_github_compare(mocker) -> None:  # noqa: ANN001
+    # The run's head commit is still missing after the fetch (e.g. a
+    # merge-queue commit that never landed on the target branch): ask GitHub.
+    mocker.patch.object(
+        autoland.github,
+        "workflow_runs",
+        return_value=[
+            {"headSha": "queuesha", "status": "completed", "conclusion": "success"}
+        ],
+    )
+    mocker.patch.object(
+        autoland,
+        "run",
+        return_value=argparse.Namespace(stdout="", returncode=128),
+    )
+    contains = mocker.patch.object(autoland.github, "contains", return_value=True)
+    step = WorkflowStep(workflow="deploy.yaml")
+    ctx = LandingContext(last_landed_sha="mergesha")
+    assert autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
+    contains.assert_called_once_with("mergesha", "queuesha")
+
+
+def test_wait_for_workflow_keeps_waiting_when_ancestry_unknown(mocker) -> None:  # noqa: ANN001
+    # Neither git nor GitHub can answer: warn and keep waiting rather than
+    # treating "unknown" as "the deploy included our code".
+    def _runs(*_a, **_k) -> list:  # noqa: ANN002, ANN003
+        ctx.aborted = True  # stop after one poll
+        return [{"headSha": "mystery", "status": "completed", "conclusion": "success"}]
+
+    mocker.patch.object(autoland.github, "workflow_runs", side_effect=_runs)
+    mocker.patch.object(
+        autoland,
+        "run",
+        return_value=argparse.Namespace(stdout="", returncode=128),
+    )
+    mocker.patch.object(autoland.github, "contains", return_value=None)
+    mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
+    step = WorkflowStep(workflow="deploy.yaml")
+    ctx = LandingContext(last_landed_sha="mergesha")
+    assert not autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
+    assert step.state != "succeeded"
+
+
+def test_local_is_ancestor_distinguishes_no_from_unknown(mocker) -> None:  # noqa: ANN001
+    run_mock = mocker.patch.object(autoland, "run")
+    run_mock.return_value = argparse.Namespace(stdout="", returncode=0)
+    assert autoland._local_is_ancestor("a", "b") is True  # noqa: SLF001
+    run_mock.return_value = argparse.Namespace(stdout="", returncode=1)
+    assert autoland._local_is_ancestor("a", "b") is False  # noqa: SLF001
+    run_mock.return_value = argparse.Namespace(stdout="", returncode=128)
+    assert autoland._local_is_ancestor("a", "b") is None  # noqa: SLF001
+
+
+def test_sha_eq_requires_a_long_enough_prefix() -> None:
+    assert autoland._sha_eq("abcdef1234", "abcdef1")  # noqa: SLF001
+    assert not autoland._sha_eq("abcdef1234", "abcdef2")  # noqa: SLF001
+    # Below git's minimum abbreviation a prefix does not identify a commit, so
+    # matching on it could satisfy a checkpoint with the wrong deploy.
+    assert not autoland._sha_eq("abcdef", "abcdef1234")  # noqa: SLF001
+    assert not autoland._sha_eq("", "abcdef1234")  # noqa: SLF001
+
+
+def test_github_contains_uses_merge_base(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.github, "_owner_repo", ("o", "r"))
+    run_mock = mocker.patch.object(autoland, "run")
+    run_mock.return_value = argparse.Namespace(stdout="basesha\n", returncode=0)
+    assert autoland.github.contains("basesha", "headsha") is True
+    run_mock.return_value = argparse.Namespace(stdout="othersha\n", returncode=0)
+    assert autoland.github.contains("basesha", "headsha") is False
+    run_mock.return_value = argparse.Namespace(stdout="null\n", returncode=0)
+    assert autoland.github.contains("basesha", "headsha") is None
+    run_mock.side_effect = RuntimeError("HTTP 404")
+    assert autoland.github.contains("basesha", "headsha") is None
+
+
+def test_ancestry_caches_verdicts(mocker) -> None:  # noqa: ANN001
+    # The poll loop re-examines the same runs every interval; commits are
+    # immutable, so each pair is decided at most once.
+    contains = mocker.patch.object(autoland.github, "contains", return_value=False)
+    mocker.patch.object(
+        autoland,
+        "run",
+        return_value=argparse.Namespace(stdout="", returncode=128),
+    )
+    ancestry = autoland._Ancestry(_common())  # noqa: SLF001
+    assert ancestry.contains("landedsha", "runsha1") is False
+    assert ancestry.contains("landedsha", "runsha1") is False
+    contains.assert_called_once()
+
+
 def test_wait_for_workflow_ignores_failed_and_incomplete(mocker) -> None:  # noqa: ANN001
     # A failed run and a still-running run on our SHA must not satisfy the
     # checkpoint; abort so the poll loop terminates for the test.

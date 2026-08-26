@@ -1,5 +1,16 @@
 # Top of tree
 
+* Fixed a bug where an `autoland` workflow (`w`) checkpoint could poll forever
+  even though the workflow had already deployed the landed code. The check
+  "does this run's head commit include what we landed?" ran `git merge-base
+  --is-ancestor` locally and read *any* failure as "no". But git exits 128 when
+  a commit is missing from the clone, which happens routinely: `origin/<target>`
+  advances while we poll, so the run's head commit had never been fetched.
+  Unknown commits are now distinguished from a genuine "no": autoland fetches
+  the target branch and retries, then asks the GitHub compare API for the merge
+  base of the two commits (which also covers commits that never landed on the
+  target branch, such as merge-queue commits). If neither can answer, it warns
+  and keeps waiting instead of silently stalling.
 * In a land (`l`) step in an `autoland` plan, a specific pull request can be
   identified by PR number or URL: `l 123` or `l
   https://github.com/user/repo/pull/123`. Previously a land step could only
