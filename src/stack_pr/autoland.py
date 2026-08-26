@@ -955,11 +955,23 @@ def _refresh_last_landed_sha(
         pass  # non-critical; will retry when needed
 
 
+# git's own minimum abbreviation length. A shorter prefix does not identify a
+# commit, so comparing on fewer characters than this could match two unrelated
+# SHAs — and here a false match would declare a workflow checkpoint satisfied
+# by a deploy of the wrong code.
+_MIN_SHA_LEN = 7
+
+
 def _sha_eq(a: str, b: str) -> bool:
-    """Whether two (possibly abbreviated) SHAs name the same commit."""
-    if not a or not b:
-        return False
+    """Whether two (possibly abbreviated) SHAs name the same commit.
+
+    Comparison is on the shorter SHA's length; anything shorter than
+    ``_MIN_SHA_LEN`` is too ambiguous to call equal, so it is reported as
+    different.
+    """
     n = min(len(a), len(b))
+    if n < _MIN_SHA_LEN:
+        return False
     return a[:n].lower() == b[:n].lower()
 
 

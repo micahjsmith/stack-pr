@@ -351,6 +351,15 @@ def test_local_is_ancestor_distinguishes_no_from_unknown(mocker) -> None:  # noq
     assert autoland._local_is_ancestor("a", "b") is None  # noqa: SLF001
 
 
+def test_sha_eq_requires_a_long_enough_prefix() -> None:
+    assert autoland._sha_eq("abcdef1234", "abcdef1")  # noqa: SLF001
+    assert not autoland._sha_eq("abcdef1234", "abcdef2")  # noqa: SLF001
+    # Below git's minimum abbreviation a prefix does not identify a commit, so
+    # matching on it could satisfy a checkpoint with the wrong deploy.
+    assert not autoland._sha_eq("abcdef", "abcdef1234")  # noqa: SLF001
+    assert not autoland._sha_eq("", "abcdef1234")  # noqa: SLF001
+
+
 def test_github_contains_uses_merge_base(mocker) -> None:  # noqa: ANN001
     mocker.patch.object(autoland.github, "_owner_repo", ("o", "r"))
     run_mock = mocker.patch.object(autoland, "run")
@@ -374,8 +383,8 @@ def test_ancestry_caches_verdicts(mocker) -> None:  # noqa: ANN001
         return_value=argparse.Namespace(stdout="", returncode=128),
     )
     ancestry = autoland._Ancestry(_common())  # noqa: SLF001
-    assert ancestry.contains("a", "b") is False
-    assert ancestry.contains("a", "b") is False
+    assert ancestry.contains("landedsha", "runsha1") is False
+    assert ancestry.contains("landedsha", "runsha1") is False
     contains.assert_called_once()
 
 
