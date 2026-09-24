@@ -150,6 +150,18 @@ PR, then re-submit. See "Reconcile upstream changes" in the README:
     git rebase --continue
     stack-pr submit
 """
+ERROR_QUEUED_BRANCH_PUSH = """Cannot update PR branches that are in a merge queue:
+    {branches}
+
+GitHub refuses any update to a branch whose PR has been added to a merge queue.
+Wait for the PR to land, or remove it from the merge queue, and try again.
+"""
+WARNING_QUEUED_BRANCHES_SKIPPED = """GitHub refuses any update to a branch whose PR is in a merge queue:
+    {branches}
+
+Left at the queued commit; the rest of the stack was pushed. The PR directly
+above may show extra changes in its diff until the queued PR lands — re-run
+'stack-pr submit' afterwards to bring the stack back in line."""
 ERROR_CANT_CHECKOUT_REMOTE_BRANCH = """Could not checkout remote branch '{e.head}'. Failed to land PR:
     {e}
 
@@ -782,8 +794,42 @@ def stale_lease_branches(stderr: str) -> list[str]:
     return RE_STALE_LEASE.findall(stderr)
 
 
+RE_GH006_BLOCK = re.compile(r"(?=GH006: Protected branch update failed)")
+RE_GH006_REF = re.compile(
+    r"GH006: Protected branch update failed for refs/heads/(.+?)\.\s*$", re.MULTILINE
+)
+
+
+def merge_queue_declined_branches(stderr: str) -> list[str]:
+    """Branches the remote refused to update because they are queued to merge.
+
+    GitHub reports each refusal as a GH006 block naming the ref, followed by the
+    reason ("A pull request for this branch has been added to a merge queue").
+    Only blocks citing the merge queue count: other protected-branch refusals
+    (required signatures, push restrictions) are genuine errors that must not be
+    skipped over.
+    """
+    branches = []
+    for block in RE_GH006_BLOCK.split(stderr):
+        ref = RE_GH006_REF.search(block)
+        if ref and "merge queue" in block:
+            branches.append(ref.group(1))
+    return branches
+
+
+def refspec_dst(refspec: str) -> str:
+    """The remote-side branch a ``<src>:<dst>`` refspec updates."""
+    return refspec.rsplit(":", maxsplit=1)[-1]
+
+
 def force_push_with_lease(
-    refspecs: list[str], remote: str, target: str, *, verbose: bool
+    refspecs: list[str],
+    remote: str,
+    target: str,
+    *,
+    verbose: bool,
+    skip_queued: bool = False,
+    pr_by_branch: dict[str, str] | None = None,
 ) -> None:
     """Force-push *refspecs* with --force-with-lease.
 
@@ -796,25 +842,71 @@ def force_push_with_lease(
     On a stale-lease rejection, aborts with reconciliation guidance. New
     branches (no tracking ref) push fine. `--atomic` keeps a rejection from
     leaving a partially-updated stack.
+
+    A branch whose PR sits in a merge queue cannot be updated at all: GitHub
+    declines it with GH006, and `--atomic` turns that single refusal into a
+    rejection of the whole stack. With ``skip_queued`` such branches are dropped
+    from the push and the rest is retried, since the queued PR is already on its
+    way to landing; without it (landing, where the caller needs the branch it
+    just rebased to actually be on the remote) the push aborts instead.
+    ``pr_by_branch`` supplies PR numbers for the messages.
     """
-    cmd = ["git", "push", "--force-with-lease", "--atomic", remote, *refspecs]
-    result = run_shell_command(cmd, quiet=not verbose, check=False, stderr=PIPE)
-    if result.returncode == 0:
-        return
+    remaining = list(refspecs)
+    while True:
+        cmd = ["git", "push", "--force-with-lease", "--atomic", remote, *remaining]
+        result = run_shell_command(cmd, quiet=not verbose, check=False, stderr=PIPE)
+        if result.returncode == 0:
+            return
 
-    stderr = (result.stderr or b"").decode("utf-8", errors="replace")
-    stale = stale_lease_branches(stderr)
-    if stale or "stale info" in stderr:
-        branches = ", ".join(stale) if stale else "one or more PR branches"
-        error(
-            ERROR_STALE_REMOTE_BRANCHES.format(
-                branches=branches, remote=remote, target=target
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+        stale = stale_lease_branches(stderr)
+        if stale or "stale info" in stderr:
+            branches = ", ".join(stale) if stale else "one or more PR branches"
+            error(
+                ERROR_STALE_REMOTE_BRANCHES.format(
+                    branches=branches, remote=remote, target=target
+                )
             )
-        )
-        sys.exit(1)
+            sys.exit(1)
 
-    sys.stderr.write(stderr)
-    raise SubprocessError(f"Failed to push branches (exit code {result.returncode}).")
+        queued = merge_queue_declined_branches(stderr)
+        if queued and not skip_queued:
+            error(
+                ERROR_QUEUED_BRANCH_PUSH.format(
+                    branches=describe_branches(queued, pr_by_branch)
+                )
+            )
+            sys.exit(1)
+
+        kept = [r for r in remaining if refspec_dst(r) not in queued]
+        if len(kept) < len(remaining):
+            warning(
+                WARNING_QUEUED_BRANCHES_SKIPPED.format(
+                    branches=describe_branches(queued, pr_by_branch)
+                )
+            )
+            remaining = kept
+            if not remaining:
+                return
+            # Nothing was pushed (--atomic), so the leases still hold. A push
+            # reports only the first refusal, so loop in case another branch of
+            # the stack is queued too; each pass drops at least one refspec.
+            continue
+
+        sys.stderr.write(stderr)
+        raise SubprocessError(
+            f"Failed to push branches (exit code {result.returncode})."
+        )
+
+
+def describe_branches(
+    branches: list[str], pr_by_branch: dict[str, str] | None = None
+) -> str:
+    """Render branch names for a message, annotated with their PR numbers."""
+    pr_by_branch = pr_by_branch or {}
+    return ", ".join(
+        f"{b} (#{pr_by_branch[b]})" if b in pr_by_branch else b for b in branches
+    )
 
 
 def push_branches(
@@ -822,7 +914,14 @@ def push_branches(
 ) -> None:
     log(h("Updating remote branches"), level=2)
     force_push_with_lease(
-        [f"{e.head}:{e.head}" for e in st], remote, target, verbose=verbose
+        [f"{e.head}:{e.head}" for e in st],
+        remote,
+        target,
+        verbose=verbose,
+        # A queued PR is already on its way to landing, so leave its branch
+        # alone rather than failing the whole stack's push.
+        skip_queued=True,
+        pr_by_branch={e.head: last(e.pr) for e in st if e.has_pr()},
     )
 
 
