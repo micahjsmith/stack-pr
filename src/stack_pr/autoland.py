@@ -1396,6 +1396,11 @@ def _resolve_land_step(
     return LandStep(entry_index=index, pr_number=pr_number)
 
 
+# The conventional suffix for a landing plan. Plans autoland writes carry it,
+# and editors key off it (see editors/vscode) to highlight the plan syntax.
+PLAN_SUFFIX = ".autoland-plan"
+
+
 def plan_from_file(path: Path, stack: list[StackEntry]) -> list[PlanStep]:
     """Load a landing plan from a file.
 
@@ -1429,7 +1434,7 @@ def edit_plan_interactive(
     editor = os.environ.get("EDITOR", "vim")
 
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", prefix="autoland-plan-", delete=False
+        mode="w", suffix=PLAN_SUFFIX, prefix="autoland-plan-", delete=False
     ) as f:
         f.write(plan_text)
         plan_file = f.name
@@ -2389,7 +2394,8 @@ def register_parser(
         metavar="PATH",
         help=(
             "Load the landing plan from a file (same format as the -i editor: "
-            "'l' / 'w <workflow>' / 'c [condition]' lines)."
+            "'l' / 'w <workflow>' / 'c [condition]' lines). Plans conventionally "
+            f"use the {PLAN_SUFFIX} suffix."
         ),
     )
     p.add_argument(

@@ -34,9 +34,11 @@ Two details worth knowing, both inherited from the parser:
 
 Applied automatically to:
 
-- files named `*.autoland-plan`;
-- `autoland-plan-*.txt` — the temporary file `autoland -i` opens in `$EDITOR`,
-  so plans you edit interactively are highlighted without any setup;
+- files named `*.autoland-plan` — the conventional suffix for a plan, and what
+  `autoland -i` names the temporary file it opens in `$EDITOR`, so plans you
+  edit interactively are highlighted without any setup;
+- `autoland-plan-*.txt` — the name `-i` used before stack-pr adopted the
+  `.autoland-plan` suffix, kept so plans from an older CLI still highlight;
 - any file whose first line starts with `# Autoland plan`, which is the header
   of a generated plan.
 
