@@ -1,7 +1,8 @@
-# stack-pr Autoland Plan — VS Code syntax highlighting
+# stack-pr Autoland Plan — VS Code support
 
-Syntax highlighting for `stack-pr autoland` landing plans: the `l` / `w` / `c`
-step files you edit with `autoland -i` or pass to `autoland --plan-file`.
+Syntax highlighting and formatting for `stack-pr autoland` landing plans: the
+`l` / `w` / `c` step files you edit with `autoland -i` or pass to
+`autoland --plan-file`.
 
 See [`examples/example.autoland-plan`](examples/example.autoland-plan) for a
 plan exercising every step type.
@@ -30,6 +31,35 @@ Two details worth knowing, both inherited from the parser:
   `c ship it#now` keeps the `#` inside the condition.
 - A workflow name runs to the end of the step, spaces included.
 
+## Formatting
+
+The extension is a formatter for the language, so **Format Document**
+(and `editor.formatOnSave`) tidies a plan. Formatting never changes what a plan
+does — the formatted text parses into exactly the same steps:
+
+- **Trailing comments are aligned at column 30** within each block of
+  contiguous non-blank lines, so plans line up with each other and not just
+  within a block. A blank line starts a new group.
+- **A long `l` or `w` step widens its block**: if one reaches into column 30,
+  that block's comments move to four spaces past the longest such step, so the
+  block still lines up internally without affecting the rest of the file.
+- **`c` steps never set the column.** A confirm condition is free text that
+  routinely runs long, and letting it decide would drag every comment in the
+  block off to the right. Their comments are still aligned with everything
+  else; a condition already past the column keeps a single space before its
+  `#`, since losing that space would fold the comment into the condition.
+- **The gap after a step keyword is collapsed** to a single space, and steps are
+  unindented. The argument itself is left alone: a condition is free text, and a
+  workflow name may contain spaces.
+- **Whole-line comments keep their own indentation**, since the generated plan
+  header is hand-aligned. They do not break up a block.
+- **Trailing whitespace goes**, and the file ends with exactly one newline.
+- **Blank lines stay where you put them** — they are how a plan is grouped —
+  and a line the parser would reject is passed through as you typed it.
+
+A `#` that the parser would not treat as a comment is not treated as one here
+either, so `c ship it#now` and `l 101<TAB># x` are left alone.
+
 ## File association
 
 Applied automatically to:
@@ -56,7 +86,7 @@ From this directory:
 ```bash
 # Package and install into VS Code.
 npx --yes @vscode/vsce package
-code --install-extension autoland-plan-0.1.0.vsix
+code --install-extension autoland-plan-0.2.0.vsix
 ```
 
 Or, for development, symlink it into your extensions directory and reload:
@@ -67,13 +97,20 @@ ln -s "$PWD" ~/.vscode/extensions/autoland-plan
 
 ## Develop
 
-The grammar lives in [`syntaxes/autoland-plan.tmLanguage.json`](syntaxes/autoland-plan.tmLanguage.json).
-Tests are assertion comments inside a plan file — the comment syntax is the
-same `#`, so a test file is also a valid plan:
+The grammar lives in [`syntaxes/autoland-plan.tmLanguage.json`](syntaxes/autoland-plan.tmLanguage.json)
+and the formatter in [`src/format.js`](src/format.js), which is a plain
+`string -> string` function so it can be tested without VS Code;
+[`src/extension.js`](src/extension.js) only registers it. There is no build
+step and no runtime dependency.
 
 ```bash
-npx --yes vscode-tmgrammar-test "tests/*.autoland-plan"
+npm test            # both suites, no install needed
+npm run test:grammar
+npm run test:format
 ```
+
+Grammar tests are assertion comments inside a plan file — the comment syntax is
+the same `#`, so a test file is also a valid plan.
 
 `tests/test_vscode_extension.py` in the repository root additionally checks
 that [`examples/example.autoland-plan`](examples/example.autoland-plan) is

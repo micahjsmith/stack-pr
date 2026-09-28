@@ -67,3 +67,8 @@ w deploy.yaml   # wait for the deploy
 #<- keyword.control.workflow.autoland-plan
 # ^^^^^^^^^^^ entity.name.function.workflow.autoland-plan
 #                 ^^^^^^^^^^^^^^^^^^^^^^^ comment.line.number-sign.autoland-plan
+
+l 101	# a tab does not open a comment
+#<- keyword.control.land.autoland-plan
+# ^^^^^ - comment.line.number-sign.autoland-plan
+# ^^^ invalid.illegal.pr-reference.autoland-plan

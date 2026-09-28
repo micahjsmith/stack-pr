@@ -643,11 +643,11 @@ manual sign-off, then lands the rest looks like:
 # Lines starting with # are comments and are ignored.
 # Blank lines are ignored.
 #
-l 101                    # Add /widgets API endpoint
-w deploy.yaml            # wait for the deploy of PR #101 to finish
-c QA sign-off complete   # pause until QA has signed off
-l 102                    # Wire up the widgets UI
-l 103                    # Update the docs
+l 101                         # Add /widgets API endpoint
+w deploy.yaml                 # wait for the deploy of PR #101 to finish
+c QA sign-off complete        # pause until QA has signed off
+l 102                         # Wire up the widgets UI
+l 103                         # Update the docs
 ```
 
 A bare `l` with no PR number lands whatever PR is next in the stack, which is
@@ -673,10 +673,10 @@ the stack, so `autoland` skips its `l` step — along with any `w` and `c` steps
 that come before it, since those must have run before that PR could merge:
 
 ```
-l 1                     # PR #1, already landed upstream
-c QA sign-off complete  # assumed completed
-l 2                     # PR #2, already landed upstream
-l 3                     # <- autoland will land this PR next
+l 1                           # PR #1, already landed upstream
+c QA sign-off complete        # assumed completed
+l 2                           # PR #2, already landed upstream
+l 3                           # <- autoland will land this PR next
 ```
 
 You can also write a plan by PR number for a stack that has not started landing
@@ -694,10 +694,13 @@ deploy/rollout plan that others can review.
 [`editors/vscode`](editors/vscode) is a VS Code extension that highlights plan
 files: the `l` / `w` / `c` keywords, PR numbers and URLs, workflow names,
 confirmation conditions, and `#` comments — plus an error scope for steps
-`autoland` would reject, so a typo shows up before you run the plan. It applies
-to `*.autoland-plan` files — including the temporary one `-i` opens in
-`$EDITOR` — and to any file starting with the `# Autoland plan` header. See its
-[README](editors/vscode/README.md) to install it.
+`autoland` would reject, so a typo shows up before you run the plan. It also
+formats them: **Format Document** aligns trailing comments at column 30 (or
+past the longest `l`/`w` step in the block, when one runs that far) and tidies
+step spacing, without changing what the plan does.
+It applies to `*.autoland-plan` files — including the temporary one `-i` opens
+in `$EDITOR` — and to any file starting with the `# Autoland plan` header. See
+its [README](editors/vscode/README.md) to install it.
 
 #### view
 

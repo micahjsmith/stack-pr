@@ -50,7 +50,7 @@
     },
     "comment-trailing": {
       "comment": "The parser cuts a step at the first ' #', so the '#' must follow whitespace to start a comment: 'c ship it#now' is all condition.",
-      "match": "(?<=[ \\t])(#).*$",
+      "match": "(?<= )(#).*$",
       "name": "comment.line.number-sign.autoland-plan",
       "captures": {
         "1": {
@@ -60,7 +60,7 @@
     },
     "land-url": {
       "comment": "l <url> — the URL shape mirrors RE_PR_URL in autoland.py.",
-      "match": "^[ \\t]*(l)[ \\t]+(https?://[^/\\s]+/[^/\\s]+/[^/\\s]+/pull/\\d+/?)(?=[ \\t]*$|[ \\t]+#)",
+      "match": "^[ \\t]*(l)[ \\t]+(https?://[^/\\s]+/[^/\\s]+/[^/\\s]+/pull/\\d+/?)(?=[ \\t]*$| +#)",
       "captures": {
         "1": {
           "name": "keyword.control.land.autoland-plan"
@@ -72,7 +72,7 @@
     },
     "land-number": {
       "comment": "l <pr>",
-      "match": "^[ \\t]*(l)[ \\t]+(\\d+)(?=[ \\t]*$|[ \\t]+#)",
+      "match": "^[ \\t]*(l)[ \\t]+(\\d+)(?=[ \\t]*$| +#)",
       "captures": {
         "1": {
           "name": "keyword.control.land.autoland-plan"
@@ -84,7 +84,7 @@
     },
     "land-bare": {
       "comment": "A bare 'l' lands the next PR in the stack. 'l #123' is a bare 'l' with a comment, since '#' starts a comment.",
-      "match": "^[ \\t]*(l)(?=[ \\t]*$|[ \\t]+#)",
+      "match": "^[ \\t]*(l)(?=[ \\t]*$| +#)",
       "captures": {
         "1": {
           "name": "keyword.control.land.autoland-plan"
@@ -93,7 +93,7 @@
     },
     "land-invalid": {
       "comment": "'l' takes a PR number or URL, so anything else is rejected by the parser.",
-      "match": "^[ \\t]*(l)[ \\t]+((?:(?![ \\t]+#).)+)",
+      "match": "^[ \\t]*(l)[ \\t]+((?:(?! +#).)+)",
       "captures": {
         "1": {
           "name": "keyword.control.land.autoland-plan"
@@ -105,7 +105,7 @@
     },
     "workflow": {
       "comment": "w <workflow> — the name runs to the end of the step, spaces and all.",
-      "match": "^[ \\t]*(w)[ \\t]+((?:(?![ \\t]+#).)+)",
+      "match": "^[ \\t]*(w)[ \\t]+((?:(?! +#).)+)",
       "captures": {
         "1": {
           "name": "keyword.control.workflow.autoland-plan"
@@ -117,7 +117,7 @@
     },
     "workflow-missing": {
       "comment": "'w' requires a workflow name.",
-      "match": "^[ \\t]*(w)(?=[ \\t]*$|[ \\t]+#)",
+      "match": "^[ \\t]*(w)(?=[ \\t]*$| +#)",
       "captures": {
         "1": {
           "name": "invalid.illegal.missing-workflow.autoland-plan"
@@ -126,7 +126,7 @@
     },
     "confirm": {
       "comment": "c [condition] — free text naming what to verify before proceeding.",
-      "match": "^[ \\t]*(c)[ \\t]+((?:(?![ \\t]+#).)+)",
+      "match": "^[ \\t]*(c)[ \\t]+((?:(?! +#).)+)",
       "captures": {
         "1": {
           "name": "keyword.control.confirm.autoland-plan"
@@ -138,7 +138,7 @@
     },
     "confirm-bare": {
       "comment": "A bare 'c' just prompts 'Ready to proceed?'.",
-      "match": "^[ \\t]*(c)(?=[ \\t]*$|[ \\t]+#)",
+      "match": "^[ \\t]*(c)(?=[ \\t]*$| +#)",
       "captures": {
         "1": {
           "name": "keyword.control.confirm.autoland-plan"
@@ -147,7 +147,7 @@
     },
     "unknown-step": {
       "comment": "Anything else makes the parser fail with 'unrecognized step'.",
-      "match": "^[ \\t]*(\\S(?:(?![ \\t]+#).)*)",
+      "match": "^[ \\t]*(\\S(?:(?! +#).)*)",
       "captures": {
         "1": {
           "name": "invalid.illegal.unknown-step.autoland-plan"
