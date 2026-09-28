@@ -1,5 +1,18 @@
 # Top of tree
 
+* `submit` no longer fails outright when a PR in the stack has been added to a
+  merge queue. GitHub declines any push to a queued branch (`GH006: Protected
+  branch update failed`), and since stack-pr pushes the whole stack in one
+  `--atomic` push, that single refusal rejected every branch and aborted the
+  submit with a traceback — after the PR base branches had already been reset,
+  leaving the stack pointing at the target branch on GitHub. The queued branch
+  is now left at the commit that is being merged and the rest of the stack is
+  pushed, with a warning naming the branch and its PR. The PR directly above it
+  may show extra changes in its diff until the queued PR lands; re-submitting
+  afterwards brings the stack back in line. Protected-branch refusals for any
+  other reason are still hard errors, and `land` still aborts (with a clear
+  message instead of a traceback) rather than skipping a branch it just rebased.
+
 * Fixed a bug where an `autoland` workflow (`w`) checkpoint could poll forever
   even though the workflow had already deployed the landed code. The check
   "does this run's head commit include what we landed?" ran `git merge-base
