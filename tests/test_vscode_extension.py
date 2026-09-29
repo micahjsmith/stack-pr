@@ -1,14 +1,25 @@
 import json
+import re
 import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from stack_pr import autoland
-from stack_pr.autoland import StackEntry, parse_plan
+from stack_pr.autoland import (
+    PLAN_COMMENT_COLUMN,
+    PLAN_COMMENT_GAP,
+    ConfirmStep,
+    LandStep,
+    StackEntry,
+    WorkflowStep,
+    format_plan_for_editor,
+    parse_plan,
+)
 
 EXTENSION = Path(__file__).parent.parent / "editors" / "vscode"
 EXAMPLE = EXTENSION / "examples" / "example.autoland-plan"
+GENERATED = EXTENSION / "examples" / "generated.autoland-plan"
 
 
 def test_example_plan_is_accepted_by_the_parser(mocker) -> None:  # noqa: ANN001
@@ -50,3 +61,49 @@ def test_grammar_is_wired_to_the_language() -> None:
     assert contributed["language"] == language["id"]
     assert (EXTENSION / contributed["path"]).is_file()
     assert (EXTENSION / language["configuration"]).is_file()
+
+
+def test_generated_plan_matches_the_formatter_fixture() -> None:
+    # The other half of this check is in the extension's own test suite, which
+    # asserts the fixture is already formatted. Together they pin the property
+    # that a plan straight out of `-i` needs no formatting: generator output ==
+    # fixture == formatter output.
+    stack = [
+        StackEntry(
+            pr_url="https://github.com/o/r/pull/101",
+            pr_number=101,
+            branch="b1",
+            title="Add /widgets API endpoint",
+        ),
+        StackEntry(
+            pr_url="https://github.com/o/r/pull/1024",
+            pr_number=1024,
+            branch="b2",
+            title="Wire up the widgets UI",
+        ),
+        StackEntry(
+            pr_url="https://github.com/o/r/pull/103",
+            pr_number=103,
+            branch="b3",
+            title="",
+        ),
+    ]
+    plan = [
+        LandStep(entry_index=0, pr_number=101),
+        WorkflowStep(workflow="deploy.yaml"),
+        ConfirmStep(condition="QA sign-off complete"),
+        LandStep(entry_index=1, pr_number=1024),
+        LandStep(entry_index=2, pr_number=103),
+    ]
+    assert format_plan_for_editor(stack, plan) == GENERATED.read_text()
+
+
+def test_comment_layout_agrees_with_the_formatter() -> None:
+    # Two implementations of the same layout in two languages; if they disagree
+    # on either number, formatting a generated plan would shift every comment.
+    source = (EXTENSION / "src" / "format.js").read_text()
+    constants = dict(re.findall(r"const (COMMENT_\w+) = (\d+);", source))
+    assert constants == {
+        "COMMENT_COLUMN": str(PLAN_COMMENT_COLUMN),
+        "COMMENT_GAP": str(PLAN_COMMENT_GAP),
+    }

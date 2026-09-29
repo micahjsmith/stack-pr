@@ -1,0 +1,16 @@
+# Autoland plan — edit steps below.
+# l [<pr>]        = land that PR (a number, or its URL); a bare 'l'
+#                   lands the next PR in the stack instead
+# w <workflow>    = wait for a workflow to complete
+# c [<condition>] = pause for manual confirmation; the optional
+#                   condition names what to verify before proceeding
+#                   (e.g. 'c QA sign-off complete')
+#
+# Lines starting with # are comments and are ignored.
+# Blank lines are ignored.
+#
+l 101                         # Add /widgets API endpoint
+w deploy.yaml
+c QA sign-off complete
+l 1024                        # Wire up the widgets UI
+l 103

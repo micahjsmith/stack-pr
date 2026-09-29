@@ -118,3 +118,14 @@ test("the shipped example plan is already formatted", () => {
   );
   assert.strictEqual(formatPlan(example), example);
 });
+
+test("a freshly generated plan is already formatted", () => {
+  // The Python side (tests/test_vscode_extension.py) checks this fixture is
+  // what format_plan_for_editor writes, so the pair pins that a plan out of
+  // `autoland -i` needs no formatting.
+  const generated = fs.readFileSync(
+    path.join(__dirname, "..", "examples", "generated.autoland-plan"),
+    "utf8"
+  );
+  assert.strictEqual(formatPlan(generated), generated);
+});

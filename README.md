@@ -654,6 +654,10 @@ A bare `l` with no PR number lands whatever PR is next in the stack, which is
 what plans looked like before `l` learned to name its PR. Both forms can appear
 in the same plan.
 
+The generated plan aligns the comments it writes at column 30, in the same
+layout the VS Code formatter produces (see [Editor support](#editor-support)),
+so a plan out of `-i` needs no tidying and stays aligned as you edit it there.
+
 When `autoland` reaches the `c` step it prompts
 `Confirm "QA sign-off complete" is complete — ready to proceed?` and waits for
 `y`/`Y`. A bare `c` with no condition just prompts `Ready to proceed?`.

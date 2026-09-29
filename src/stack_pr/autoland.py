@@ -1144,6 +1144,14 @@ def generate_default_plan(
     return plan
 
 
+# Where the comments in a generated plan start, and how far past a step that
+# reaches into that column they move instead. Kept in sync with COMMENT_COLUMN
+# and COMMENT_GAP in editors/vscode/src/format.js, which formats plans the same
+# way, so a generated plan is already formatted.
+PLAN_COMMENT_COLUMN = 30
+PLAN_COMMENT_GAP = 4
+
+
 def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str:
     lines = [
         "# Autoland plan — edit steps below.",
@@ -1158,18 +1166,33 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
         "# Blank lines are ignored.",
         "#",
     ]
+
+    # Each step as (keyword, line, trailing comment), so the comments can be
+    # aligned once the longest step is known. The steps are emitted as one
+    # contiguous block, which is the unit comments are aligned within.
+    steps: list[tuple[str, str, str]] = []
     for step in plan:
         if isinstance(step, LandStep):
             if step.already_landed:
-                lines.append(f"l {step.pr_number}    # already landed")
+                steps.append(("l", f"l {step.pr_number}", "already landed"))
                 continue
             entry = stack[step.entry_index]
-            comment = f"    # {entry.title}" if entry.title else ""
-            lines.append(f"l {entry.pr_number}{comment}")
+            steps.append(("l", f"l {entry.pr_number}", entry.title or ""))
         elif isinstance(step, WorkflowStep):
-            lines.append(f"w {step.workflow}")
+            steps.append(("w", f"w {step.workflow}", ""))
         elif isinstance(step, ConfirmStep):
-            lines.append(f"c {step.condition}".rstrip())
+            steps.append(("c", f"c {step.condition}".rstrip(), ""))
+
+    # Only 'l' and 'w' steps decide the column: a confirm condition is free
+    # text that routinely runs long, and letting it decide would drag every
+    # comment off to the right.
+    longest = max((len(line) for kw, line, _ in steps if kw in ("l", "w")), default=0)
+    column = max(PLAN_COMMENT_COLUMN, longest + PLAN_COMMENT_GAP)
+    lines.extend(
+        f"{line}{' ' * max(column - len(line), 1)}# {comment}" if comment else line
+        for _kw, line, comment in steps
+    )
+
     lines.append("")
     return "\n".join(lines)
 
