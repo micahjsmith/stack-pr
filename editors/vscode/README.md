@@ -39,7 +39,9 @@ does — the formatted text parses into exactly the same steps:
 
 - **Trailing comments are aligned at column 30** within each block of
   contiguous non-blank lines, so plans line up with each other and not just
-  within a block. A blank line starts a new group.
+  within a block. A blank line starts a new group. `autoland -i` writes this
+  same layout, so a generated plan is already formatted — see
+  [`examples/generated.autoland-plan`](examples/generated.autoland-plan).
 - **A long `l` or `w` step widens its block**: if one reaches into column 30,
   that block's comments move to four spaces past the longest such step, so the
   block still lines up internally without affecting the rest of the file.

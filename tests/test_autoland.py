@@ -16,6 +16,7 @@ from stack_pr.autoland import (
     _POINTER_CELLS,
     _RE_MARKUP,
     _UNICODE_GLYPHS,
+    PLAN_COMMENT_COLUMN,
     AutolandCheckpointer,
     AutolandLock,
     AutolandOptions,
@@ -662,8 +663,10 @@ def test_interactive_plan_file_carries_the_plan_suffix(mocker) -> None:  # noqa:
 def test_editor_format_pins_pr_numbers() -> None:
     stack = _pinned_stack([101, 102])
     text = format_plan_for_editor(stack, generate_default_plan(stack))
-    assert "l 101    # PR 101" in text
-    assert "l 102    # PR 102" in text
+    # The PR title rides along as a trailing comment, aligned at the plan's
+    # comment column so the titles line up whatever the PR numbers are.
+    assert "l 101".ljust(PLAN_COMMENT_COLUMN) + "# PR 101" in text
+    assert "l 102".ljust(PLAN_COMMENT_COLUMN) + "# PR 102" in text
 
 
 def test_editor_format_round_trips_through_plan_from_file(tmp_path) -> None:  # noqa: ANN001
