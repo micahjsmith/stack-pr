@@ -1,0 +1,69 @@
+# SYNTAX TEST "source.autoland-plan" "autoland plan steps"
+
+# A comment line is ignored wholesale.
+#<- comment.line.number-sign.autoland-plan
+
+l
+#<- keyword.control.land.autoland-plan
+
+l 101
+#<- keyword.control.land.autoland-plan
+# ^^^ constant.numeric.pr-number.autoland-plan
+
+l 101   # Add /widgets API endpoint
+#<- keyword.control.land.autoland-plan
+# ^^^ constant.numeric.pr-number.autoland-plan
+#       ^^^^^^^^^^^^^^^^^^^^^^^^^^ comment.line.number-sign.autoland-plan
+
+l https://github.com/o/r/pull/103
+#<- keyword.control.land.autoland-plan
+# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ markup.underline.link.autoland-plan
+
+l #123
+#<- keyword.control.land.autoland-plan
+# ^^^^ comment.line.number-sign.autoland-plan
+
+l origin/main
+#<- keyword.control.land.autoland-plan
+# ^^^^^^^^^^^ invalid.illegal.pr-reference.autoland-plan
+
+w deploy.yaml
+#<- keyword.control.workflow.autoland-plan
+# ^^^^^^^^^^^ entity.name.function.workflow.autoland-plan
+
+w
+#<- invalid.illegal.missing-workflow.autoland-plan
+
+c QA sign-off complete
+#<- keyword.control.confirm.autoland-plan
+# ^^^^^^^^^^^^^^^^^^^^ string.unquoted.condition.autoland-plan
+
+c
+#<- keyword.control.confirm.autoland-plan
+
+L 101
+#<- invalid.illegal.unknown-step.autoland-plan
+
+land 101
+#<- invalid.illegal.unknown-step.autoland-plan
+
+c ship it#now
+#<- keyword.control.confirm.autoland-plan
+# ^^^^^^^^^^^ string.unquoted.condition.autoland-plan
+
+l#123
+#<- invalid.illegal.unknown-step.autoland-plan
+# ^^^^ invalid.illegal.unknown-step.autoland-plan
+
+l 101 456
+#<- keyword.control.land.autoland-plan
+# ^^^^^^^ invalid.illegal.pr-reference.autoland-plan
+
+  l 101
+# ^ keyword.control.land.autoland-plan
+#   ^^^ constant.numeric.pr-number.autoland-plan
+
+w deploy.yaml   # wait for the deploy
+#<- keyword.control.workflow.autoland-plan
+# ^^^^^^^^^^^ entity.name.function.workflow.autoland-plan
+#                 ^^^^^^^^^^^^^^^^^^^^^^^ comment.line.number-sign.autoland-plan

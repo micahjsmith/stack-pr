@@ -1,0 +1,21 @@
+# Autoland plan — edit steps below.
+# l <pr>        = land that PR (a number, or its URL); a bare 'l'
+#                 lands the next PR in the stack instead
+# w <workflow>  = wait for a workflow to complete
+# c [condition] = pause for manual confirmation; the optional
+#                 condition names what to verify before proceeding
+#                 (e.g. 'c QA sign-off complete')
+#
+# Lines starting with # are comments and are ignored.
+# Blank lines are ignored.
+#
+l 101                    # Add /widgets API endpoint
+w deploy.yaml            # wait for the deploy of PR #101 to finish
+c QA sign-off complete   # pause until QA has signed off
+l 102                    # Wire up the widgets UI
+
+# A bare 'l' lands whatever PR is next in the stack, and a PR can also be
+# named by its URL. A bare 'c' just prompts "Ready to proceed?".
+l https://github.com/micahjsmith/stack-pr/pull/103
+c
+l

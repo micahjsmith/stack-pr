@@ -686,6 +686,16 @@ during development, and the plan is re-used and updated as the stack lands.
 That gives you an "as implemented" design doc alongside a self-documenting
 deploy/rollout plan that others can review.
 
+##### Editor support
+
+[`editors/vscode`](editors/vscode) is a VS Code extension that highlights plan
+files: the `l` / `w` / `c` keywords, PR numbers and URLs, workflow names,
+confirmation conditions, and `#` comments — plus an error scope for steps
+`autoland` would reject, so a typo shows up before you run the plan. It applies
+to `*.autoland-plan` files, to the `autoland-plan-*.txt` file that `-i` opens in
+`$EDITOR`, and to any file starting with the `# Autoland plan` header. See its
+[README](editors/vscode/README.md) to install it.
+
 #### view
 
 Inspect the current stack

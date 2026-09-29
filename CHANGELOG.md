@@ -1,5 +1,15 @@
 # Top of tree
 
+* Added a VS Code extension for `autoland` plan files under
+  [`editors/vscode`](editors/vscode), licensed under the MIT license so it can
+  be redistributed on its own. It registers an `autoland-plan` language
+  (applied to `*.autoland-plan`, to the `autoland-plan-*.txt` file that
+  `autoland -i` opens in `$EDITOR`, and to any file starting with the
+  `# Autoland plan` header) and highlights the `l` / `w` / `c` steps, PR
+  numbers and URLs, workflow names, confirmation conditions and `#` comments.
+  Steps the plan parser would reject — an `l` whose argument is neither a PR
+  number nor a PR URL, a `w` with no workflow, a line that is not a step — get
+  an `invalid` scope, so a malformed plan is visible before it is run.
 * `submit` no longer fails outright when a PR in the stack has been added to a
   merge queue. GitHub declines any push to a queued branch (`GH006: Protected
   branch update failed`), and since stack-pr pushes the whole stack in one

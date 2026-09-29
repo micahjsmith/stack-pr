@@ -1,0 +1,56 @@
+{
+  "name": "autoland-plan",
+  "displayName": "stack-pr Autoland Plan",
+  "description": "Syntax highlighting for stack-pr autoland plan files (l / w / c steps).",
+  "version": "0.1.0",
+  "publisher": "micahjsmith",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/micahjsmith/stack-pr.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "stack-pr",
+    "autoland",
+    "stacked pull requests"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "autoland-plan",
+        "aliases": [
+          "Autoland Plan",
+          "autoland-plan"
+        ],
+        "extensions": [
+          ".autoland-plan"
+        ],
+        "filenamePatterns": [
+          "autoland-plan-*.txt"
+        ],
+        "firstLine": "^# Autoland plan",
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "autoland-plan",
+        "scopeName": "source.autoland-plan",
+        "path": "./syntaxes/autoland-plan.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "vscode-tmgrammar-test \"tests/*.autoland-plan\""
+  },
+  "devDependencies": {
+    "vscode-tmgrammar-test": "^0.1.3"
+  }
+}
