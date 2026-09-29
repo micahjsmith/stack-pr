@@ -1,5 +1,16 @@
 # Top of tree
 
+* The VS Code extension can now format plan files. **Format Document** aligns
+  trailing comments at column 30 within each block of contiguous lines — or,
+  when an `l` or `w` step in the block reaches into that column, four spaces
+  past the longest one, so the whole block still lines up. `c` steps never set
+  the column: a confirm condition is free text that routinely runs long, and
+  letting it decide would drag every comment in the block off to the right.
+  Formatting also collapses the gap after a step keyword, unindents steps,
+  drops trailing whitespace and normalizes the final newline. Blank lines are
+  left where they are, whole-line comments keep their own indentation, and a
+  line the parser would reject is passed through untouched — a formatted plan
+  always parses into exactly the same steps.
 * `autoland` plans now use `.autoland-plan` as their conventional suffix. The
   temporary file `-i` opens in `$EDITOR` is named `autoland-plan-*.autoland-plan`
   (it was `autoland-plan-*.txt`), so the VS Code extension highlights an

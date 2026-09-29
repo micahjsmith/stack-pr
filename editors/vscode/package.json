@@ -1,8 +1,8 @@
 {
   "name": "autoland-plan",
   "displayName": "stack-pr Autoland Plan",
-  "description": "Syntax highlighting for stack-pr autoland plan files (l / w / c steps).",
-  "version": "0.1.0",
+  "description": "Syntax highlighting and formatting for stack-pr autoland plan files (l / w / c steps).",
+  "version": "0.2.0",
   "publisher": "micahjsmith",
   "license": "MIT",
   "repository": {
@@ -14,7 +14,8 @@
     "vscode": "^1.75.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Formatters"
   ],
   "keywords": [
     "stack-pr",
@@ -48,9 +49,15 @@
     ]
   },
   "scripts": {
-    "test": "vscode-tmgrammar-test \"tests/*.autoland-plan\""
+    "test": "npm run test:grammar && npm run test:format",
+    "test:grammar": "npx --yes vscode-tmgrammar-test \"tests/*.autoland-plan\"",
+    "test:format": "node --test tests/*.test.js"
   },
   "devDependencies": {
     "vscode-tmgrammar-test": "^0.1.3"
-  }
+  },
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onLanguage:autoland-plan"
+  ]
 }
