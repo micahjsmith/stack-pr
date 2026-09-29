@@ -575,6 +575,7 @@ Options:
   `w <workflow>` / `c [condition]` lines, with `#` comments and blank lines
   ignored — see [Example plan](#example-plan) below), so you can save a plan
   from `-i`, or write one by hand, and reuse it for repeatable/scripted runs.
+  Plans conventionally use the `.autoland-plan` suffix.
   Mutually exclusive with `-i`; can't be combined with `-n/--count` (the file
   already specifies which PRs to land) or `--resume` (which restores the plan
   from a checkpoint).
@@ -658,9 +659,11 @@ When `autoland` reaches the `c` step it prompts
 `y`/`Y`. A bare `c` with no condition just prompts `Ready to proceed?`.
 
 The same format can be loaded from a file with `--plan-file` instead of editing
-it interactively — for example, save the block above to `plan.txt` and run
-`stack-pr autoland --plan-file plan.txt`. This is handy for repeatable or
-scripted landings.
+it interactively — for example, save the block above to `plan.autoland-plan`
+and run `stack-pr autoland --plan-file plan.autoland-plan`. This is handy for
+repeatable or scripted landings. Any path works, but `.autoland-plan` is the
+conventional suffix: it is what `-i` writes, and what editors key off to
+highlight the plan syntax (see [Editor support](#editor-support)).
 
 ##### Re-using a plan across a partially-landed stack
 
@@ -692,8 +695,8 @@ deploy/rollout plan that others can review.
 files: the `l` / `w` / `c` keywords, PR numbers and URLs, workflow names,
 confirmation conditions, and `#` comments — plus an error scope for steps
 `autoland` would reject, so a typo shows up before you run the plan. It applies
-to `*.autoland-plan` files, to the `autoland-plan-*.txt` file that `-i` opens in
-`$EDITOR`, and to any file starting with the `# Autoland plan` header. See its
+to `*.autoland-plan` files — including the temporary one `-i` opens in
+`$EDITOR` — and to any file starting with the `# Autoland plan` header. See its
 [README](editors/vscode/README.md) to install it.
 
 #### view

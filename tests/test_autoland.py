@@ -642,6 +642,23 @@ def test_parse_plan_consults_github_for_unknown_prs(mocker) -> None:  # noqa: AN
 # --- plan from file ------------------------------------------------------
 
 
+def test_interactive_plan_file_carries_the_plan_suffix(mocker) -> None:  # noqa: ANN001
+    # The file handed to $EDITOR is a plan, so it is named like one: editors
+    # key off .autoland-plan to highlight the syntax.
+    seen = {}
+
+    def _editor(cmd, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        seen["path"] = cmd[1]
+        Path(cmd[1]).write_text("l\n")
+        return argparse.Namespace(returncode=0)
+
+    mocker.patch.object(autoland.subprocess, "run", side_effect=_editor)
+
+    autoland.edit_plan_interactive(_stack(1))
+
+    assert seen["path"].endswith(".autoland-plan")
+
+
 def test_editor_format_pins_pr_numbers() -> None:
     stack = _pinned_stack([101, 102])
     text = format_plan_for_editor(stack, generate_default_plan(stack))

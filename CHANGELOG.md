@@ -1,12 +1,17 @@
 # Top of tree
 
+* `autoland` plans now use `.autoland-plan` as their conventional suffix. The
+  temporary file `-i` opens in `$EDITOR` is named `autoland-plan-*.autoland-plan`
+  (it was `autoland-plan-*.txt`), so the VS Code extension highlights an
+  interactively edited plan with no setup, and the docs name saved plans
+  `plan.autoland-plan`. `--plan-file` still accepts any path.
 * Added a VS Code extension for `autoland` plan files under
   [`editors/vscode`](editors/vscode), licensed under the MIT license so it can
   be redistributed on its own. It registers an `autoland-plan` language
-  (applied to `*.autoland-plan`, to the `autoland-plan-*.txt` file that
-  `autoland -i` opens in `$EDITOR`, and to any file starting with the
-  `# Autoland plan` header) and highlights the `l` / `w` / `c` steps, PR
-  numbers and URLs, workflow names, confirmation conditions and `#` comments.
+  (applied to `*.autoland-plan`, including the temporary file `autoland -i`
+  opens in `$EDITOR`, and to any file starting with the `# Autoland plan`
+  header) and highlights the `l` / `w` / `c` steps, PR numbers and URLs,
+  workflow names, confirmation conditions and `#` comments.
   Steps the plan parser would reject — an `l` whose argument is neither a PR
   number nor a PR URL, a `w` with no workflow, a line that is not a step — get
   an `invalid` scope, so a malformed plan is visible before it is run.
