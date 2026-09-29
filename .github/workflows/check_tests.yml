@@ -17,3 +17,16 @@ jobs:
       - name: Run tests
         run: pytest tests/
 
+  grammar:
+    # The VS Code grammar is tested with its own (node) tool; the assertions
+    # live in editors/vscode/tests/*.autoland-plan.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: '20'
+      - name: Run grammar tests
+        working-directory: editors/vscode
+        run: npx --yes vscode-tmgrammar-test "tests/*.autoland-plan"
