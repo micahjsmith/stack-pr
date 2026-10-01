@@ -1387,6 +1387,9 @@ class _FakeStackGitHub:
     def in_merge_queue(self, _pr: int) -> bool:
         return True
 
+    def has_merge_queue(self, _branch: str) -> bool:
+        return True
+
 
 def _land_with_fake_github(mocker, plan_text: str, prs: list[int], **opts):  # noqa: ANN001, ANN003, ANN202
     """Set up running *plan_text* over a stack of *prs* against a fake GitHub.

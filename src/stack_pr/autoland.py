@@ -559,6 +559,14 @@ query($owner: String!, $repo: String!, $number: Int!) {
 }
 """.strip()
 
+_MERGE_QUEUE_QUERY = """
+query($owner: String!, $repo: String!, $branch: String!) {
+  repository(owner: $owner, name: $repo) {
+    mergeQueue(branch: $branch) { id }
+  }
+}
+""".strip()
+
 
 @dataclass
 class MergeQueuePollResult:
@@ -685,6 +693,31 @@ class GitHub:
     def unstack(self, stack_number: int) -> None:
         """Remove a stack's unmerged PRs from it; queued PRs stay queued."""
         self._api("POST", f"stacks/{stack_number}/unstack")
+
+    def has_merge_queue(self, branch: str) -> bool | None:
+        """Whether *branch* has a merge queue, or ``None`` if GitHub can't say."""
+        try:
+            owner, repo = self.owner_repo()
+            result = run(
+                [
+                    "gh",
+                    "api",
+                    "graphql",
+                    "-F",
+                    f"owner={owner}",
+                    "-F",
+                    f"repo={repo}",
+                    "-F",
+                    f"branch={branch}",
+                    "-f",
+                    f"query={_MERGE_QUEUE_QUERY}",
+                ],
+                quiet=True,
+            )
+            repository = json.loads(result.stdout)["data"]["repository"]
+        except (RuntimeError, json.JSONDecodeError, KeyError, TypeError):
+            return None
+        return repository.get("mergeQueue") is not None
 
     def merge_async(self, pr_number: int, *, merge_queue: bool) -> str | None:
         """Request a merge of *pr_number* and every open PR below it in its stack.
@@ -2487,7 +2520,13 @@ def land_as_stack(
         )
         uuid: str | None = None
         try:
-            uuid = github.merge_async(top.pr_number, merge_queue=opts.merge_queue)
+            # Ask GitHub rather than trust the config: the request body must
+            # match whether the branch really has a queue (see merge_async).
+            has_queue = github.has_merge_queue(common.target)
+            uuid = github.merge_async(
+                top.pr_number,
+                merge_queue=opts.merge_queue if has_queue is None else has_queue,
+            )
         except (RuntimeError, json.JSONDecodeError) as e:
             # 409: a merge request for this stack is already in flight (e.g.
             # from a run that was interrupted) — wait for it like our own.
