@@ -26,12 +26,8 @@ There are several tool that help with stacked PRs.
 
 stack-pr can complement `gh stack` rather than replace it. stack-pr keeps its
 commit-per-PR workflow and plain base-branch PRs, and `stack-pr autoland` uses
-GitHub's native stacks to land them: it registers each run of consecutive land
-steps as a GitHub stack and merges it in one go (see [Merging as a
-stack](#merging-as-a-stack)). It also reuses a stack that `gh stack` made, as
-long as the PRs being landed sit at its bottom. While PRs are in a GitHub
-stack, only GitHub's stack merge can merge them, so land them with `autoland`
-or `gh stack merge` rather than `stack-pr land`.
+GitHub's native stacks to land them (see [Merging as a
+stack](#merging-as-a-stack)).
 
 ## Installation
 
