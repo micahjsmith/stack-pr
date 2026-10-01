@@ -1,5 +1,18 @@
 # Top of tree
 
+* Added `stack-pr autoland --replan`, which changes the plan (or the code) of an
+  interrupted or running autoland and continues it without losing progress.
+  It re-reads the run's plan file (or takes `--plan-file` / `-i`), rediscovers
+  the stack, and carries over each workflow and confirmation the previous run
+  completed when the new plan has the same step after the same landed PRs — so
+  confirmations given since the last landed PR are no longer lost. It stops a
+  running autoland first, after asking, and previews the result before
+  continuing; `--replan --dry-run` previews without touching anything.
+  Starting a new `autoland` over an existing checkpoint now offers to replan
+  (the default) as well as to overwrite.
+* Fixed a race in the per-branch autoland lock: a run that took the lock just
+  as the previous holder released it could end up holding a lock on a deleted
+  file, letting a third run start alongside it.
 * Added `stack-pr autoland --status`, a read-only report on a branch's
   autoland: whether it is in progress (and the PID holding the lock), stopped
   and resumable, or absent; where its state and lock files are; when it last
