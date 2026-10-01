@@ -578,8 +578,11 @@ Options:
   Plans conventionally use the `.autoland-plan` suffix.
   Mutually exclusive with `-i`; can't be combined with `-n/--count` (the file
   already specifies which PRs to land) or `--resume` (which restores the plan
-  from a checkpoint).
+  from a checkpoint — use `--replan --plan-file` to continue with a new one).
 - `--resume`: Resume a previously interrupted run from its checkpoint.
+- `--replan`: Change the plan, or the code, of an interrupted or running
+  autoland and continue it without losing its progress. See [Changing the plan
+  mid-land](#changing-the-plan-mid-land).
 - `--status`: Show whether an autoland is in progress for the branch (with
   `--branch` / `--state-file` to pick another), where its state and lock files
   are, when it last saved a checkpoint, and the plan's progress as of that
@@ -608,8 +611,10 @@ next to its checkpoint. The lock is released automatically when the run ends —
 including on failure or Ctrl+C — while the checkpoint is kept so you can
 `--resume`. If you start a *new* (non-`--resume`) `autoland` while a checkpoint
 from a previous run still exists, `autoland` warns that a land is already in
-progress and asks you to confirm before overwriting it (the previous run then
-can no longer be resumed).
+progress and asks whether to **replan** — continue that run with the plan you
+just gave, keeping its progress (the default) — or **overwrite** it and start
+over, after which the previous run can no longer be resumed. If that run is
+still going, it offers to stop it and replan.
 
 Everything repo-specific is configured under `[autoland]` (see [Config
 files](#config-files)), so a repository captures its workflow in
@@ -709,6 +714,41 @@ the final PR of the stack. The design doc is updated as the stack changes
 during development, and the plan is re-used and updated as the stack lands.
 That gives you an "as implemented" design doc alongside a self-documenting
 deploy/rollout plan that others can review.
+
+##### Changing the plan mid-land
+
+Long plans often change while they land: a confirm step turns up a bug, you fix
+the code, and you add a check for the fix. `--replan` continues the run with
+the new plan instead of starting over:
+
+```bash
+stack-pr autoland --replan              # re-read the plan file the run started with
+stack-pr autoland --replan --plan-file new.autoland-plan
+stack-pr autoland --replan -i           # edit the current plan in $EDITOR
+stack-pr autoland --replan --dry-run    # preview only; changes nothing
+```
+
+Without `--plan-file` or `-i`, `--replan` re-reads the plan file the run was
+started with, or replays the run's own plan if it had none — which is all you
+need when only the code changed. Either way it:
+
+1. Stops the autoland if one is running, after asking. It is stopped the way
+   Ctrl+C in its terminal would stop it: it saves its checkpoint and exits, and
+   the run continues in your terminal.
+2. Rediscovers the stack, since the code may have changed, and parses the new
+   plan against it. Landed PRs are skipped as usual.
+3. Carries over each `w` and `c` step the previous run completed, provided the
+   new plan has the same step (same workflow, or same condition text) after the
+   same set of landed PRs. A step means "once these PRs have landed, this
+   holds", so its result still stands. Adding, removing, or reordering steps
+   keeps that credit; editing a step's text, or landing a different set of PRs
+   before it, makes it run again.
+4. Shows the replanned progress, lists any completed steps that don't carry
+   over, warns if GitHub doesn't have all of the stack's code (run
+   `stack-pr submit` first after changing code), and asks before continuing.
+
+`--replan --dry-run` does steps 2–4 and stops, without stopping a running
+autoland, so you can check what a replan would do before committing to it.
 
 ##### Editor support
 
