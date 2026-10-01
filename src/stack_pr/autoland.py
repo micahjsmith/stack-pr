@@ -108,6 +108,7 @@ class AutolandOptions:
     state_file: Path | None
     always_cleanup: bool
     plan_file: Path | None = None
+    merge_as_stack: bool = True
 
     @classmethod
     def from_config_and_args(
@@ -126,6 +127,11 @@ class AutolandOptions:
         # the user's invocation directory: autoland may later chdir into a
         # temporary worktree (--branch), where a relative path would not resolve.
         plan_file = getattr(args, "plan_file", None)
+        merge_as_stack = getattr(args, "merge_as_stack", None)
+        if merge_as_stack is None:
+            merge_as_stack = config.getboolean(
+                "autoland", "merge_as_stack", fallback=True
+            )
         return cls(
             merge_queue=config.getboolean("autoland", "merge_queue", fallback=False),
             required_checks=required_checks,
@@ -163,6 +169,7 @@ class AutolandOptions:
             state_file=Path(state_file) if state_file else None,
             always_cleanup=bool(getattr(args, "always_cleanup", False)),
             plan_file=Path(plan_file).resolve() if plan_file else None,
+            merge_as_stack=merge_as_stack,
         )
 
 
@@ -643,6 +650,69 @@ class GitHub:
 
     def enqueue(self, pr_number: int) -> None:
         run(["gh", "pr", "merge", str(pr_number), "--squash"], quiet=False)
+
+    # GitHub's native stacked PRs. A stack is an explicit server-side object —
+    # GitHub does not infer one from a chain of PR bases — and once a PR is in
+    # one, only the asynchronous merge API can merge it. See
+    # https://docs.github.com/en/rest/pulls/stacks and
+    # https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously
+
+    def _api(self, method: str, path: str, body: dict | None = None) -> Any:  # noqa: ANN401
+        owner, repo = self.owner_repo()
+        cmd = ["gh", "api", "-X", method, f"repos/{owner}/{repo}/{path}"]
+        if body is not None:
+            cmd += ["--input", "-"]
+        result = run(
+            cmd,
+            quiet=True,
+            input_data=json.dumps(body).encode() if body is not None else None,
+        )
+        return json.loads(result.stdout) if result.stdout.strip() else None
+
+    def find_stack(self, pr_number: int) -> dict | None:
+        """The GitHub stack *pr_number* belongs to, or ``None`` if it has none."""
+        stacks = self._api("GET", f"stacks?pull_request={pr_number}")
+        return stacks[0] if isinstance(stacks, list) and stacks else None
+
+    def create_stack(self, pr_numbers: list[int]) -> dict:
+        """Register *pr_numbers* (bottom first) as a GitHub stack."""
+        stack = self._api("POST", "stacks", {"pull_requests": pr_numbers})
+        assert isinstance(stack, dict)
+        return stack
+
+    def unstack(self, stack_number: int) -> None:
+        """Remove a stack's unmerged PRs from it; queued PRs stay queued."""
+        self._api("POST", f"stacks/{stack_number}/unstack")
+
+    def merge_async(self, pr_number: int) -> str | None:
+        """Request a merge of *pr_number* and every open PR below it in its stack.
+
+        Uses the merge queue when the target branch has one. Returns the
+        request's id for ``merge_async_status``, or ``None`` when GitHub didn't
+        return one (the PR was already merged or queued).
+        """
+        data = self._api(
+            "PUT",
+            f"pulls/{pr_number}/merge-async",
+            {"merge_method": "squash", "merge_action": "default"},
+        )
+        if not isinstance(data, dict):
+            return None
+        details = data.get("details")
+        uuid = details.get("uuid") if isinstance(details, dict) else None
+        return uuid or data.get("uuid") or None
+
+    def merge_async_status(self, pr_number: int, uuid: str) -> tuple[str, str]:
+        """``(status, message)`` of a merge request.
+
+        Status is one of ``pending``, ``enqueued``, ``merged``, ``failed``.
+        """
+        data = self._api("GET", f"pulls/{pr_number}/merge-async/{uuid}")
+        if not isinstance(data, dict):
+            return "", ""
+        details = data.get("details")
+        message = details.get("message", "") if isinstance(details, dict) else ""
+        return data.get("status", ""), message or ""
 
     def poll_merge(self, pr_number: int) -> MergeQueuePollResult:
         state = self.pr_state(pr_number)
@@ -2179,6 +2249,291 @@ def enqueue_and_wait(
             awake_elapsed += opts.poll_interval
 
 
+# ---------------------------------------------------------------------------
+# Merging a run of land steps as one GitHub stack
+# ---------------------------------------------------------------------------
+
+
+def stack_merge_run(ctx: LandingContext, start: int) -> list[StackEntry]:
+    """The PRs a stack merge starting at plan step *start* would land.
+
+    That is the run of consecutive ``l`` steps from *start* whose PRs are still
+    open. A ``w`` or ``c`` step ends the run: it has to see the PRs above it
+    land separately from the ones below it. A run of fewer than two PRs gains
+    nothing from a stack merge, so it comes back empty.
+    """
+    entries: list[StackEntry] = []
+    for step in ctx.plan[start:]:
+        if not isinstance(step, LandStep) or step.already_landed:
+            break
+        entry = ctx.stack[step.entry_index]
+        if entry.state == PRState.MERGED:
+            break
+        entries.append(entry)
+    return entries if len(entries) > 1 else []
+
+
+def stack_merge_runs(ctx: LandingContext) -> list[tuple[int, list[StackEntry]]]:
+    """Every ``(first step, PRs)`` run the rest of the plan would stack-merge."""
+    runs = []
+    index = ctx.current_step
+    while index < len(ctx.plan):
+        entries = stack_merge_run(ctx, index)
+        if entries:
+            runs.append((index, entries))
+        index += max(len(entries), 1)
+    return runs
+
+
+def print_stack_merge_runs(ctx: LandingContext, opts: AutolandOptions) -> None:
+    if not opts.merge_as_stack:
+        return
+    for first, entries in stack_merge_runs(ctx):
+        prs = ", ".join(f"#{e.pr_number}" for e in entries)
+        console.print(
+            f"[dim]Steps {first + 1}-{first + len(entries)} ({prs}) will merge "
+            "together as a GitHub stack.[/dim]"
+        )
+
+
+def _open_stack_prs(stack: dict) -> list[int]:
+    """The numbers of a GitHub stack's unmerged PRs, bottom first."""
+    return [
+        pr["number"]
+        for pr in stack.get("pull_requests", [])
+        if not pr.get("merged_at") and pr.get("state", "open") == "open"
+    ]
+
+
+def _github_stack_for(prs: list[int]) -> tuple[int | None, bool]:
+    """Find or create a GitHub stack whose bottom open PRs are exactly *prs*.
+
+    Returns ``(stack number, whether it holds just the run)``, with a ``None``
+    number when the run can't be merged as a stack. A stack holding just the
+    run is ours to dissolve if the merge falls through, even when it predates
+    this call: it is most likely one an interrupted run left behind.
+    """
+    try:
+        existing = github.find_stack(prs[0])
+    except (RuntimeError, json.JSONDecodeError) as e:
+        console.print(f"[yellow]Could not look up GitHub stacks: {e}[/yellow]")
+        return None, False
+
+    if existing is None:
+        try:
+            return github.create_stack(prs)["number"], True
+        except (RuntimeError, json.JSONDecodeError, KeyError, TypeError) as e:
+            # A retried POST may have created the stack on its first attempt.
+            with contextlib.suppress(RuntimeError, json.JSONDecodeError):
+                existing = github.find_stack(prs[0])
+            if existing is not None and _open_stack_prs(existing) == prs:
+                return existing["number"], True
+            console.print(f"[yellow]Could not create a GitHub stack: {e}[/yellow]")
+            return None, False
+
+    # A stack made earlier — by an interrupted run, or by hand with gh stack —
+    # is reusable if the run sits at its bottom: merging the run's top PR then
+    # merges exactly the run. Anything else would merge PRs the plan doesn't.
+    open_prs = _open_stack_prs(existing)
+    if open_prs[: len(prs)] == prs:
+        return existing["number"], open_prs == prs
+    console.print(
+        f"[yellow]PR #{prs[0]} is already in GitHub stack #{existing['number']}, "
+        "which does not match the plan.[/yellow]"
+    )
+    return None, False
+
+
+@dataclass
+class StackMergeResult:
+    landed: bool = False  # every PR in the run merged
+    # Stop the plan. Otherwise, the PRs of the run that are still open should be
+    # landed one at a time instead.
+    abort_reason: str = ""
+
+
+def _await_stack_merge(
+    entries: list[StackEntry],
+    uuid: str | None,
+    *,
+    opts: AutolandOptions,
+    ctx: LandingContext,
+) -> str:
+    """Wait for a requested stack merge to finish.
+
+    Returns "" once every PR merged, else why it didn't. A failure may still
+    have merged some of the PRs: GitHub stops a stack merge at the PR that
+    failed, and keeps the ones below it.
+    """
+    top = entries[-1]
+    awake_elapsed = 0.0
+    while True:
+        if ctx.aborted:
+            return "aborted"
+        if awake_elapsed > opts.merge_timeout:
+            return "timed out waiting for the stack to merge"
+
+        still_open = []
+        for entry in entries:
+            if entry.state == PRState.MERGED:
+                continue
+            state = github.pr_state(entry.pr_number)
+            if state == "MERGED":
+                entry.state = PRState.MERGED
+                entry.error_message = ""
+            elif state == "CLOSED":
+                return f"PR #{entry.pr_number} was closed"
+            else:
+                still_open.append(entry)
+        if not still_open:
+            return ""
+
+        status, message = "", ""
+        if uuid:
+            with contextlib.suppress(RuntimeError, json.JSONDecodeError):
+                status, message = github.merge_async_status(top.pr_number, uuid)
+        if status == "failed":
+            return message or "GitHub reported the stack merge as failed"
+        # Every PR enters the queue together, and GitHub drops the PRs above any
+        # PR that leaves it, so the lowest open PR leaving means the merge is
+        # off. A request still "pending" hasn't reached the queue yet; without
+        # a request id to ask, give it one interval to get there.
+        settled = status == "enqueued" or (not uuid and awake_elapsed > 0)
+        if settled and not github.in_merge_queue(still_open[0].pr_number):
+            return f"PR #{still_open[0].pr_number} was booted from the merge queue"
+
+        mins = int(awake_elapsed) // 60
+        for entry in still_open:
+            entry.error_message = f"Merging as a stack ({mins}m elapsed)..."
+        console.print(
+            f"[dim]Stack of {len(entries)} PRs up to #{top.pr_number}: "
+            f"{status or 'merging'} ({mins}m) — polling in {opts.poll_interval}s"
+            "[/dim]"
+        )
+        resilient_sleep(opts.poll_interval)
+        awake_elapsed += opts.poll_interval
+
+
+def land_as_stack(
+    entries: list[StackEntry],
+    *,
+    ctx: LandingContext,
+    common: cli.CommonArgs,
+    opts: AutolandOptions,
+) -> StackMergeResult:
+    """Land a run of consecutive PRs (bottom first) with one stack merge.
+
+    Every PR still needs its own approval and passing checks, so those are
+    waited for first, exactly as when landing one at a time. Then a single
+    merge request on the top PR merges the whole run — through the merge queue
+    as one group, where the repo has one — and the stack above is rebased and
+    re-submitted once, not once per PR.
+
+    Anything that keeps the run from merging as a stack is not fatal: the
+    result asks for the rest to be landed one at a time. A GitHub stack holding
+    just the run is dissolved first, since GitHub only lets stacked PRs merge
+    through the stack merge API.
+    """
+    prs = [e.pr_number for e in entries]
+    top = entries[-1]
+    console.print(
+        f"\n{'=' * 60}\n[bold]Landing {len(entries)} PRs as a GitHub stack: "
+        f"{', '.join(f'#{n}' for n in prs)}[/bold]\n{'=' * 60}"
+    )
+
+    stack_number, dissolvable = _github_stack_for(prs)
+    if stack_number is None:
+        console.print("[yellow]Landing these PRs one at a time instead.[/yellow]")
+        return StackMergeResult()
+
+    failure = ""
+    abort_reason = ""
+    for entry in entries:
+        if not wait_for_approval(entry, opts=opts, ctx=ctx):
+            abort_reason = f"PR #{entry.pr_number} approval wait was aborted"
+            break
+    else:
+        for entry in entries:
+            if entry.state == PRState.MERGED:
+                continue
+            if not wait_for_checks(entry, opts=opts, ctx=ctx):
+                abort_reason = f"PR #{entry.pr_number} checks failed after retries"
+                break
+
+    bottom = next((e for e in entries if e.state != PRState.MERGED), None)
+    # Only the lowest open PR is checked here: GitHub reports the ones above it
+    # as blocked until it merges. The merge request itself enforces every PR's
+    # requirements.
+    if (
+        not abort_reason
+        and bottom is not None
+        and not wait_for_mergeable(bottom, opts=opts, ctx=ctx).ready
+    ):
+        abort_reason = f"PR #{bottom.pr_number} failed to merge"
+
+    if not abort_reason and bottom is not None:
+        for entry in entries:
+            if entry.state != PRState.MERGED:
+                entry.state = PRState.IN_MERGE_QUEUE
+                entry.error_message = "Merging as a stack..."
+        console.print(
+            f"\n[bold cyan]Merging PRs #{bottom.pr_number}-#{top.pr_number} "
+            f"as a stack[/bold cyan]"
+        )
+        uuid: str | None = None
+        try:
+            uuid = github.merge_async(top.pr_number)
+        except (RuntimeError, json.JSONDecodeError) as e:
+            # 409: a merge request for this stack is already in flight (e.g.
+            # from a run that was interrupted) — wait for it like our own.
+            if "HTTP 409" not in str(e):
+                failure = f"stack merge request failed: {e}"
+        if not failure:
+            failure = _await_stack_merge(entries, uuid, opts=opts, ctx=ctx)
+            if failure == "aborted":
+                abort_reason = "Stack merge was aborted"
+
+    landed = all(e.state == PRState.MERGED for e in entries)
+    if not landed and dissolvable:
+        # Leave no stack behind: landing one PR at a time only works on PRs
+        # that aren't in one. Queued PRs stay queued.
+        try:
+            github.unstack(stack_number)
+        except (RuntimeError, json.JSONDecodeError) as e:
+            console.print(
+                f"[yellow]Could not dissolve GitHub stack #{stack_number}: {e}[/yellow]"
+            )
+
+    merged = [e for e in entries if e.state == PRState.MERGED]
+    if failure and not abort_reason:
+        console.print(
+            f"[yellow]Stack merge did not complete ({failure}). Landing the "
+            "remaining PRs one at a time.[/yellow]"
+        )
+        for entry in entries:
+            if entry.state != PRState.MERGED:
+                entry.state = PRState.PENDING
+                entry.error_message = f"Stack merge: {failure}"
+    elif landed:
+        console.print(
+            f"\n[bold green]PRs {', '.join(f'#{n}' for n in prs)} merged![/bold green]"
+        )
+
+    if merged:
+        _refresh_last_landed_sha(ctx, common, merged[-1].pr_number)
+        if ctx.stack.index(merged[-1]) < len(ctx.stack) - 1:
+            try:
+                rebase_and_resubmit(common)
+            except Exception as e:  # noqa: BLE001 - report any resubmit failure
+                return StackMergeResult(
+                    landed=landed,
+                    abort_reason=(
+                        f"Rebase failed after merging #{merged[-1].pr_number}: {e}"
+                    ),
+                )
+    return StackMergeResult(landed=landed, abort_reason=abort_reason)
+
+
 def execute_plan(
     ctx: LandingContext,
     common: cli.CommonArgs,
@@ -2190,6 +2545,9 @@ def execute_plan(
     # wait for the code of the last PR that prefix landed. Only that last one
     # matters, so don't pay for a fetch + lookup on each of the others.
     last_prelanded = landed_prefix_end(ctx.plan)
+    # The last step of a run whose stack merge fell through; the rest of that
+    # run lands one PR at a time rather than retrying the stack merge.
+    unstacked_through = -1
 
     for step_idx in range(ctx.current_step, len(ctx.plan)):
         step = ctx.plan[step_idx]
@@ -2206,6 +2564,19 @@ def execute_plan(
         elif isinstance(step, LandStep):
             entry = ctx.stack[step.entry_index]
             ctx.current_index = step.entry_index
+
+            run_entries = (
+                stack_merge_run(ctx, step_idx)
+                if opts.merge_as_stack and step_idx > unstacked_through
+                else []
+            )
+            if run_entries:
+                result = land_as_stack(run_entries, ctx=ctx, common=common, opts=opts)
+                if result.abort_reason:
+                    return _abort(ctx, checkpointer, result.abort_reason)
+                if not result.landed:
+                    unstacked_through = step_idx + len(run_entries) - 1
+                checkpointer.save(ctx)
 
             if entry.state == PRState.MERGED:
                 console.print(
@@ -2395,6 +2766,16 @@ def register_parser(
         default=None,
         metavar="BRANCH",
         help="Land a stack rooted on BRANCH using a temporary worktree.",
+    )
+    p.add_argument(
+        "--merge-as-stack",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Merge each run of consecutive 'l' steps in one go, as a GitHub "
+            "stack, instead of one PR at a time (config: autoland.merge_as_stack; "
+            "default: on)."
+        ),
     )
     p.add_argument(
         "--always-cleanup",
@@ -2630,6 +3011,7 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         )
 
         print_status(ctx)
+        print_stack_merge_runs(ctx, opts)
         if opts.dry_run:
             console.print("\n[yellow]Dry run — exiting.[/yellow]")
             return
@@ -2709,6 +3091,7 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             return
 
         print_status(ctx)
+        print_stack_merge_runs(ctx, opts)
         console.print(f"[dim]State file: {sf_path}[/dim]\n")
         _install_signal_handler(ctx, checkpointer, worktree, opts)
         _finish(
