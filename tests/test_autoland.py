@@ -1791,12 +1791,12 @@ def test_merge_as_stack_defaults_on_and_flag_overrides_config() -> None:
     assert flagged.merge_as_stack is True
 
 
-def test_stack_merge_runs_are_split_by_checkpoints() -> None:
+def test_native_stack_merge_runs_are_split_by_checkpoints() -> None:
     stack = _pinned_stack([101, 102, 103, 104, 105])
     plan = parse_plan("l\nl\nw deploy.yaml\nl\nc QA\nl\nl\n", stack)
     ctx = LandingContext(stack=stack, plan=plan)
 
-    runs = autoland.stack_merge_runs(ctx)
+    runs = autoland.native_stack_runs(ctx)
 
     # A lone 'l' between two checkpoints has nothing to merge alongside.
     assert [(first, [e.pr_number for e in es]) for first, es in runs] == [
@@ -1805,16 +1805,16 @@ def test_stack_merge_runs_are_split_by_checkpoints() -> None:
     ]
 
 
-def test_stack_merge_run_starts_above_merged_prs() -> None:
+def test_native_stack_merge_run_starts_above_merged_prs() -> None:
     stack = _pinned_stack([101, 102, 103])
     ctx = LandingContext(stack=stack, plan=parse_plan("l\nl\nl\n", stack))
     stack[0].state = autoland.PRState.MERGED
 
-    assert autoland.stack_merge_run(ctx, 0) == []
-    assert [e.pr_number for e in autoland.stack_merge_run(ctx, 1)] == [102, 103]
+    assert autoland.native_stack_run(ctx, 0) == []
+    assert [e.pr_number for e in autoland.native_stack_run(ctx, 1)] == [102, 103]
 
 
-class _FakeStackGitHub:
+class _FakeNativeStackGitHub:
     """The slice of GitHub a stack merge talks to, holding the stacks in memory."""
 
     def __init__(self) -> None:
@@ -1830,7 +1830,7 @@ class _FakeStackGitHub:
         self.lands: list[int] | None = None
         self.status = "merged"
 
-    def find_stack(self, pr: int) -> dict | None:
+    def find_native_stack(self, pr: int) -> dict | None:
         for number, prs in self.stacks.items():
             if pr in prs:
                 return {
@@ -1842,14 +1842,14 @@ class _FakeStackGitHub:
                 }
         return None
 
-    def create_stack(self, prs: list[int]) -> dict:
+    def create_native_stack(self, prs: list[int]) -> dict:
         if self.create_error:
             raise RuntimeError(self.create_error)
         self.created.append(prs)
         self.stacks[7] = prs
         return {"number": 7}
 
-    def unstack(self, number: int) -> None:
+    def unstack_native_stack(self, number: int) -> None:
         self.unstacked.append(number)
         self.stacks.pop(number)
 
@@ -1881,7 +1881,7 @@ def _land_with_fake_github(mocker, plan_text: str, prs: list[int], **opts):  # n
     at a time merges straight away. Returns the fake, a function that runs the
     plan, the rebase mock, and a function listing the PRs landed one at a time.
     """
-    fake = _FakeStackGitHub()
+    fake = _FakeNativeStackGitHub()
     mocker.patch.object(autoland, "github", fake)
     mocker.patch("stack_pr.autoland.console")
     mocker.patch("stack_pr.autoland.resilient_sleep")
@@ -1945,7 +1945,7 @@ def test_merge_as_stack_off_lands_one_at_a_time(mocker) -> None:  # noqa: ANN001
     assert landed_one_by_one() == [101, 102]
 
 
-def test_stack_merge_falls_back_when_the_stack_cannot_be_created(mocker) -> None:  # noqa: ANN001
+def test_native_stack_merge_falls_back_when_the_stack_cannot_be_created(mocker) -> None:  # noqa: ANN001
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
         mocker, "l\nl\nl\n", [101, 102, 103]
     )
@@ -1974,7 +1974,7 @@ def test_partly_failed_stack_merge_lands_the_rest_one_at_a_time(mocker) -> None:
     assert rebase.call_count == 2  # after the stack merge, and after #102
 
 
-def test_stack_merge_waits_for_a_request_already_in_flight(mocker) -> None:  # noqa: ANN001
+def test_native_stack_merge_waits_for_a_request_already_in_flight(mocker) -> None:  # noqa: ANN001
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
         mocker, "l\nl\n", [101, 102]
     )
@@ -1989,7 +1989,7 @@ def test_stack_merge_waits_for_a_request_already_in_flight(mocker) -> None:  # n
     assert fake.unstacked == []
 
 
-def test_stack_merge_reuses_a_stack_the_run_sits_at_the_bottom_of(mocker) -> None:  # noqa: ANN001
+def test_native_stack_merge_reuses_a_stack_the_run_is_at_the_bottom_of(mocker) -> None:  # noqa: ANN001
     fake, execute, _rebase, _landed = _land_with_fake_github(
         mocker, "l\nl\n", [101, 102, 103]
     )
@@ -2002,7 +2002,7 @@ def test_stack_merge_reuses_a_stack_the_run_sits_at_the_bottom_of(mocker) -> Non
     assert fake.merge_requests == [102]
 
 
-def test_stack_merge_leaves_a_mismatched_stack_alone(mocker) -> None:  # noqa: ANN001
+def test_native_stack_merge_leaves_a_mismatched_stack_alone(mocker) -> None:  # noqa: ANN001
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
         mocker, "l\nl\n", [101, 102]
     )

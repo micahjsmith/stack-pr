@@ -741,20 +741,20 @@ class GitHub:
         )
         return json.loads(result.stdout) if result.stdout.strip() else None
 
-    def find_stack(self, pr_number: int) -> dict | None:
+    def find_native_stack(self, pr_number: int) -> dict | None:
         """The GitHub stack *pr_number* belongs to, or ``None`` if it has none."""
         stacks = self._api("GET", f"stacks?pull_request={pr_number}")
         return stacks[0] if isinstance(stacks, list) and stacks else None
 
-    def create_stack(self, pr_numbers: list[int]) -> dict:
+    def create_native_stack(self, pr_numbers: list[int]) -> dict:
         """Register *pr_numbers* (bottom first) as a GitHub stack."""
         stack = self._api("POST", "stacks", {"pull_requests": pr_numbers})
         assert isinstance(stack, dict)
         return stack
 
-    def unstack(self, stack_number: int) -> None:
+    def unstack_native_stack(self, native_stack_number: int) -> None:
         """Remove a stack's unmerged PRs from it; queued PRs stay queued."""
-        self._api("POST", f"stacks/{stack_number}/unstack")
+        self._api("POST", f"stacks/{native_stack_number}/unstack")
 
     def has_merge_queue(self, branch: str) -> bool | None:
         """Whether *branch* has a merge queue, or ``None`` if GitHub can't say."""
@@ -2448,7 +2448,7 @@ def enqueue_and_wait(
 # ---------------------------------------------------------------------------
 
 
-def stack_merge_run(ctx: LandingContext, start: int) -> list[StackEntry]:
+def native_stack_run(ctx: LandingContext, start: int) -> list[StackEntry]:
     """The PRs a stack merge starting at plan step *start* would land.
 
     That is the run of consecutive ``l`` steps from *start* whose PRs are still
@@ -2467,22 +2467,22 @@ def stack_merge_run(ctx: LandingContext, start: int) -> list[StackEntry]:
     return entries if len(entries) > 1 else []
 
 
-def stack_merge_runs(ctx: LandingContext) -> list[tuple[int, list[StackEntry]]]:
+def native_stack_runs(ctx: LandingContext) -> list[tuple[int, list[StackEntry]]]:
     """Every ``(first step, PRs)`` run the rest of the plan would stack-merge."""
     runs = []
     index = ctx.current_step
     while index < len(ctx.plan):
-        entries = stack_merge_run(ctx, index)
+        entries = native_stack_run(ctx, index)
         if entries:
             runs.append((index, entries))
         index += max(len(entries), 1)
     return runs
 
 
-def print_stack_merge_runs(ctx: LandingContext, opts: AutolandOptions) -> None:
+def print_native_stack_runs(ctx: LandingContext, opts: AutolandOptions) -> None:
     if not opts.merge_as_stack:
         return
-    for first, entries in stack_merge_runs(ctx):
+    for first, entries in native_stack_runs(ctx):
         prs = ", ".join(f"#{e.pr_number}" for e in entries)
         console.print(
             f"[dim]Steps {first + 1}-{first + len(entries)} ({prs}) will merge "
@@ -2490,16 +2490,16 @@ def print_stack_merge_runs(ctx: LandingContext, opts: AutolandOptions) -> None:
         )
 
 
-def _open_stack_prs(stack: dict) -> list[int]:
+def _open_native_stack_prs(native_stack: dict) -> list[int]:
     """The numbers of a GitHub stack's unmerged PRs, bottom first."""
     return [
         pr["number"]
-        for pr in stack.get("pull_requests", [])
+        for pr in native_stack.get("pull_requests", [])
         if not pr.get("merged_at") and pr.get("state", "open") == "open"
     ]
 
 
-def _github_stack_for(prs: list[int]) -> tuple[int | None, bool]:
+def _native_stack_for(prs: list[int]) -> tuple[int | None, bool]:
     """Find or create a GitHub stack whose bottom open PRs are exactly *prs*.
 
     Returns ``(stack number, whether it holds just the run)``, with a ``None``
@@ -2508,19 +2508,19 @@ def _github_stack_for(prs: list[int]) -> tuple[int | None, bool]:
     this call: it is most likely one an interrupted run left behind.
     """
     try:
-        existing = github.find_stack(prs[0])
+        existing = github.find_native_stack(prs[0])
     except (RuntimeError, json.JSONDecodeError) as e:
         console.print(f"[yellow]Could not look up GitHub stacks: {e}[/yellow]")
         return None, False
 
     if existing is None:
         try:
-            return github.create_stack(prs)["number"], True
+            return github.create_native_stack(prs)["number"], True
         except (RuntimeError, json.JSONDecodeError, KeyError, TypeError) as e:
             # A retried POST may have created the stack on its first attempt.
             with contextlib.suppress(RuntimeError, json.JSONDecodeError):
-                existing = github.find_stack(prs[0])
-            if existing is not None and _open_stack_prs(existing) == prs:
+                existing = github.find_native_stack(prs[0])
+            if existing is not None and _open_native_stack_prs(existing) == prs:
                 return existing["number"], True
             console.print(f"[yellow]Could not create a GitHub stack: {e}[/yellow]")
             return None, False
@@ -2528,7 +2528,7 @@ def _github_stack_for(prs: list[int]) -> tuple[int | None, bool]:
     # A stack made earlier — by an interrupted run, or by hand with gh stack —
     # is reusable if the run sits at its bottom: merging the run's top PR then
     # merges exactly the run. Anything else would merge PRs the plan doesn't.
-    open_prs = _open_stack_prs(existing)
+    open_prs = _open_native_stack_prs(existing)
     if open_prs[: len(prs)] == prs:
         return existing["number"], open_prs == prs
     console.print(
@@ -2539,14 +2539,14 @@ def _github_stack_for(prs: list[int]) -> tuple[int | None, bool]:
 
 
 @dataclass
-class StackMergeResult:
+class NativeStackMergeResult:
     landed: bool = False  # every PR in the run merged
     # Stop the plan. Otherwise, the PRs of the run that are still open should be
     # landed one at a time instead.
     abort_reason: str = ""
 
 
-def _await_stack_merge(
+def _await_native_stack_merge(
     entries: list[StackEntry],
     uuid: str | None,
     *,
@@ -2608,13 +2608,13 @@ def _await_stack_merge(
         awake_elapsed += opts.poll_interval
 
 
-def land_as_stack(
+def land_as_native_stack(
     entries: list[StackEntry],
     *,
     ctx: LandingContext,
     common: cli.CommonArgs,
     opts: AutolandOptions,
-) -> StackMergeResult:
+) -> NativeStackMergeResult:
     """Land a run of consecutive PRs (bottom first) with one stack merge.
 
     Every PR still needs its own approval and passing checks, so those are
@@ -2635,10 +2635,10 @@ def land_as_stack(
         f"{', '.join(f'#{n}' for n in prs)}[/bold]\n{'=' * 60}"
     )
 
-    stack_number, dissolvable = _github_stack_for(prs)
-    if stack_number is None:
+    native_stack_number, dissolvable = _native_stack_for(prs)
+    if native_stack_number is None:
         console.print("[yellow]Landing these PRs one at a time instead.[/yellow]")
-        return StackMergeResult()
+        return NativeStackMergeResult()
 
     failure = ""
     abort_reason = ""
@@ -2689,7 +2689,7 @@ def land_as_stack(
             if "HTTP 409" not in str(e):
                 failure = f"stack merge request failed: {e}"
         if not failure:
-            failure = _await_stack_merge(entries, uuid, opts=opts, ctx=ctx)
+            failure = _await_native_stack_merge(entries, uuid, opts=opts, ctx=ctx)
             if failure == "aborted":
                 abort_reason = "Stack merge was aborted"
 
@@ -2698,10 +2698,10 @@ def land_as_stack(
         # Leave no stack behind: landing one PR at a time only works on PRs
         # that aren't in one. Queued PRs stay queued.
         try:
-            github.unstack(stack_number)
+            github.unstack_native_stack(native_stack_number)
         except (RuntimeError, json.JSONDecodeError) as e:
             console.print(
-                f"[yellow]Could not dissolve GitHub stack #{stack_number}: {e}[/yellow]"
+                f"[yellow]Could not dissolve GitHub stack #{native_stack_number}: {e}[/yellow]"
             )
 
     merged = [e for e in entries if e.state == PRState.MERGED]
@@ -2725,13 +2725,13 @@ def land_as_stack(
             try:
                 rebase_and_resubmit(common)
             except Exception as e:  # noqa: BLE001 - report any resubmit failure
-                return StackMergeResult(
+                return NativeStackMergeResult(
                     landed=landed,
                     abort_reason=(
                         f"Rebase failed after merging #{merged[-1].pr_number}: {e}"
                     ),
                 )
-    return StackMergeResult(landed=landed, abort_reason=abort_reason)
+    return NativeStackMergeResult(landed=landed, abort_reason=abort_reason)
 
 
 def execute_plan(
@@ -2766,12 +2766,14 @@ def execute_plan(
             ctx.current_index = step.entry_index
 
             run_entries = (
-                stack_merge_run(ctx, step_idx)
+                native_stack_run(ctx, step_idx)
                 if opts.merge_as_stack and step_idx > unstacked_through
                 else []
             )
             if run_entries:
-                result = land_as_stack(run_entries, ctx=ctx, common=common, opts=opts)
+                result = land_as_native_stack(
+                    run_entries, ctx=ctx, common=common, opts=opts
+                )
                 if result.abort_reason:
                     return _abort(ctx, checkpointer, result.abort_reason)
                 if not result.landed:
@@ -3285,7 +3287,7 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         )
 
         print_status(ctx)
-        print_stack_merge_runs(ctx, opts)
+        print_native_stack_runs(ctx, opts)
         if opts.dry_run:
             console.print("\n[yellow]Dry run — exiting.[/yellow]")
             return
@@ -3367,7 +3369,7 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             return
 
         print_status(ctx)
-        print_stack_merge_runs(ctx, opts)
+        print_native_stack_runs(ctx, opts)
         console.print(f"[dim]State file: {sf_path}[/dim]\n")
         _install_signal_handler(ctx, checkpointer, worktree, opts)
         _finish(
@@ -3545,7 +3547,7 @@ def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> 
     ctx = LandingContext(stack=stack, plan=plan)
 
     print_status(ctx)
-    print_stack_merge_runs(ctx, opts)
+    print_native_stack_runs(ctx, opts)
     if lost:
         console.print(
             "\n[yellow]Done in the previous run, but not carried over (changed, "
