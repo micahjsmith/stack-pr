@@ -1,6 +1,9 @@
 import argparse
 import configparser
 import dataclasses
+import json
+import os
+import subprocess
 import sys
 import unicodedata
 from pathlib import Path
@@ -26,13 +29,17 @@ from stack_pr.autoland import (
     LandStep,
     StackEntry,
     WorkflowStep,
-    _confirm_overwrite_state,
+    _ask_replan_or_overwrite,
     _describe_step,
     _next_steps_lines,
     _pick_glyphs,
+    _PlainConsole,
     _plan_rows,
+    _replan,
     _run_fresh,
     _StepRow,
+    _stop_running_autoland,
+    carry_over_progress,
     evaluate_checks,
     format_plan_for_editor,
     generate_default_plan,
@@ -1129,6 +1136,7 @@ def test_state_round_trip(tmp_path) -> None:  # noqa: ANN001
     AutolandCheckpointer(path=sf, branch="feat", base="main").save(ctx)
 
     cp, loaded = AutolandCheckpointer.load(sf)
+    assert cp.plan_file is None
     assert cp.branch == "feat"
     assert cp.base == "main"
     assert loaded.current_step == 1
@@ -1136,6 +1144,31 @@ def test_state_round_trip(tmp_path) -> None:  # noqa: ANN001
     assert loaded.stack[0].state == autoland.PRState.MERGED
     assert [e.pr_number for e in loaded.stack] == [0, 1]
     assert [type(s) for s in loaded.plan] == [LandStep, WorkflowStep, LandStep]
+
+
+def test_state_round_trip_keeps_plan_file(tmp_path) -> None:  # noqa: ANN001
+    ctx = LandingContext(stack=_stack(1), plan=generate_default_plan(_stack(1)))
+    sf = tmp_path / "state.json"
+    plan_file = tmp_path / "plan.autoland-plan"
+    AutolandCheckpointer(path=sf, branch="feat", base="main", plan_file=plan_file).save(
+        ctx
+    )
+
+    cp, _ = AutolandCheckpointer.load(sf)
+    assert cp.plan_file == plan_file
+
+
+def test_state_round_trip_keeps_abort_reason(tmp_path) -> None:  # noqa: ANN001
+    ctx = LandingContext(stack=_stack(1), plan=generate_default_plan(_stack(1)))
+    ctx.aborted = True
+    ctx.abort_reason = "CI failed on #0"
+
+    sf = tmp_path / "state.json"
+    AutolandCheckpointer(path=sf, branch="feat", base="main").save(ctx)
+
+    _, loaded = AutolandCheckpointer.load(sf)
+    assert loaded.aborted is True
+    assert loaded.abort_reason == "CI failed on #0"
 
 
 def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
@@ -1240,6 +1273,24 @@ def test_lock_is_exclusive_and_releasable(tmp_path) -> None:  # noqa: ANN001
     second.release()
 
 
+def test_lock_is_held_reports_another_holder(tmp_path) -> None:  # noqa: ANN001
+    path = tmp_path / "b.lock"
+    holder = AutolandLock(path)
+    probe = AutolandLock(path)
+
+    assert probe.is_held() is False
+    assert not path.exists()  # probing never creates the lock file
+
+    assert holder.acquire() is True
+    assert probe.is_held() is True
+    assert probe.holder_pid() == os.getpid()
+    # Probing neither steals nor breaks the holder's lock.
+    assert AutolandLock(path).acquire() is False
+
+    holder.release()
+    assert probe.is_held() is False
+
+
 def test_lock_release_is_idempotent(tmp_path) -> None:  # noqa: ANN001
     lock = AutolandLock(tmp_path / "b.lock")
     lock.release()  # never acquired -> no-op
@@ -1248,19 +1299,451 @@ def test_lock_release_is_idempotent(tmp_path) -> None:  # noqa: ANN001
     lock.release()  # double release -> no-op
 
 
-def test_confirm_overwrite_state(tmp_path, mocker) -> None:  # noqa: ANN001
+@pytest.mark.parametrize(
+    ("answer", "choice"),
+    [("", "replan"), ("r", "replan"), ("R", "replan"), ("o", "overwrite"), ("n", None)],
+)
+def test_ask_replan_or_overwrite(tmp_path, mocker, answer, choice) -> None:  # noqa: ANN001
     console = mocker.patch("stack_pr.autoland.console")
-    sf = tmp_path / "state.json"
+    console.input.return_value = answer
+    assert _ask_replan_or_overwrite(tmp_path / "state.json") == choice
 
-    console.input.return_value = "y"
-    assert _confirm_overwrite_state(sf) is True
 
-    console.input.return_value = "n"
-    assert _confirm_overwrite_state(sf) is False
-
-    # Non-interactive (EOF) must not overwrite.
+def test_ask_replan_or_overwrite_aborts_without_a_terminal(tmp_path, mocker) -> None:  # noqa: ANN001
+    console = mocker.patch("stack_pr.autoland.console")
     console.input.side_effect = EOFError
-    assert _confirm_overwrite_state(sf) is False
+    assert _ask_replan_or_overwrite(tmp_path / "state.json") is None
+
+
+# --- status report -------------------------------------------------------
+
+
+@pytest.fixture
+def plain_output(mocker, monkeypatch, tmp_path):  # noqa: ANN001, ANN201
+    """Route output through the plain console (no wrapping) and isolate $HOME,
+    where the default state directory lives."""
+    mocker.patch.object(autoland, "console", _PlainConsole())
+    mocker.patch.object(autoland, "HAVE_RICH", False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+def _status(**overrides) -> None:  # noqa: ANN003
+    # No [autoland] config: --status must work even without the merge queue.
+    autoland.run_autoland(
+        _common(), _args(status=True, **overrides), configparser.ConfigParser()
+    )
+
+
+def _save_state(path: Path, *, abort_reason: str = "") -> None:
+    ctx = LandingContext(stack=_stack(2), plan=generate_default_plan(_stack(2)))
+    ctx.stack[0].state = autoland.PRState.MERGED
+    ctx.current_step = 1
+    ctx.abort_reason = abort_reason
+    AutolandCheckpointer(path=path, branch="feat", base="main").save(ctx)
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_without_a_run(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _status(state_file=sf)
+
+    out = capsys.readouterr().out
+    assert "No autoland in progress" in out
+    assert str(sf) in out
+    assert not sf.exists()
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_of_a_stopped_run(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf, abort_reason="CI failed on #0")
+    before = sf.read_text()
+
+    _status(state_file=sf)
+
+    out = capsys.readouterr().out
+    assert "Stopped" in out
+    assert "Branch:" in out
+    assert "feat" in out
+    assert str(sf) in out
+    assert "1 done" in out
+    assert "ABORTED: CI failed on #0" in out
+    assert f"stack-pr autoland --resume --state-file {sf}" in out
+    assert sf.read_text() == before  # read-only
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_of_a_running_autoland(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf)
+    lock = AutolandLock.for_state(sf)
+    assert lock.acquire()
+    try:
+        _status(state_file=sf)
+    finally:
+        lock.release()
+
+    out = capsys.readouterr().out
+    assert f"In progress (pid {os.getpid()})" in out
+    assert str(lock.path) in out
+    assert "--resume" not in out
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_lists_saved_runs_for_other_branches(tmp_path, capsys) -> None:  # noqa: ANN001
+    other = AutolandCheckpointer.default_path("feat")
+    _save_state(other)
+
+    _status(state_file=tmp_path / "state.json")
+
+    out = capsys.readouterr().out
+    assert "Other autolands with saved state" in out
+    assert f"feat — stopped — {other}" in out
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_json_of_a_stopped_run(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf, abort_reason="CI failed on #0")
+
+    _status(state_file=sf, output="json")
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "stopped"
+    assert report["branch"] == "feat"
+    assert report["base"] == "main"
+    assert report["state_file"] == str(sf)
+    assert report["pid"] is None
+    assert report["abort_reason"] == "CI failed on #0"
+    assert report["resume_command"] == f"stack-pr autoland --resume --state-file {sf}"
+    assert report["plan"]["done"] == 1
+    assert report["plan"]["remaining"] == 1
+    first, second = report["plan"]["steps"]
+    assert first["type"] == "land"
+    assert first["pr_number"] == 0
+    assert first["outcome"] == "done"
+    assert second["is_next"] is True
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_json_of_a_running_autoland(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf)
+    lock = AutolandLock.for_state(sf)
+    assert lock.acquire()
+    try:
+        _status(state_file=sf, output="json")
+    finally:
+        lock.release()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "in_progress"
+    assert report["pid"] == os.getpid()
+    assert report["resume_command"] is None
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_json_without_a_run(tmp_path, capsys) -> None:  # noqa: ANN001
+    other = AutolandCheckpointer.default_path("feat")
+    _save_state(other)
+
+    _status(state_file=tmp_path / "state.json", output="json")
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "none"
+    assert report["state_file_exists"] is False
+    assert report["plan"] is None
+    assert report["other_runs"] == [
+        {"branch": "feat", "status": "stopped", "state_file": str(other)}
+    ]
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_json_reports_an_unreadable_state_file_on_stderr(
+    tmp_path,  # noqa: ANN001
+    capsys,  # noqa: ANN001
+) -> None:
+    sf = tmp_path / "state.json"
+    sf.write_text("{not json")
+
+    with pytest.raises(SystemExit):
+        _status(state_file=sf, output="json")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Failed to load state file" in captured.err
+
+
+def test_output_requires_status(mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    cfg = configparser.ConfigParser()
+    cfg["autoland"] = {"merge_queue": "true"}
+    with pytest.raises(SystemExit):
+        autoland.run_autoland(_common(), _args(output="json"), cfg)
+
+
+# --- replanning ------------------------------------------------------------
+
+# The plan from the user's scenario: PRs 101 and 102 have landed, and the
+# workflow and both confirmations after 102 finished before the run was stopped
+# while landing 103.
+_REPLAN_PLAN = """\
+l 101
+w deploy.yaml
+c QA sign-off
+l 102
+w deploy.yaml
+c metrics look healthy
+c on-call agrees
+l 103
+"""
+
+
+def _merged(*prs: int):  # noqa: ANN202
+    return lambda pr: pr in prs
+
+
+def _old_run() -> LandingContext:
+    """The checkpoint of a run stopped while landing PR 103."""
+    stack = _pinned_stack([101, 102, 103])
+    plan = parse_plan(_REPLAN_PLAN, stack, pr_is_merged=_never_merged)
+    stack[0].state = stack[1].state = autoland.PRState.MERGED
+    stack[2].state = autoland.PRState.WAITING_FOR_CHECKS
+    for step in plan[:7]:
+        if isinstance(step, WorkflowStep):
+            step.state = "succeeded"
+        elif isinstance(step, ConfirmStep):
+            step.confirmed = True
+    return LandingContext(stack=stack, plan=plan, current_step=7)
+
+
+def _replanned(text: str) -> tuple[list, list[int]]:
+    """Parse *text* against today's stack (101 and 102 merged) and carry over."""
+    stack = _pinned_stack([103, 104])
+    plan = parse_plan(text, stack, pr_is_merged=_merged(101, 102))
+    return plan, carry_over_progress(_old_run(), plan, stack)
+
+
+def _pending(plan: list) -> list[str]:
+    """The non-land steps a run of *plan* would still execute."""
+    return [
+        f"w {s.workflow}" if isinstance(s, WorkflowStep) else f"c {s.condition}"
+        for s in plan
+        if (isinstance(s, WorkflowStep) and s.state not in ("succeeded", "skipped"))
+        or (isinstance(s, ConfirmStep) and not s.confirmed)
+    ]
+
+
+def test_replan_keeps_checkpoints_after_the_last_landed_pr() -> None:
+    # Unchanged plan: a fresh run would re-wait for the workflow and re-prompt
+    # both confirmations after #102; a replan carries them over.
+    plan, lost = _replanned(_REPLAN_PLAN)
+    assert _pending(plan) == []
+    assert lost == []
+    # Carried-over results are real ones, not "assumed".
+    assert plan[4].state == "succeeded"
+
+
+def test_replan_runs_only_steps_that_are_new() -> None:
+    plan, lost = _replanned(
+        _REPLAN_PLAN.replace("c on-call agrees", "c on-call agrees\nc docs updated")
+        + "l 104\n"
+    )
+    assert _pending(plan) == ["c docs updated"]
+    assert lost == []
+
+
+def test_replan_keeps_credit_when_checkpoints_are_reordered() -> None:
+    plan, lost = _replanned(
+        _REPLAN_PLAN.replace(
+            "w deploy.yaml\nc metrics look healthy\nc on-call agrees",
+            "c on-call agrees\nw deploy.yaml\nc metrics look healthy",
+        )
+    )
+    assert _pending(plan) == []
+    assert lost == []
+
+
+def test_replan_reruns_and_reports_a_changed_checkpoint() -> None:
+    plan, lost = _replanned(
+        _REPLAN_PLAN.replace("c metrics look healthy", "c p99 latency is healthy")
+    )
+    assert _pending(plan) == ["c p99 latency is healthy"]
+    # The old step is reported by its index in the old plan.
+    assert lost == [5]
+
+
+def test_replan_reruns_checkpoints_now_after_a_different_set_of_prs() -> None:
+    # Landing a new PR ahead of the finished checkpoints changes what they
+    # vouch for, so all of them must run again.
+    plan, lost = _replanned(
+        "l 101\n"
+        "w deploy.yaml\n"
+        "c QA sign-off\n"
+        "l 102\n"
+        "l 103\n"
+        "w deploy.yaml\n"
+        "c metrics look healthy\n"
+        "c on-call agrees\n"
+        "l 104\n"
+    )
+    assert _pending(plan) == [
+        "w deploy.yaml",
+        "c metrics look healthy",
+        "c on-call agrees",
+    ]
+    assert lost == [4, 5, 6]
+
+
+def test_replan_matches_repeated_checkpoints_one_for_one() -> None:
+    # The old run confirmed one bare 'c' after #102; a plan with two gets
+    # credit for one of them only.
+    old = _old_run()
+    old.plan[6] = ConfirmStep(confirmed=False)
+    old.plan[5] = ConfirmStep(confirmed=True)
+    stack = _pinned_stack([103])
+    plan = parse_plan(
+        "l 101\nl 102\nc\nc\nl 103\n", stack, pr_is_merged=_merged(101, 102)
+    )
+    carry_over_progress(old, plan, stack)
+    assert [s.confirmed for s in plan if isinstance(s, ConfirmStep)] == [True, False]
+
+
+# --- replan flow -----------------------------------------------------------
+
+
+def _write_checkpoint(path: Path, plan_file: Path | None) -> None:
+    AutolandCheckpointer(
+        path=path, branch="feat", base="main", plan_file=plan_file
+    ).save(_old_run())
+
+
+def _patch_replan_io(mocker, answer: str):  # noqa: ANN001, ANN202
+    """Stub the git/GitHub side of a replan; return the execute_plan mock."""
+    mocker.patch("stack_pr.autoland.console").input.return_value = answer
+    mocker.patch("stack_pr.autoland._current_branch", return_value="feat")
+    mocker.patch("stack_pr.autoland.cli.deduce_base", side_effect=lambda c: c)
+    mocker.patch("stack_pr.autoland.cli.get_stack", return_value=[])
+    mocker.patch("stack_pr.autoland._stack_entries", return_value=_pinned_stack([103]))
+    mocker.patch("stack_pr.autoland.enrich_stack")
+    mocker.patch("stack_pr.autoland._unpushed_changes", return_value=[])
+    mocker.patch(
+        "stack_pr.autoland.github.pr_state",
+        side_effect=lambda pr: "MERGED" if pr in (101, 102) else "OPEN",
+    )
+    mocker.patch("stack_pr.autoland.signal.signal")
+    return mocker.patch("stack_pr.autoland.execute_plan", return_value=True)
+
+
+def test_replan_rereads_the_runs_plan_file_and_keeps_progress(
+    tmp_path,  # noqa: ANN001
+    mocker,  # noqa: ANN001
+) -> None:
+    plan_file = tmp_path / "plan.autoland-plan"
+    plan_file.write_text(_REPLAN_PLAN.replace("c on-call agrees", "c docs updated"))
+    sf = tmp_path / "state.json"
+    _write_checkpoint(sf, plan_file)
+    execute = _patch_replan_io(mocker, answer="y")
+
+    _replan(_common(), _opts(), sf)
+
+    ctx, _common_args, _o, checkpointer = execute.call_args.args
+    assert _pending(ctx.plan) == ["c docs updated"]
+    # The replanned run continues in the same checkpoint, still tied to the file.
+    assert checkpointer.path == sf
+    assert checkpointer.plan_file == plan_file
+
+
+def test_replan_declined_leaves_the_checkpoint_alone(tmp_path, mocker) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _write_checkpoint(sf, None)  # no plan file: the saved plan is replayed
+    before = sf.read_text()
+    execute = _patch_replan_io(mocker, answer="n")
+
+    _replan(_common(), _opts(), sf)
+
+    execute.assert_not_called()
+    assert sf.read_text() == before
+
+
+def test_replan_dry_run_previews_without_running(tmp_path, mocker) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _write_checkpoint(sf, None)
+    before = sf.read_text()
+    execute = _patch_replan_io(mocker, answer="y")
+
+    _replan(_common(), _opts(dry_run=True), sf)
+
+    execute.assert_not_called()
+    assert sf.read_text() == before
+
+
+def test_replan_without_a_checkpoint_exits(tmp_path, mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    cfg = configparser.ConfigParser()
+    cfg["autoland"] = {"merge_queue": "true"}
+    with pytest.raises(SystemExit):
+        autoland.run_autoland(
+            _common(), _args(replan=True, state_file=tmp_path / "nope.json"), cfg
+        )
+
+
+# --- taking over a running autoland -----------------------------------------
+
+_HOLDER = """
+import sys, time
+sys.path.insert(0, {src!r})
+from pathlib import Path
+from stack_pr.autoland import AutolandLock
+lock = AutolandLock(Path({path!r}))
+assert lock.acquire()
+print("locked", flush=True)
+try:
+    time.sleep(60)
+finally:
+    lock.release()
+"""
+
+
+def _spawn_holder(path: Path) -> subprocess.Popen:
+    src = str(Path(__file__).parent.parent / "src")
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER.format(src=src, path=str(path))],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == "locked"
+    return proc
+
+
+def test_stop_running_autoland_takes_over_the_lock(tmp_path, mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console").input.return_value = "y"
+    path = tmp_path / "state.json.lock"
+    holder = _spawn_holder(path)
+    lock = AutolandLock(path)
+    try:
+        assert _stop_running_autoland(lock) is True
+        # The other run was interrupted, and this process now holds the lock.
+        assert holder.wait(timeout=10) != 0
+        assert AutolandLock(path).acquire() is False
+    finally:
+        lock.release()
+        holder.kill()
+
+
+def test_stop_running_autoland_declined_leaves_it_running(tmp_path, mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console").input.return_value = "n"
+    path = tmp_path / "state.json.lock"
+    holder = _spawn_holder(path)
+    try:
+        assert _stop_running_autoland(AutolandLock(path)) is False
+        assert holder.poll() is None
+        assert AutolandLock(path).is_held()
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 # --- approval ------------------------------------------------------------

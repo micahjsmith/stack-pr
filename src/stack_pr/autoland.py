@@ -24,6 +24,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict, astuple, dataclass, field, replace
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Union
@@ -109,6 +110,7 @@ class AutolandOptions:
     always_cleanup: bool
     plan_file: Path | None = None
     merge_as_stack: bool = True
+    replan: bool = False
 
     @classmethod
     def from_config_and_args(
@@ -170,6 +172,7 @@ class AutolandOptions:
             always_cleanup=bool(getattr(args, "always_cleanup", False)),
             plan_file=Path(plan_file).resolve() if plan_file else None,
             merge_as_stack=merge_as_stack,
+            replan=bool(getattr(args, "replan", False)),
         )
 
 
@@ -313,6 +316,8 @@ class AutolandCheckpointer:
     path: Path
     branch: str
     base: str
+    # The plan file the run was started from, so `--replan` can re-read it.
+    plan_file: Path | None = None
 
     @staticmethod
     def default_path(branch: str) -> Path:
@@ -325,8 +330,11 @@ class AutolandCheckpointer:
             "version": STATE_VERSION,
             "branch": self.branch,
             "base": self.base,
+            "plan_file": str(self.plan_file) if self.plan_file else None,
             "current_step": ctx.current_step,
             "last_landed_sha": ctx.last_landed_sha,
+            # Kept so `autoland --status` can say why a stopped run stopped.
+            "abort_reason": ctx.abort_reason,
             "stack": [asdict(e) for e in ctx.stack],
             "plan": [_serialize_step(s) for s in ctx.plan],
         }
@@ -348,9 +356,17 @@ class AutolandCheckpointer:
             stack=[_deserialize_entry(e) for e in data["stack"]],
             plan=[_deserialize_step(s) for s in data["plan"]],
             current_step=data.get("current_step", 0),
+            aborted=bool(data.get("abort_reason")),
+            abort_reason=data.get("abort_reason", ""),
             last_landed_sha=data.get("last_landed_sha", ""),
         )
-        return cls(path=path, branch=data["branch"], base=data["base"]), ctx
+        plan_file = data.get("plan_file")
+        return cls(
+            path=path,
+            branch=data["branch"],
+            base=data["base"],
+            plan_file=Path(plan_file) if plan_file else None,
+        ), ctx
 
 
 @dataclass
@@ -376,25 +392,71 @@ class AutolandLock:
     def acquire(self) -> bool:
         """Try to take the lock; return False if another process holds it."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        while True:
+            fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                return False
+            # The previous holder unlinks the file as it releases, so the flock
+            # may have landed on a file that no longer has this name — a lock
+            # nobody else can see. Only a lock on the file at the path counts.
+            if self._names_locked_file(fd):
+                break
             os.close(fd)
-            return False
         self._fd = fd
+        # Record the holder so `autoland --status` can name the running process.
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
         return True
+
+    def _names_locked_file(self, fd: int) -> bool:
+        try:
+            at_path, locked = self.path.stat(), os.fstat(fd)
+        except FileNotFoundError:
+            return False
+        return (at_path.st_dev, at_path.st_ino) == (locked.st_dev, locked.st_ino)
+
+    def is_held(self) -> bool:
+        """Whether some process holds the lock right now.
+
+        Probes without creating or removing the lock file, so it is safe to call
+        while a run is live. The probe holds a shared lock for an instant; a run
+        starting in exactly that instant would see the branch as busy.
+        """
+        try:
+            fd = os.open(self.path, os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        finally:
+            # Closing the descriptor also drops the probe's own lock.
+            os.close(fd)
+        return False
+
+    def holder_pid(self) -> int | None:
+        """The PID the holder recorded, or None if unknown."""
+        try:
+            return int(self.path.read_text().strip())
+        except (OSError, ValueError):
+            return None
 
     def release(self) -> None:
         """Release the lock and remove the lock file (no-op if not held)."""
         if self._fd is None:
             return
+        # Unlink while still holding the flock: a waiter that takes it next
+        # then finds the name gone or reused, and retries (see acquire).
+        # Unlocking first would let it lock a file about to lose its name.
         try:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
-        finally:
-            os.close(self._fd)
-            self._fd = None
             self.path.unlink(missing_ok=True)
+        finally:
+            os.close(self._fd)  # closing the descriptor releases the flock
+            self._fd = None
 
 
 def _current_branch() -> str:
@@ -892,8 +954,14 @@ class Worktree:
 
 def discover_stack(common: cli.CommonArgs) -> list[StackEntry]:
     """Discover the stack via stack-pr's own parser, bottom-to-top order."""
+    return _stack_entries(
+        cli.get_stack(base=common.base, head=common.head, verbose=common.verbose)
+    )
+
+
+def _stack_entries(raw: list[cli.StackEntry]) -> list[StackEntry]:
     entries: list[StackEntry] = []
-    for e in cli.get_stack(base=common.base, head=common.head, verbose=common.verbose):
+    for e in raw:
         if not e.has_pr():
             continue  # commit not submitted yet — skip
         pr_number = int(cli.last(e.pr))
@@ -1464,6 +1532,88 @@ def is_assumed_completed(plan: list[PlanStep], index: int) -> bool:
     return index < landed_prefix_end(plan)
 
 
+# ---------------------------------------------------------------------------
+# Replanning: carry a previous run's progress over to a new plan
+# ---------------------------------------------------------------------------
+
+# A workflow or confirm step's identity for replanning: its kind, its text, and
+# the PRs landed before it. A step means "once these PRs have landed, this
+# holds", so a result recorded under the same PRs is still true in a new plan.
+_CheckpointKey = tuple[str, str, frozenset[int]]
+
+
+def _land_pr(step: LandStep, stack: list[StackEntry]) -> int | None:
+    if step.pr_number is not None:
+        return step.pr_number
+    return None if step.already_landed else stack[step.entry_index].pr_number
+
+
+def _checkpoint_keys(
+    plan: list[PlanStep], stack: list[StackEntry]
+) -> list[_CheckpointKey | None]:
+    """Each step's ``_CheckpointKey``, or None for a land step."""
+    landed: set[int] = set()
+    keys: list[_CheckpointKey | None] = []
+    for step in plan:
+        if isinstance(step, LandStep):
+            pr = _land_pr(step, stack)
+            if pr is not None:
+                landed.add(pr)
+            keys.append(None)
+        elif isinstance(step, WorkflowStep):
+            keys.append(("w", step.workflow, frozenset(landed)))
+        else:
+            keys.append(("c", step.condition.strip(), frozenset(landed)))
+    return keys
+
+
+def _checkpoint_done(step: PlanStep) -> bool:
+    if isinstance(step, WorkflowStep):
+        return step.state in ("succeeded", "skipped")
+    return isinstance(step, ConfirmStep) and step.confirmed
+
+
+def _credit(new: PlanStep, old: PlanStep) -> None:
+    """Record on *new* the result *old* reached in the previous run."""
+    if isinstance(new, WorkflowStep) and isinstance(old, WorkflowStep):
+        new.state = old.state
+        new.error_message = ""
+    elif isinstance(new, ConfirmStep):
+        new.confirmed = True
+
+
+def carry_over_progress(
+    old: LandingContext, plan: list[PlanStep], stack: list[StackEntry]
+) -> list[int]:
+    """Credit *plan*'s workflow and confirm steps with results from *old*.
+
+    *plan* is a freshly parsed plan for the current *stack*. Land steps need no
+    help: whether a PR merged is GitHub's to say, and parsing already asked.
+    A workflow or confirm step is credited when *old* completed a step with the
+    same kind, text, and set of PRs landed before it — so adding, removing, or
+    reordering steps keeps credit, while changing a step's text, or landing a
+    different set of PRs ahead of it, makes it run again.
+
+    Returns the indices (into ``old.plan``) of completed checkpoints that found
+    no match in *plan*, so the caller can show what does not carry over.
+    """
+    unmatched: dict[_CheckpointKey, list[int]] = {}
+    for index, key in enumerate(_checkpoint_keys(old.plan, old.stack)):
+        if key is not None and _checkpoint_done(old.plan[index]):
+            unmatched.setdefault(key, []).append(index)
+
+    for step, key in zip(plan, _checkpoint_keys(plan, stack)):
+        if key is None or not unmatched.get(key):
+            continue
+        previous = old.plan[unmatched[key].pop(0)]
+        # A step parsing already credited (inside the landed prefix) keeps that
+        # credit, but still consumes its match so it isn't reported as lost.
+        if not _checkpoint_done(step):
+            _credit(step, previous)
+
+    return sorted(i for indices in unmatched.values() for i in indices)
+
+
 def _resolve_land_step(
     ref: str,
     line_num: int,
@@ -1557,9 +1707,15 @@ def edit_plan_interactive(
     stack: list[StackEntry],
     default_workflow: str | None = None,
     count: int | None = None,
+    *,
+    initial_text: str | None = None,
 ) -> list[PlanStep]:
-    """Open the default plan in $EDITOR and return the parsed result."""
-    plan_text = format_plan_for_editor(
+    """Open a plan in $EDITOR and return the parsed result.
+
+    The editor starts from *initial_text* when given (``--replan -i`` passes the
+    plan being replaced), and from the default plan otherwise.
+    """
+    plan_text = initial_text or format_plan_for_editor(
         stack, generate_default_plan(stack, default_workflow, count)
     )
     editor = os.environ.get("EDITOR", "vim")
@@ -2678,7 +2834,9 @@ def execute_plan(
                     )
 
         elif isinstance(step, WorkflowStep):
-            if step.state == "skipped":
+            # "succeeded" before the loop reaches it means --replan carried the
+            # result over from the run this one replaced.
+            if step.state in ("skipped", "succeeded"):
                 continue
             console.print(
                 f"\n{'=' * 60}\n[bold]Step {step_idx + 1}/{len(ctx.plan)}: "
@@ -2846,10 +3004,38 @@ def register_parser(
             f"use the {PLAN_SUFFIX} suffix."
         ),
     )
-    p.add_argument(
+    run_mode = p.add_mutually_exclusive_group()
+    run_mode.add_argument(
         "--resume",
         action="store_true",
         help="Resume a previously interrupted run from its checkpoint.",
+    )
+    run_mode.add_argument(
+        "--replan",
+        action="store_true",
+        help=(
+            "Replace the plan of an interrupted or running autoland and continue, "
+            "keeping its progress: landed PRs, finished workflows, and given "
+            "confirmations carry over. Re-reads the run's plan file, or the one "
+            "given with --plan-file, or opens the current plan with -i. Stops a "
+            "running autoland first (after asking)."
+        ),
+    )
+    run_mode.add_argument(
+        "--status",
+        action="store_true",
+        help=(
+            "Show whether an autoland is in progress for the branch, where its "
+            "state file is, and its progress as of the last checkpoint. Changes "
+            "nothing."
+        ),
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for --status (default: text).",
     )
     p.add_argument(
         "--state-file",
@@ -2867,6 +3053,15 @@ def run_autoland(
 ) -> None:
     """Entry point for `stack-pr autoland`."""
     opts = AutolandOptions.from_config_and_args(config, args)
+
+    # Purely informational, so it works whatever the repo's landing strategy.
+    output = getattr(args, "output", "text")
+    if getattr(args, "status", False):
+        show_status(opts, output=output)
+        return
+    if output != "text":
+        console.print("[red]-o/--output only applies to --status.[/red]")
+        sys.exit(1)
 
     # Merge-queue is the only supported strategy for now. Fail early otherwise.
     if not opts.merge_queue:
@@ -2888,10 +3083,20 @@ def run_autoland(
     if opts.plan_file is not None and opts.resume:
         console.print(
             "[red]--plan-file and --resume can't be combined: a resumed run "
-            "restores its plan from the checkpoint.[/red]"
+            "restores its plan from the checkpoint. To continue with a new plan, "
+            "use --replan --plan-file.[/red]"
+        )
+        sys.exit(1)
+    if opts.replan and opts.count is not None:
+        console.print(
+            "[red]--replan and --count can't be combined: the plan being "
+            "replaced already specifies which PRs to land.[/red]"
         )
         sys.exit(1)
 
+    if opts.replan:
+        _run_replan(common, opts)
+        return
     if opts.resume:
         _run_resume(common, opts)
         return
@@ -2965,24 +3170,35 @@ def _finish(
         sys.exit(1)
 
 
-def _confirm_overwrite_state(state_path: Path) -> bool:
-    """Warn about an existing checkpoint and confirm overwriting it."""
+def _ask_replan_or_overwrite(state_path: Path) -> str | None:
+    """Ask what to do about an existing checkpoint when starting a new run.
+
+    Returns "replan", "overwrite", or None to abort. Replanning is the default:
+    it is the safe choice, and it previews the result before running anything.
+    """
     console.print(
         "\n[bold yellow]An autoland is already in progress for this "
         "branch.[/bold yellow]\n"
-        f"[yellow]A checkpoint from that run exists at {state_path}.[/yellow]\n"
-        "[yellow]Starting a new autoland overwrites it — you will no longer be "
-        "able to resume the previous run.[/yellow]\n"
-        "[dim]To continue the previous run instead, re-run with --resume.[/dim]\n"
+        f"[yellow]A checkpoint from that run exists at {state_path}.[/yellow]\n\n"
+        "  [bold]r[/bold]  replan: keep its progress (landed PRs, finished "
+        "workflows, given confirmations) and continue with this plan\n"
+        "  [bold]o[/bold]  overwrite: discard that progress and start over\n"
     )
     try:
-        answer = console.input(
-            "[yellow]Overwrite and start a new autoland? Type y/Y to confirm "
-            "(anything else aborts): [/yellow]"
-        ).strip()
+        answer = (
+            console.input(
+                "[yellow]Choose r or o (Enter = r; anything else aborts): [/yellow]"
+            )
+            .strip()
+            .lower()
+        )
     except EOFError:
-        return False
-    return answer in ("y", "Y")
+        return None
+    if answer in ("", "r"):
+        return "replan"
+    if answer == "o":
+        return "overwrite"
+    return None
 
 
 def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
@@ -2992,25 +3208,36 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
     # A dry run only previews the plan; it neither writes state nor competes for
     # the lock, so let it run freely alongside a real autoland.
     lock: AutolandLock | None = None
+    replan = False
     if not opts.dry_run:
         lock = AutolandLock.for_state(state_path)
         if not lock.acquire():
-            console.print(
-                f"[red]An autoland is already running for branch "
-                f"[bold]{branch}[/bold]. Wait for it to finish before starting "
-                "another.[/red]"
-            )
-            sys.exit(1)
+            # A run that has not checkpointed yet has no progress to replan
+            # from, so there is nothing to offer but waiting.
+            if not state_path.exists():
+                console.print(
+                    f"[red]An autoland is already running for branch "
+                    f"[bold]{branch}[/bold]. Wait for it to finish before "
+                    "starting another.[/red]"
+                )
+                sys.exit(1)
+            if not _stop_running_autoland(lock):
+                sys.exit(1)
+            replan = True
 
     try:
         # An existing state file means a previous run was interrupted and can be
-        # resumed; starting fresh would clobber it, so confirm first.
-        if (
-            lock is not None
-            and state_path.exists()
-            and not _confirm_overwrite_state(state_path)
-        ):
-            console.print("[red]Aborted — the previous autoland is untouched.[/red]")
+        # resumed; starting fresh would clobber it, so ask first.
+        if lock is not None and state_path.exists() and not replan:
+            choice = _ask_replan_or_overwrite(state_path)
+            if choice is None:
+                console.print(
+                    "[red]Aborted — the previous autoland is untouched.[/red]"
+                )
+                return
+            replan = choice == "replan"
+        if replan:
+            _replan(common, opts, state_path)
             return
 
         worktree: Worktree | None = None
@@ -3051,7 +3278,10 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         ctx = LandingContext(stack=stack, plan=plan)
 
         checkpointer = AutolandCheckpointer(
-            path=state_path, branch=branch, base=common.target
+            path=state_path,
+            branch=branch,
+            base=common.target,
+            plan_file=opts.plan_file,
         )
 
         print_status(ctx)
@@ -3074,13 +3304,15 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             lock.release()
 
 
-def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
+def _state_path(opts: AutolandOptions) -> Path:
+    """The checkpoint an existing run for *opts* would have written."""
     if opts.state_file:
-        sf_path = opts.state_file
-    elif opts.branch:
-        sf_path = AutolandCheckpointer.default_path(opts.branch)
-    else:
-        sf_path = AutolandCheckpointer.default_path(_current_branch())
+        return opts.state_file
+    return AutolandCheckpointer.default_path(opts.branch or _current_branch())
+
+
+def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
+    sf_path = _state_path(opts)
 
     if not sf_path.exists():
         console.print(f"[red]No state file found at {sf_path}[/red]")
@@ -3147,3 +3379,501 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         )
     finally:
         lock.release()
+
+
+# ---------------------------------------------------------------------------
+# Replanning (`autoland --replan`)
+# ---------------------------------------------------------------------------
+
+# How long to wait for a stopped autoland to save its checkpoint and exit.
+_TAKEOVER_TIMEOUT = 60
+
+
+def _stop_running_autoland(lock: AutolandLock) -> bool:
+    """Offer to stop the autoland holding *lock*, then take the lock over.
+
+    The other run is sent SIGINT, the same as Ctrl+C in its terminal: it saves
+    its checkpoint and exits, releasing the lock. Returns True once this process
+    holds *lock*, or False if the user declined or the run could not be stopped.
+    """
+    pid = lock.holder_pid()
+    if pid is None:
+        console.print(
+            "[red]An autoland is running for this branch, but its PID is unknown "
+            "(it was started by an older stack-pr). Stop it with Ctrl+C in its "
+            "terminal, then re-run this command.[/red]"
+        )
+        return False
+    console.print(
+        f"\n[bold yellow]An autoland is running for this branch "
+        f"(pid {pid}).[/bold yellow]\n"
+        "[yellow]Replanning stops it the way Ctrl+C in its terminal would — it "
+        "saves its checkpoint and exits — and continues from there in this "
+        "terminal.[/yellow]\n"
+    )
+    try:
+        answer = console.input(
+            "[yellow]Stop it and replan? Type y/Y to confirm (anything else "
+            "aborts): [/yellow]"
+        ).strip()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "Y"):
+        console.print("[red]Aborted — the running autoland is untouched.[/red]")
+        return False
+
+    try:
+        os.kill(pid, signal.SIGINT)
+    except ProcessLookupError:
+        pass  # it exited on its own meanwhile; the lock is (about to be) free
+    except PermissionError as e:
+        console.print(f"[red]Could not stop pid {pid}: {e}[/red]")
+        return False
+
+    console.print(f"[dim]Waiting for pid {pid} to save its checkpoint...[/dim]")
+    deadline = time.monotonic() + _TAKEOVER_TIMEOUT
+    while time.monotonic() < deadline:
+        if lock.acquire():
+            return True
+        time.sleep(0.5)
+    console.print(
+        f"[red]pid {pid} still holds the lock after {_TAKEOVER_TIMEOUT}s. Stop it "
+        "in its terminal, then re-run this command.[/red]"
+    )
+    return False
+
+
+def _unpushed_changes(raw: list[cli.StackEntry], common: cli.CommonArgs) -> list[str]:
+    """Commits in the stack whose code GitHub doesn't have, for a warning.
+
+    Replanning usually follows a code change, and landing a PR whose branch
+    predates that change would ship the old code.
+    """
+    problems = []
+    for e in raw:
+        name = f"{e.commit.commit_id()[:8]} {e.commit.title()}"
+        if not e.has_pr():
+            problems.append(f"{name}: no PR yet")
+            continue
+        pushed = run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{common.remote}/{e.head}"],
+            check=False,
+            quiet=True,
+            retries=0,
+        ).stdout.strip()
+        if pushed and pushed != e.commit.commit_id():
+            problems.append(f"{name}: local commit differs from #{cli.last(e.pr)}")
+    return problems
+
+
+def _describe_lost(old: LandingContext, index: int) -> str:
+    """One not-carried-over checkpoint, with the PRs it was recorded after."""
+    key = _checkpoint_keys(old.plan, old.stack)[index]
+    landed = sorted(key[2]) if key else []
+    after = (
+        "after " + ", ".join(f"#{pr}" for pr in landed)
+        if landed
+        else "before any PR landed"
+    )
+    return f"{_describe_step(old.plan[index], old)} ({after})"
+
+
+def _replacement_plan(
+    opts: AutolandOptions,
+    old_checkpointer: AutolandCheckpointer,
+    old: LandingContext,
+    stack: list[StackEntry],
+) -> tuple[list[PlanStep], Path | None]:
+    """The new plan for a replan, and the plan file it came from (if any)."""
+    if opts.interactive:
+        # Start the editor from the plan being replaced, not the default one.
+        initial = format_plan_for_editor(old.stack, old.plan)
+        return edit_plan_interactive(stack, initial_text=initial), None
+    plan_file = opts.plan_file or old_checkpointer.plan_file
+    if plan_file is not None:
+        console.print(f"[dim]Plan: {plan_file}[/dim]")
+        return plan_from_file(plan_file, stack), plan_file
+    # The run had no plan file (a default or -i plan): replay the saved plan.
+    try:
+        return parse_plan(format_plan_for_editor(old.stack, old.plan), stack), None
+    except ValueError as e:
+        console.print(
+            f"[red]The saved plan no longer fits the stack: {e}\n"
+            "Give a new plan with --plan-file or -i.[/red]"
+        )
+        sys.exit(1)
+
+
+def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> None:
+    """Replace the plan of the run checkpointed at *state_path*, keep its
+    progress, and continue.
+
+    The caller holds the lock, except on a dry run, which only previews.
+    """
+    try:
+        old_checkpointer, old = AutolandCheckpointer.load(state_path)
+    except (OSError, ValueError, KeyError) as e:
+        console.print(f"[red]Failed to load state file {state_path}: {e}[/red]")
+        sys.exit(1)
+    branch = old_checkpointer.branch
+    if opts.branch and opts.branch != branch:
+        console.print(
+            f"[red]--branch {opts.branch} does not match saved branch {branch}[/red]"
+        )
+        sys.exit(1)
+
+    console.print(f"[bold]Replanning from checkpoint: [cyan]{state_path}[/cyan][/bold]")
+    worktree: Worktree | None = None
+    if opts.branch or branch != _current_branch():
+        worktree = Worktree(branch)
+        worktree.create()
+    # As in _run_fresh: deduce against the (possibly worktree) HEAD.
+    common = cli.deduce_base(common)
+
+    # The code may have changed since the checkpoint, so the stack is
+    # rediscovered rather than restored.
+    console.print("\n[bold]Rediscovering stack...[/bold]\n")
+    raw = cli.get_stack(base=common.base, head=common.head, verbose=common.verbose)
+    stack = _stack_entries(raw)
+    if not stack:
+        console.print("[red]No stack found on the current branch.[/red]")
+        sys.exit(1)
+    enrich_stack(stack)
+
+    plan, plan_file = _replacement_plan(opts, old_checkpointer, old, stack)
+    lost = carry_over_progress(old, plan, stack)
+    ctx = LandingContext(stack=stack, plan=plan)
+
+    print_status(ctx)
+    print_stack_merge_runs(ctx, opts)
+    if lost:
+        console.print(
+            "\n[yellow]Done in the previous run, but not carried over (changed, "
+            "removed, or now after different PRs):[/yellow]"
+        )
+        for index in lost:
+            console.print(f"  - {_escape_markup(_describe_lost(old, index))}")
+    unpushed = _unpushed_changes(raw, common)
+    if unpushed:
+        console.print(
+            "\n[bold yellow]Warning: GitHub doesn't have all of this stack's code. "
+            "Run `stack-pr submit` first if you changed it:[/bold yellow]"
+        )
+        for problem in unpushed:
+            console.print(f"  - {_escape_markup(problem)}")
+
+    if opts.dry_run:
+        console.print("\n[yellow]Dry run — exiting.[/yellow]")
+        _dispose_worktree(worktree, opts, succeeded=True)
+        return
+    try:
+        answer = console.input(
+            "\n[yellow]Continue with this plan? Type y/Y to confirm (anything "
+            "else aborts): [/yellow]"
+        ).strip()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "Y"):
+        console.print("[red]Aborted — the previous checkpoint is untouched.[/red]")
+        _dispose_worktree(worktree, opts, succeeded=True)
+        return
+
+    checkpointer = AutolandCheckpointer(
+        path=state_path, branch=branch, base=common.target, plan_file=plan_file
+    )
+    console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
+    _install_signal_handler(ctx, checkpointer, worktree, opts)
+    _finish(
+        ctx,
+        checkpointer,
+        worktree,
+        opts,
+        success=execute_plan(ctx, common, opts, checkpointer),
+    )
+
+
+def _run_replan(common: cli.CommonArgs, opts: AutolandOptions) -> None:
+    state_path = _state_path(opts)
+    if not state_path.exists():
+        console.print(
+            f"[red]No autoland to replan: no state file at {state_path}. Start "
+            "one with --plan-file or -i.[/red]"
+        )
+        sys.exit(1)
+    # A dry run only previews, so it neither competes for the lock nor stops a
+    # running autoland: it is how to check a replan before committing to it.
+    if opts.dry_run:
+        _replan(common, opts, state_path)
+        return
+    lock = AutolandLock.for_state(state_path)
+    if not lock.acquire() and not _stop_running_autoland(lock):
+        sys.exit(1)
+    try:
+        _replan(common, opts, state_path)
+    finally:
+        lock.release()
+
+
+# ---------------------------------------------------------------------------
+# Status report (`autoland --status`)
+# ---------------------------------------------------------------------------
+
+
+def _format_age(seconds: float) -> str:
+    """A coarse "how long ago" for a checkpoint's timestamp."""
+    minutes = int(seconds) // 60
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:  # noqa: PLR2004
+        return f"{minutes}m ago"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:  # noqa: PLR2004
+        return f"{hours}h {minutes}m ago"
+    return f"{hours // 24}d ago"
+
+
+@dataclass(frozen=True)
+class _OtherRun:
+    branch: str | None  # None when the state file can't be read
+    running: bool
+    state_path: Path
+
+
+@dataclass(frozen=True)
+class _StatusReport:
+    """Everything `--status` knows about one run, gathered in a single pass.
+
+    Both output formats render from this, so they cannot disagree.
+    """
+
+    state_path: Path
+    lock_path: Path
+    running: bool
+    pid: int | None
+    branch: str
+    base: str
+    ctx: LandingContext | None  # None when there is no checkpoint
+    saved_at: float | None  # the checkpoint's mtime
+    resume_command: str | None  # None unless the run is stopped and resumable
+    others: list[_OtherRun]
+
+    @property
+    def status(self) -> str:
+        if self.running:
+            return "in_progress"
+        return "stopped" if self.ctx is not None else "none"
+
+
+def _resume_command(opts: AutolandOptions) -> str:
+    cmd = "stack-pr autoland --resume"
+    if opts.state_file:
+        return f"{cmd} --state-file {opts.state_file}"
+    if opts.branch:
+        return f"{cmd} --branch {opts.branch}"
+    return cmd
+
+
+def _other_runs(exclude: Path) -> list[_OtherRun]:
+    """Checkpoints for other branches, so a forgotten run is findable."""
+    state_dir = AutolandCheckpointer.default_path("_").parent
+    runs = []
+    for path in sorted(p for p in state_dir.glob("*.json") if p != exclude):
+        branch: str | None
+        try:
+            branch = str(json.loads(path.read_text())["branch"])
+        except (OSError, ValueError, KeyError, TypeError):
+            branch = None
+        runs.append(_OtherRun(branch, AutolandLock.for_state(path).is_held(), path))
+    return runs
+
+
+def _gather_status(opts: AutolandOptions) -> _StatusReport:
+    state_path = _state_path(opts)
+    lock = AutolandLock.for_state(state_path)
+    # Probe once: the run may start or stop while the report is being printed,
+    # and the report should describe a single moment.
+    running = lock.is_held()
+    branch = opts.branch or ("" if opts.state_file else _current_branch())
+
+    ctx: LandingContext | None = None
+    base = ""
+    saved_at: float | None = None
+    if state_path.exists():
+        # The checkpoint is replaced by rename, so its stat and content agree.
+        saved_at = state_path.stat().st_mtime
+        checkpointer, ctx = AutolandCheckpointer.load(state_path)
+        branch, base = checkpointer.branch, checkpointer.base
+
+    return _StatusReport(
+        state_path=state_path,
+        lock_path=lock.path,
+        running=running,
+        pid=lock.holder_pid() if running else None,
+        branch=branch,
+        base=base,
+        ctx=ctx,
+        saved_at=saved_at,
+        resume_command=(
+            _resume_command(opts) if ctx is not None and not running else None
+        ),
+        others=_other_runs(exclude=state_path),
+    )
+
+
+def _status_label(report: _StatusReport) -> str:
+    if report.running:
+        label = "[cyan bold]In progress[/cyan bold]"
+        if report.pid is not None:
+            label += f" (pid {report.pid})"
+        if report.ctx is None:
+            label += " — starting up, no checkpoint written yet"
+        return label
+    return "[yellow bold]Stopped[/yellow bold] — not running, can be resumed"
+
+
+def _print_status_text(report: _StatusReport) -> None:
+    # soft_wrap throughout: a hard-wrapped path can't be copied into a command.
+    if report.status == "none":
+        target = (
+            f"branch [bold]{_escape_markup(report.branch)}[/bold]"
+            if report.branch
+            else "this state file"
+        )
+        console.print(f"No autoland in progress for {target}.")
+        console.print(
+            f"[dim]State file (not present): {report.state_path}[/dim]",
+            soft_wrap=True,
+        )
+    else:
+        fields = [
+            ("Status", _status_label(report)),
+            ("Branch", _escape_markup(report.branch)),
+        ]
+        if report.base:
+            fields.append(("Base", _escape_markup(report.base)))
+        fields.append(("State file", _escape_markup(str(report.state_path))))
+        if report.running:
+            fields.append(("Lock file", _escape_markup(str(report.lock_path))))
+        if report.saved_at is not None:
+            saved = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(report.saved_at))
+            age = _format_age(time.time() - report.saved_at)
+            fields.append(("Last saved", f"{saved} ({age})"))
+
+        console.print("[bold]Autoland status[/bold]\n")
+        width = max(len(name) for name, _ in fields)
+        for name, value in fields:
+            console.print(
+                f"  [dim]{name + ':':<{width + 1}}[/dim] {value}", soft_wrap=True
+            )
+        if report.ctx is not None:
+            console.print()
+            print_status(report.ctx)
+        if report.resume_command:
+            console.print(
+                f"\n[dim]Resume with: {report.resume_command}[/dim]", soft_wrap=True
+            )
+
+    if report.others:
+        console.print("\n[bold]Other autolands with saved state:[/bold]")
+        for other in report.others:
+            branch = other.branch or "(unreadable state file)"
+            label = (
+                "[cyan]in progress[/cyan]"
+                if other.running
+                else "[yellow]stopped[/yellow]"
+            )
+            console.print(
+                f"  {_escape_markup(branch)} — {label} — "
+                f"[dim]{_escape_markup(str(other.state_path))}[/dim]",
+                soft_wrap=True,
+            )
+        console.print(
+            "[dim]Inspect one with: stack-pr autoland --status --branch BRANCH[/dim]"
+        )
+
+
+def _step_json(step: PlanStep, row: _StepRow, ctx: LandingContext) -> dict:
+    data: dict[str, Any] = {
+        "number": int(row.number.rstrip(".")),
+        "type": _STEP_TYPES[type(step)],
+        "outcome": row.outcome.value,
+        "status": row.status,
+        "is_next": row.is_next,
+    }
+    if isinstance(step, LandStep):
+        entry = _land_entry(ctx, step)
+        data["pr_number"] = entry.pr_number if entry else step.pr_number
+        data["pr_url"] = entry.pr_url if entry else None
+        data["title"] = entry.title if entry else None
+    elif isinstance(step, WorkflowStep):
+        data["workflow"] = step.workflow
+    else:
+        data["condition"] = step.condition
+    data["detail"] = row.detail or None
+    return data
+
+
+def _status_json(report: _StatusReport) -> dict:
+    """The report as JSON-ready data. Keys are always present; unknowns are null."""
+    ctx = report.ctx
+    plan = None
+    if ctx is not None:
+        rows = _plan_rows(ctx)
+        done = sum(1 for r in rows if r.done)
+        plan = {
+            "total": len(rows),
+            "done": done,
+            "remaining": len(rows) - done,
+            "steps": [_step_json(s, r, ctx) for s, r in zip(ctx.plan, rows)],
+        }
+    return {
+        "status": report.status,
+        "branch": report.branch or None,
+        "base": report.base or None,
+        "state_file": str(report.state_path),
+        "state_file_exists": ctx is not None,
+        "lock_file": str(report.lock_path),
+        "pid": report.pid,
+        "last_saved": (
+            datetime.fromtimestamp(report.saved_at).astimezone().isoformat()
+            if report.saved_at is not None
+            else None
+        ),
+        "abort_reason": (ctx.abort_reason or None) if ctx is not None else None,
+        "resume_command": report.resume_command,
+        "plan": plan,
+        "other_runs": [
+            {
+                "branch": o.branch,
+                "status": "in_progress" if o.running else "stopped",
+                "state_file": str(o.state_path),
+            }
+            for o in report.others
+        ],
+    }
+
+
+def show_status(opts: AutolandOptions, *, output: str = "text") -> None:
+    """Report the autoland state for a branch: whether a run is in progress,
+    where its files are, and how far it got.
+
+    Read-only and offline — it never takes the lock, writes the checkpoint, or
+    asks GitHub — so it is safe to run alongside a live autoland. The plan it
+    shows is as of the last checkpoint, not live PR state.
+    """
+    try:
+        report = _gather_status(opts)
+    except (OSError, ValueError, KeyError) as e:
+        message = f"Failed to load state file {_state_path(opts)}: {e}"
+        if output == "json":
+            # Keep stdout parseable: it carries JSON or nothing.
+            print(message, file=sys.stderr)
+        else:
+            console.print(f"[red]{_escape_markup(message)}[/red]")
+        sys.exit(1)
+
+    if output == "json":
+        # Plain print, not the console: rich would wrap and highlight it.
+        print(json.dumps(_status_json(report), indent=2))
+    else:
+        _print_status_text(report)
