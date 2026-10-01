@@ -580,6 +580,23 @@ Options:
   already specifies which PRs to land) or `--resume` (which restores the plan
   from a checkpoint).
 - `--resume`: Resume a previously interrupted run from its checkpoint.
+- `--status`: Show whether an autoland is in progress for the branch (with
+  `--branch` / `--state-file` to pick another), where its state and lock files
+  are, when it last saved a checkpoint, and the plan's progress as of that
+  checkpoint, including why a stopped run stopped. It also lists saved
+  autolands for other branches. This is read-only and offline: it doesn't take
+  the lock or query GitHub, so it's safe to run while a land is in progress.
+- `-o json` / `--output json`: With `--status`, print the report as JSON
+  instead. The top-level keys are always present, with `null` for anything
+  unknown: `status` (`in_progress`, `stopped`, or `none`), `branch`, `base`,
+  `state_file`, `state_file_exists`, `lock_file`, `pid`, `last_saved` (ISO
+  8601), `abort_reason`, `resume_command`, `plan` (`total` / `done` /
+  `remaining` counts and a `steps` list), and `other_runs`. Each step has
+  `number`, `type` (`land` / `workflow` / `confirm`), `outcome` (`done` /
+  `active` / `pending` / `failed`), `status`, `is_next` and `detail`, plus
+  `pr_number` / `pr_url` / `title`, `workflow`, or `condition` depending on
+  its type. If the state file can't be read, stdout stays empty and the error
+  goes to stderr with a nonzero exit.
 - `--state-file PATH`: Override the checkpoint path (default:
   `~/.stack-pr/autoland/<branch>.json`).
 - `--poll-interval`, `--max-check-retries`, `--max-queue-retries`,

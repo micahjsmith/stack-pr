@@ -1,6 +1,8 @@
 import argparse
 import configparser
 import dataclasses
+import json
+import os
 import sys
 import unicodedata
 from pathlib import Path
@@ -30,6 +32,7 @@ from stack_pr.autoland import (
     _describe_step,
     _next_steps_lines,
     _pick_glyphs,
+    _PlainConsole,
     _plan_rows,
     _run_fresh,
     _StepRow,
@@ -1138,6 +1141,19 @@ def test_state_round_trip(tmp_path) -> None:  # noqa: ANN001
     assert [type(s) for s in loaded.plan] == [LandStep, WorkflowStep, LandStep]
 
 
+def test_state_round_trip_keeps_abort_reason(tmp_path) -> None:  # noqa: ANN001
+    ctx = LandingContext(stack=_stack(1), plan=generate_default_plan(_stack(1)))
+    ctx.aborted = True
+    ctx.abort_reason = "CI failed on #0"
+
+    sf = tmp_path / "state.json"
+    AutolandCheckpointer(path=sf, branch="feat", base="main").save(ctx)
+
+    _, loaded = AutolandCheckpointer.load(sf)
+    assert loaded.aborted is True
+    assert loaded.abort_reason == "CI failed on #0"
+
+
 def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
     sf = tmp_path / "state.json"
     sf.write_text(
@@ -1240,6 +1256,24 @@ def test_lock_is_exclusive_and_releasable(tmp_path) -> None:  # noqa: ANN001
     second.release()
 
 
+def test_lock_is_held_reports_another_holder(tmp_path) -> None:  # noqa: ANN001
+    path = tmp_path / "b.lock"
+    holder = AutolandLock(path)
+    probe = AutolandLock(path)
+
+    assert probe.is_held() is False
+    assert not path.exists()  # probing never creates the lock file
+
+    assert holder.acquire() is True
+    assert probe.is_held() is True
+    assert probe.holder_pid() == os.getpid()
+    # Probing neither steals nor breaks the holder's lock.
+    assert AutolandLock(path).acquire() is False
+
+    holder.release()
+    assert probe.is_held() is False
+
+
 def test_lock_release_is_idempotent(tmp_path) -> None:  # noqa: ANN001
     lock = AutolandLock(tmp_path / "b.lock")
     lock.release()  # never acquired -> no-op
@@ -1261,3 +1295,170 @@ def test_confirm_overwrite_state(tmp_path, mocker) -> None:  # noqa: ANN001
     # Non-interactive (EOF) must not overwrite.
     console.input.side_effect = EOFError
     assert _confirm_overwrite_state(sf) is False
+
+
+# --- status report -------------------------------------------------------
+
+
+@pytest.fixture
+def plain_output(mocker, monkeypatch, tmp_path):  # noqa: ANN001, ANN201
+    """Route output through the plain console (no wrapping) and isolate $HOME,
+    where the default state directory lives."""
+    mocker.patch.object(autoland, "console", _PlainConsole())
+    mocker.patch.object(autoland, "HAVE_RICH", False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+def _status(**overrides) -> None:  # noqa: ANN003
+    # No [autoland] config: --status must work even without the merge queue.
+    autoland.run_autoland(
+        _common(), _args(status=True, **overrides), configparser.ConfigParser()
+    )
+
+
+def _save_state(path: Path, *, abort_reason: str = "") -> None:
+    ctx = LandingContext(stack=_stack(2), plan=generate_default_plan(_stack(2)))
+    ctx.stack[0].state = autoland.PRState.MERGED
+    ctx.current_step = 1
+    ctx.abort_reason = abort_reason
+    AutolandCheckpointer(path=path, branch="feat", base="main").save(ctx)
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_without_a_run(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _status(state_file=sf)
+
+    out = capsys.readouterr().out
+    assert "No autoland in progress" in out
+    assert str(sf) in out
+    assert not sf.exists()
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_of_a_stopped_run(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf, abort_reason="CI failed on #0")
+    before = sf.read_text()
+
+    _status(state_file=sf)
+
+    out = capsys.readouterr().out
+    assert "Stopped" in out
+    assert "Branch:" in out
+    assert "feat" in out
+    assert str(sf) in out
+    assert "1 done" in out
+    assert "ABORTED: CI failed on #0" in out
+    assert f"stack-pr autoland --resume --state-file {sf}" in out
+    assert sf.read_text() == before  # read-only
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_of_a_running_autoland(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf)
+    lock = AutolandLock.for_state(sf)
+    assert lock.acquire()
+    try:
+        _status(state_file=sf)
+    finally:
+        lock.release()
+
+    out = capsys.readouterr().out
+    assert f"In progress (pid {os.getpid()})" in out
+    assert str(lock.path) in out
+    assert "--resume" not in out
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_lists_saved_runs_for_other_branches(tmp_path, capsys) -> None:  # noqa: ANN001
+    other = AutolandCheckpointer.default_path("feat")
+    _save_state(other)
+
+    _status(state_file=tmp_path / "state.json")
+
+    out = capsys.readouterr().out
+    assert "Other autolands with saved state" in out
+    assert f"feat — stopped — {other}" in out
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_json_of_a_stopped_run(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf, abort_reason="CI failed on #0")
+
+    _status(state_file=sf, output="json")
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "stopped"
+    assert report["branch"] == "feat"
+    assert report["base"] == "main"
+    assert report["state_file"] == str(sf)
+    assert report["pid"] is None
+    assert report["abort_reason"] == "CI failed on #0"
+    assert report["resume_command"] == f"stack-pr autoland --resume --state-file {sf}"
+    assert report["plan"]["done"] == 1
+    assert report["plan"]["remaining"] == 1
+    first, second = report["plan"]["steps"]
+    assert first["type"] == "land"
+    assert first["pr_number"] == 0
+    assert first["outcome"] == "done"
+    assert second["is_next"] is True
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_json_of_a_running_autoland(tmp_path, capsys) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf)
+    lock = AutolandLock.for_state(sf)
+    assert lock.acquire()
+    try:
+        _status(state_file=sf, output="json")
+    finally:
+        lock.release()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "in_progress"
+    assert report["pid"] == os.getpid()
+    assert report["resume_command"] is None
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_json_without_a_run(tmp_path, capsys) -> None:  # noqa: ANN001
+    other = AutolandCheckpointer.default_path("feat")
+    _save_state(other)
+
+    _status(state_file=tmp_path / "state.json", output="json")
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "none"
+    assert report["state_file_exists"] is False
+    assert report["plan"] is None
+    assert report["other_runs"] == [
+        {"branch": "feat", "status": "stopped", "state_file": str(other)}
+    ]
+
+
+@pytest.mark.usefixtures("plain_output")
+def test_status_json_reports_an_unreadable_state_file_on_stderr(
+    tmp_path,  # noqa: ANN001
+    capsys,  # noqa: ANN001
+) -> None:
+    sf = tmp_path / "state.json"
+    sf.write_text("{not json")
+
+    with pytest.raises(SystemExit):
+        _status(state_file=sf, output="json")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Failed to load state file" in captured.err
+
+
+def test_output_requires_status(mocker) -> None:  # noqa: ANN001
+    mocker.patch("stack_pr.autoland.console")
+    cfg = configparser.ConfigParser()
+    cfg["autoland"] = {"merge_queue": "true"}
+    with pytest.raises(SystemExit):
+        autoland.run_autoland(_common(), _args(output="json"), cfg)
