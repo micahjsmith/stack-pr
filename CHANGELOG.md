@@ -1,5 +1,17 @@
 # Top of tree
 
+* `autoland` now merges each run of consecutive `l` steps (with no `w` or `c`
+  step between them) as a GitHub stack, using GitHub's native [stacked
+  PRs](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs):
+  after every PR in the run is approved and passing, one merge request on the
+  top PR lands the whole run — enqueued together in the merge queue — and
+  the rest of the stack is rebased and re-submitted once. Each PR still lands
+  as its own commit. If the stack merge can't go ahead, the run falls back to
+  landing one PR at a time. On by default; turn it off with
+  `--no-merge-as-stack` or `merge_as_stack = false` under `[autoland]`.
+* `autoland` no longer waits forever for approval on a branch that requires no
+  review. GitHub reports no review decision at all there, which `autoland`
+  used to read as "not approved".
 * Added `stack-pr autoland --replan`, which changes the plan (or the code) of an
   interrupted or running autoland and continues it without losing progress.
   It re-reads the run's plan file (or takes `--plan-file` / `-i`), rediscovers

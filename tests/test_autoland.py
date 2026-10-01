@@ -1744,3 +1744,272 @@ def test_stop_running_autoland_declined_leaves_it_running(tmp_path, mocker) -> N
     finally:
         holder.kill()
         holder.wait()
+
+
+# --- approval ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("decision", "approved"),
+    [
+        ("APPROVED", True),
+        ("", True),  # the branch requires no review
+        ("REVIEW_REQUIRED", False),
+        ("CHANGES_REQUESTED", False),
+    ],
+)
+def test_wait_for_approval_by_review_decision(
+    mocker,  # noqa: ANN001
+    decision: str,
+    approved: bool,
+) -> None:
+    mocker.patch("stack_pr.autoland.console")
+    mocker.patch.object(autoland.github, "pr_state", return_value="OPEN")
+    mocker.patch.object(autoland.github, "review_decision", return_value=decision)
+    ctx = LandingContext()
+    # Abort the wait on its first poll, so a PR that isn't approved returns.
+    mocker.patch(
+        "stack_pr.autoland.resilient_sleep",
+        side_effect=lambda _s: setattr(ctx, "aborted", True),
+    )
+
+    entry = _pinned_stack([101])[0]
+    assert autoland.wait_for_approval(entry, opts=_opts(), ctx=ctx) is approved
+
+
+# --- merging a run of land steps as a GitHub stack -------------------------
+
+
+def test_merge_as_stack_defaults_on_and_flag_overrides_config() -> None:
+    assert _opts().merge_as_stack is True
+
+    cfg = configparser.ConfigParser()
+    cfg.add_section("autoland")
+    cfg.set("autoland", "merge_as_stack", "false")
+    assert AutolandOptions.from_config_and_args(cfg, _args()).merge_as_stack is False
+    flagged = AutolandOptions.from_config_and_args(cfg, _args(merge_as_stack=True))
+    assert flagged.merge_as_stack is True
+
+
+def test_native_stack_merge_runs_are_split_by_checkpoints() -> None:
+    stack = _pinned_stack([101, 102, 103, 104, 105])
+    plan = parse_plan("l\nl\nw deploy.yaml\nl\nc QA\nl\nl\n", stack)
+    ctx = LandingContext(stack=stack, plan=plan)
+
+    runs = autoland.native_stack_runs(ctx)
+
+    # A lone 'l' between two checkpoints has nothing to merge alongside.
+    assert [(first, [e.pr_number for e in es]) for first, es in runs] == [
+        (0, [101, 102]),
+        (5, [104, 105]),
+    ]
+
+
+def test_native_stack_merge_run_starts_above_merged_prs() -> None:
+    stack = _pinned_stack([101, 102, 103])
+    ctx = LandingContext(stack=stack, plan=parse_plan("l\nl\nl\n", stack))
+    stack[0].state = autoland.PRState.MERGED
+
+    assert autoland.native_stack_run(ctx, 0) == []
+    assert [e.pr_number for e in autoland.native_stack_run(ctx, 1)] == [102, 103]
+
+
+class _FakeNativeStackGitHub:
+    """The slice of GitHub a stack merge talks to, holding the stacks in memory."""
+
+    def __init__(self) -> None:
+        self.stacks: dict[int, list[int]] = {}
+        self.merged: set[int] = set()
+        self.created: list[list[int]] = []
+        self.unstacked: list[int] = []
+        self.merge_requests: list[int] = []
+        self.create_error = ""
+        self.merge_error = ""
+        # The PRs a merge request lands (default: the whole stack up to the PR
+        # it was made on), and the status GitHub then reports for it.
+        self.lands: list[int] | None = None
+        self.status = "merged"
+
+    def find_native_stack(self, pr: int) -> dict | None:
+        for number, prs in self.stacks.items():
+            if pr in prs:
+                return {
+                    "number": number,
+                    "pull_requests": [
+                        {"number": n, "state": "closed" if n in self.merged else "open"}
+                        for n in prs
+                    ],
+                }
+        return None
+
+    def create_native_stack(self, prs: list[int]) -> dict:
+        if self.create_error:
+            raise RuntimeError(self.create_error)
+        self.created.append(prs)
+        self.stacks[7] = prs
+        return {"number": 7}
+
+    def unstack_native_stack(self, number: int) -> None:
+        self.unstacked.append(number)
+        self.stacks.pop(number)
+
+    def merge_async(self, pr: int, *, merge_queue: bool) -> str:
+        self.merge_requests.append(pr)
+        if self.merge_error:
+            raise RuntimeError(self.merge_error)
+        prs = next(p for p in self.stacks.values() if pr in p)
+        self.merged.update(self.lands if self.lands is not None else prs)
+        return "uuid-1"
+
+    def merge_async_status(self, _pr: int, _uuid: str) -> tuple[str, str]:
+        return self.status, "conflict in PR #102" if self.status == "failed" else ""
+
+    def pr_state(self, pr: int) -> str:
+        return "MERGED" if pr in self.merged else "OPEN"
+
+    def in_merge_queue(self, _pr: int) -> bool:
+        return True
+
+    def has_merge_queue(self, _branch: str) -> bool:
+        return True
+
+
+def _land_with_fake_github(mocker, plan_text: str, prs: list[int], **opts):  # noqa: ANN001, ANN003, ANN202
+    """Set up running *plan_text* over a stack of *prs* against a fake GitHub.
+
+    Approval, checks and mergeability are taken as given, and a PR landed one
+    at a time merges straight away. Returns the fake, a function that runs the
+    plan, the rebase mock, and a function listing the PRs landed one at a time.
+    """
+    fake = _FakeNativeStackGitHub()
+    mocker.patch.object(autoland, "github", fake)
+    mocker.patch("stack_pr.autoland.console")
+    mocker.patch("stack_pr.autoland.resilient_sleep")
+    mocker.patch("stack_pr.autoland._refresh_last_landed_sha")
+    mocker.patch("stack_pr.autoland.wait_for_approval", return_value=True)
+    mocker.patch("stack_pr.autoland.wait_for_checks", return_value=True)
+    mocker.patch(
+        "stack_pr.autoland.wait_for_mergeable",
+        return_value=autoland.MergeableResult(ready=True),
+    )
+    rebase = mocker.patch("stack_pr.autoland.rebase_and_resubmit")
+
+    def land_one(entry, **_kw) -> bool:  # noqa: ANN001, ANN003
+        fake.merged.add(entry.pr_number)
+        entry.state = autoland.PRState.MERGED
+        return True
+
+    one_at_a_time = mocker.patch(
+        "stack_pr.autoland.enqueue_and_wait", side_effect=land_one
+    )
+
+    stack = _pinned_stack(prs)
+    ctx = LandingContext(stack=stack, plan=parse_plan(plan_text, stack))
+    checkpointer = AutolandCheckpointer(
+        path=Path("/dev/null"), branch="feat", base="main"
+    )
+    mocker.patch.object(checkpointer, "save")
+
+    def execute() -> bool:
+        return autoland.execute_plan(ctx, _common(), _opts(**opts), checkpointer)
+
+    def landed_one_by_one() -> list[int]:
+        return [c.args[0].pr_number for c in one_at_a_time.call_args_list]
+
+    return fake, execute, rebase, landed_one_by_one
+
+
+def test_consecutive_land_steps_merge_as_one_stack(mocker) -> None:  # noqa: ANN001
+    fake, execute, rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\nl\n", [101, 102, 103, 104]
+    )
+
+    assert execute() is True
+
+    assert fake.created == [[101, 102, 103]]
+    assert fake.merge_requests == [103]  # one request, on the top of the run
+    assert fake.merged == {101, 102, 103}
+    assert landed_one_by_one() == []
+    # #104 stays open, so the stack is rebased onto the landed code — once.
+    rebase.assert_called_once()
+
+
+def test_merge_as_stack_off_lands_one_at_a_time(mocker) -> None:  # noqa: ANN001
+    fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\n", [101, 102], merge_as_stack=False
+    )
+
+    assert execute() is True
+
+    assert fake.created == []
+    assert landed_one_by_one() == [101, 102]
+
+
+def test_native_stack_merge_falls_back_when_the_stack_cannot_be_created(mocker) -> None:  # noqa: ANN001
+    fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\nl\n", [101, 102, 103]
+    )
+    fake.create_error = "HTTP 422: base ref does not match"
+
+    assert execute() is True
+
+    assert fake.merge_requests == []
+    assert landed_one_by_one() == [101, 102, 103]
+
+
+def test_partly_failed_stack_merge_lands_the_rest_one_at_a_time(mocker) -> None:  # noqa: ANN001
+    fake, execute, rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\nl\n", [101, 102, 103]
+    )
+    fake.lands = [101]
+    fake.status = "failed"
+
+    assert execute() is True
+
+    # The stack is dissolved so the rest can merge outside of it, and is not
+    # retried as a stack; #101 stays landed and the rest is rebased onto it.
+    assert fake.unstacked == [7]
+    assert fake.merge_requests == [103]
+    assert landed_one_by_one() == [102, 103]
+    assert rebase.call_count == 2  # after the stack merge, and after #102
+
+
+def test_native_stack_merge_waits_for_a_request_already_in_flight(mocker) -> None:  # noqa: ANN001
+    fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\n", [101, 102]
+    )
+    fake.merge_error = "gh: existing merge request already enqueued (HTTP 409)"
+    # The earlier request merges the PRs while we wait for it.
+    states = iter(["OPEN", "OPEN", "MERGED", "MERGED"])
+    mocker.patch.object(fake, "pr_state", side_effect=lambda _pr: next(states))
+
+    assert execute() is True
+
+    assert landed_one_by_one() == []
+    assert fake.unstacked == []
+
+
+def test_native_stack_merge_reuses_a_stack_the_run_is_at_the_bottom_of(mocker) -> None:  # noqa: ANN001
+    fake, execute, _rebase, _landed = _land_with_fake_github(
+        mocker, "l\nl\n", [101, 102, 103]
+    )
+    fake.stacks[3] = [101, 102, 103]
+    fake.lands = [101, 102]
+
+    assert execute() is True
+
+    assert fake.created == []
+    assert fake.merge_requests == [102]
+
+
+def test_native_stack_merge_leaves_a_mismatched_stack_alone(mocker) -> None:  # noqa: ANN001
+    fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\n", [101, 102]
+    )
+    fake.stacks[3] = [100, 101, 102]  # #100 isn't part of this plan
+
+    assert execute() is True
+
+    assert fake.created == []
+    assert fake.unstacked == []
+    assert landed_one_by_one() == [101, 102]

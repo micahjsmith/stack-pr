@@ -22,6 +22,12 @@ There are several tool that help with stacked PRs.
 - stack-pr (this project): A stack is a set of commits on a branch. Each commit is one PR. The commits are modified over time via a interactive rebase-based workflow. Each PR description automatically gets a preamble section showing the full stack. The tool manages a mapping from commit => temp branch => PR with state stored in the commit body itself. Support for GitHub only via the `gh` CLI.
 - [git-spice](https://abhinav.github.io/git-spice/): A stack is a set of branches. Each branch is one PR. The branches are modified over time via normal git operations. Branches must be tracked by the tool with a separate local state store. A special restack commit rebases all the branches. Support for non-linear stack branches and multiple git hosting providers.
 - [jj-stack](https://github.com/keanemind/jj-stack/): A stack is a set of Jujutsu bookmarks. Jujutsu already conceptually supports stacks locally, so this tool focuses on syncing the local repo state to GitHub.
+- [gh stack](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs): GitHub's own stacked PRs (in public preview), with a `gh` CLI extension. A stack is a set of branches tracked by the extension, and it is also an object on GitHub: the PRs are registered as a stack, which GitHub shows on each PR, rebases server-side, and merges in one operation (through the merge queue, where there is one). Same-repository branches only.
+
+stack-pr can complement `gh stack` rather than replace it. stack-pr keeps its
+commit-per-PR workflow and plain base-branch PRs, and `stack-pr autoland` uses
+GitHub's native stacks to land them (see [Merging as a
+stack](#merging-as-a-stack)).
 
 ## Installation
 
@@ -579,6 +585,10 @@ Options:
   Mutually exclusive with `-i`; can't be combined with `-n/--count` (the file
   already specifies which PRs to land) or `--resume` (which restores the plan
   from a checkpoint — use `--replan --plan-file` to continue with a new one).
+- `--merge-as-stack` / `--no-merge-as-stack`: Whether to merge each run of
+  consecutive `l` steps in one go, as a GitHub stack (see [Merging as a
+  stack](#merging-as-a-stack)). Overrides `autoland.merge_as_stack`; on by
+  default.
 - `--resume`: Resume a previously interrupted run from its checkpoint.
 - `--replan`: Change the plan, or the code, of an interrupted or running
   autoland and continue it without losing its progress. See [Changing the plan
@@ -639,6 +649,55 @@ default_workflow = deploy.yaml
   plan is pre-filled with a `w <default_workflow>` step after the land steps,
   so a repo's usual post-land workflow wait is there by default (still
   editable/removable in `$EDITOR`).
+- `merge_as_stack` (default `true`): merge each run of consecutive `l` steps
+  as a GitHub stack rather than one PR at a time.
+
+##### Merging as a stack
+
+By default, `autoland` lands each run of two or more consecutive `l` steps (no
+`w` or `c` step between them) with GitHub's native [stacked
+PRs](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs)
+instead of one PR at a time:
+
+1. It registers the run's PRs as a GitHub stack. `stack-pr` already bases each
+   PR on the one below it, which is what a GitHub stack requires. A stack that
+   already exists is reused if the run sits at its bottom.
+2. It waits for every PR in the run to be approved and to pass its checks,
+   just as when landing them one at a time.
+3. It makes one merge request on the top PR of the run, which merges it and
+   every PR below it — all enqueued together in the merge queue, where the
+   repo has one. Each PR still lands as its own commit (made with the merge
+   queue's configured method, or squashed when there is no queue), and every
+   PR is closed as merged.
+4. It rebases and re-submits the rest of the stack once, rather than after
+   every PR.
+
+So a plan of four bare `l` steps waits on the merge queue once instead of four
+times. A `w` or `c` step ends a run, since it has to see the PRs below it land
+first; `--dry-run` lists the runs a plan would merge as stacks.
+
+To keep PRs from merging together, put a `c` step between them in the plan,
+which splits the run there (`autoland` asks you to confirm before continuing).
+To land every PR on its own, pass `--no-merge-as-stack`.
+
+If a run can't merge as a stack — GitHub refuses to create the stack, the merge
+request fails, or the stack is booted from the merge queue — `autoland`
+dissolves the stack it made and lands the rest of that run one PR at a time,
+keeping any PRs the stack merge did land. Things to be aware of:
+
+- GitHub's stacked PRs are in public preview, so the API may change.
+- GitHub evaluates every PR's merge requirements against the stack's base
+  branch, and runs CI on every PR in a stack as if it targeted that branch.
+  So although the PRs above the bottom of a `stack-pr` stack target the branch
+  below them, registering the stack starts their `pull_request` workflows for
+  the target branch, and `autoland` then waits for those checks.
+- While PRs are in a GitHub stack, GitHub only merges them through the stack
+  merge API, so `gh pr merge` and `stack-pr land` can't land them. `autoland`
+  only leaves a stack behind when it is interrupted mid-merge; `--resume`
+  picks that stack up again.
+- A PR that is already in a GitHub stack that doesn't start with the run (for
+  example one made with `gh stack`) is left alone, and the run lands one PR at
+  a time.
 
 Richer live progress tables are shown when the optional `rich` dependency is
 installed (`pipx install 'stack-pr[rich]'` or add the `rich` extra); otherwise
