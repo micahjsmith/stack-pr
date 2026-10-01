@@ -637,9 +637,10 @@ instead of one PR at a time:
 2. It waits for every PR in the run to be approved and to pass its checks,
    just as when landing them one at a time.
 3. It makes one merge request on the top PR of the run, which merges it and
-   every PR below it — through the merge queue as a single group, where the
-   repo has one. Each PR still lands as its own squashed commit, and every PR
-   is closed as merged.
+   every PR below it — all enqueued together in the merge queue, where the
+   repo has one. Each PR still lands as its own commit (made with the merge
+   queue's configured method, or squashed when there is no queue), and every
+   PR is closed as merged.
 4. It rebases and re-submits the rest of the stack once, rather than after
    every PR.
 
@@ -654,10 +655,10 @@ keeping any PRs the stack merge did land. Things to be aware of:
 
 - GitHub's stacked PRs are in public preview, so the API may change.
 - GitHub evaluates every PR's merge requirements against the stack's base
-  branch. PRs above the bottom of a `stack-pr` stack target the branch below
-  them, so if your CI only runs on PRs into the target branch, those PRs may
-  have no checks for `autoland` to wait on. In that case, use
-  `--no-merge-as-stack` (or `merge_as_stack = false`).
+  branch, and runs CI on every PR in a stack as if it targeted that branch.
+  So although the PRs above the bottom of a `stack-pr` stack target the branch
+  below them, registering the stack starts their `pull_request` workflows for
+  the target branch, and `autoland` then waits for those checks.
 - While PRs are in a GitHub stack, GitHub only merges them through the stack
   merge API, so `gh pr merge` and `stack-pr land` can't land them. `autoland`
   only leaves a stack behind when it is interrupted mid-merge; `--resume`

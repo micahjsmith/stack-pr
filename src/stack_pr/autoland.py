@@ -204,7 +204,9 @@ class StackEntry:
 
     @property
     def is_approved(self) -> bool:
-        return self.review_decision == "APPROVED"
+        # GitHub reports no review decision at all when the target branch
+        # requires no review, and then there is no approval to wait for.
+        return self.review_decision in ("APPROVED", "")
 
 
 @dataclass
@@ -684,18 +686,21 @@ class GitHub:
         """Remove a stack's unmerged PRs from it; queued PRs stay queued."""
         self._api("POST", f"stacks/{stack_number}/unstack")
 
-    def merge_async(self, pr_number: int) -> str | None:
+    def merge_async(self, pr_number: int, *, merge_queue: bool) -> str | None:
         """Request a merge of *pr_number* and every open PR below it in its stack.
 
-        Uses the merge queue when the target branch has one. Returns the
-        request's id for ``merge_async_status``, or ``None`` when GitHub didn't
-        return one (the PR was already merged or queued).
+        Returns the request's id for ``merge_async_status``, or ``None`` when
+        GitHub didn't return one (the PR was already merged or queued).
         """
-        data = self._api(
-            "PUT",
-            f"pulls/{pr_number}/merge-async",
-            {"merge_method": "squash", "merge_action": "default"},
+        # The merge queue merges with its own configured method, and GitHub
+        # rejects a request that names one ("Custom merge params are not
+        # supported when merging via a merge queue").
+        body = (
+            {"merge_action": "merge_queue"}
+            if merge_queue
+            else {"merge_action": "direct_merge", "merge_method": "squash"}
         )
+        data = self._api("PUT", f"pulls/{pr_number}/merge-async", body)
         if not isinstance(data, dict):
             return None
         details = data.get("details")
@@ -2482,7 +2487,7 @@ def land_as_stack(
         )
         uuid: str | None = None
         try:
-            uuid = github.merge_async(top.pr_number)
+            uuid = github.merge_async(top.pr_number, merge_queue=opts.merge_queue)
         except (RuntimeError, json.JSONDecodeError) as e:
             # 409: a merge request for this stack is already in flight (e.g.
             # from a run that was interrupted) — wait for it like our own.

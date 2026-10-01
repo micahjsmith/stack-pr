@@ -1263,6 +1263,37 @@ def test_confirm_overwrite_state(tmp_path, mocker) -> None:  # noqa: ANN001
     assert _confirm_overwrite_state(sf) is False
 
 
+# --- approval ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("decision", "approved"),
+    [
+        ("APPROVED", True),
+        ("", True),  # the branch requires no review
+        ("REVIEW_REQUIRED", False),
+        ("CHANGES_REQUESTED", False),
+    ],
+)
+def test_wait_for_approval_by_review_decision(
+    mocker,  # noqa: ANN001
+    decision: str,
+    approved: bool,
+) -> None:
+    mocker.patch("stack_pr.autoland.console")
+    mocker.patch.object(autoland.github, "pr_state", return_value="OPEN")
+    mocker.patch.object(autoland.github, "review_decision", return_value=decision)
+    ctx = LandingContext()
+    # Abort the wait on its first poll, so a PR that isn't approved returns.
+    mocker.patch(
+        "stack_pr.autoland.resilient_sleep",
+        side_effect=lambda _s: setattr(ctx, "aborted", True),
+    )
+
+    entry = _pinned_stack([101])[0]
+    assert autoland.wait_for_approval(entry, opts=_opts(), ctx=ctx) is approved
+
+
 # --- merging a run of land steps as a GitHub stack -------------------------
 
 
@@ -1339,7 +1370,7 @@ class _FakeStackGitHub:
         self.unstacked.append(number)
         self.stacks.pop(number)
 
-    def merge_async(self, pr: int) -> str:
+    def merge_async(self, pr: int, *, merge_queue: bool) -> str:
         self.merge_requests.append(pr)
         if self.merge_error:
             raise RuntimeError(self.merge_error)
