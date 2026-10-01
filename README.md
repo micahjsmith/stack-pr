@@ -670,6 +670,10 @@ So a plan of four bare `l` steps waits on the merge queue once instead of four
 times. A `w` or `c` step ends a run, since it has to see the PRs below it land
 first; `--dry-run` lists the runs a plan would merge as stacks.
 
+To keep PRs from merging together, put a `c` step between them in the plan,
+which splits the run there (`autoland` asks you to confirm before continuing).
+To land every PR on its own, pass `--no-merge-as-stack`.
+
 If a run can't merge as a stack — GitHub refuses to create the stack, the merge
 request fails, or the stack is booted from the merge queue — `autoland`
 dissolves the stack it made and lands the rest of that run one PR at a time,
