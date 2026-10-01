@@ -22,6 +22,16 @@ There are several tool that help with stacked PRs.
 - stack-pr (this project): A stack is a set of commits on a branch. Each commit is one PR. The commits are modified over time via a interactive rebase-based workflow. Each PR description automatically gets a preamble section showing the full stack. The tool manages a mapping from commit => temp branch => PR with state stored in the commit body itself. Support for GitHub only via the `gh` CLI.
 - [git-spice](https://abhinav.github.io/git-spice/): A stack is a set of branches. Each branch is one PR. The branches are modified over time via normal git operations. Branches must be tracked by the tool with a separate local state store. A special restack commit rebases all the branches. Support for non-linear stack branches and multiple git hosting providers.
 - [jj-stack](https://github.com/keanemind/jj-stack/): A stack is a set of Jujutsu bookmarks. Jujutsu already conceptually supports stacks locally, so this tool focuses on syncing the local repo state to GitHub.
+- [gh stack](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs): GitHub's own stacked PRs (in public preview), with a `gh` CLI extension. A stack is a set of branches tracked by the extension, and it is also an object on GitHub: the PRs are registered as a stack, which GitHub shows on each PR, rebases server-side, and merges in one operation (through the merge queue, where there is one). Same-repository branches only.
+
+stack-pr can complement `gh stack` rather than replace it. stack-pr keeps its
+commit-per-PR workflow and plain base-branch PRs, and `stack-pr autoland` uses
+GitHub's native stacks to land them: it registers each run of consecutive land
+steps as a GitHub stack and merges it in one go (see [Merging as a
+stack](#merging-as-a-stack)). It also reuses a stack that `gh stack` made, as
+long as the PRs being landed sit at its bottom. While PRs are in a GitHub
+stack, only GitHub's stack merge can merge them, so land them with `autoland`
+or `gh stack merge` rather than `stack-pr land`.
 
 ## Installation
 
