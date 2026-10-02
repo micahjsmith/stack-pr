@@ -62,6 +62,7 @@ from logging import getLogger
 from pathlib import Path
 from re import Pattern
 from subprocess import PIPE, SubprocessError
+from typing import Any
 
 from stack_pr.git import (
     branch_exists,
@@ -1079,7 +1080,7 @@ def edit_pr_base(
     *,
     extra_args: list[str] | None = None,
     verbose: bool,
-    **kwargs: object,
+    input: bytes | None = None,  # noqa: A002
 ) -> None:
     """Run ``gh pr edit <pr> -B <base> [extra_args]``, tolerating merge queues.
 
@@ -1095,7 +1096,7 @@ def edit_pr_base(
         quiet=not verbose,
         check=False,
         stderr=PIPE,
-        **kwargs,
+        input=input,
     )
     if result.returncode == 0:
         return
@@ -1112,7 +1113,7 @@ def edit_pr_base(
     if extra_args:
         # Re-run without the base change so the remaining edits still apply.
         run_shell_command(
-            ["gh", "pr", "edit", pr, *extra_args], quiet=not verbose, **kwargs
+            ["gh", "pr", "edit", pr, *extra_args], quiet=not verbose, input=input
         )
 
 
@@ -1760,7 +1761,7 @@ def command_abandon(args: CommonArgs) -> None:
 # ===----------------------------------------------------------------------=== #
 # ADOPT
 # ===----------------------------------------------------------------------=== #
-def get_adopt_pr_info(pr: str | None) -> dict:
+def get_adopt_pr_info(pr: str | None) -> dict[str, Any]:
     """Look up the PR to adopt via 'gh'.
 
     With no explicit `pr`, this resolves the PR associated with the currently
@@ -1775,7 +1776,10 @@ def get_adopt_pr_info(pr: str | None) -> dict:
     except SubprocessError:
         error(ERROR_ADOPT_NO_PR.format(cmd=cmd))
         raise
-    return json.loads(out)
+    info = json.loads(out)
+    if not isinstance(info, dict):
+        raise TypeError(f"Unexpected output from {cmd}: {out!r}")
+    return info
 
 
 def warn_if_content_differs(
@@ -2006,7 +2010,7 @@ def command_view(args: CommonArgs) -> None:
 # ===----------------------------------------------------------------------=== #
 # CONFIG
 # ===----------------------------------------------------------------------=== #
-def command_config(config_file: str, setting: str) -> None:
+def command_config(config_file: Path, setting: str) -> None:
     """Set a configuration value in the config file.
 
     Args:
@@ -2026,7 +2030,7 @@ def command_config(config_file: str, setting: str) -> None:
     section, key = key_path.split(".", 1)
 
     config = configparser.ConfigParser()
-    if Path(config_file).is_file():
+    if config_file.is_file():
         config.read(config_file)
 
     if not config.has_section(section):
@@ -2034,7 +2038,7 @@ def command_config(config_file: str, setting: str) -> None:
 
     config.set(section, key, value)
 
-    with Path(config_file).open("w") as f:
+    with config_file.open("w") as f:
         config.write(f)
 
     print(f"Set {section}.{key} = {value}")
@@ -2262,16 +2266,16 @@ def create_argparser(
     return parser
 
 
-def load_config(config_file: str | Path) -> configparser.ConfigParser:
+def load_config(config_file: Path) -> configparser.ConfigParser:
     config = configparser.ConfigParser()
-    if Path(config_file).is_file():
+    if config_file.is_file():
         config.read(config_file)
     return config
 
 
 def main() -> None:  # noqa: PLR0912, PLR0915, C901
     repo_config_file = get_repo_root() / ".stack-pr.cfg"
-    config_file = os.getenv("STACKPR_CONFIG", repo_config_file)
+    config_file = Path(os.getenv("STACKPR_CONFIG", repo_config_file))
     config = load_config(config_file)
 
     parser = create_argparser(config)
