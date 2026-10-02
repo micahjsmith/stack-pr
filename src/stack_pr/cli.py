@@ -544,6 +544,17 @@ def is_repo_clean() -> bool:
     return not bool(changes)
 
 
+def get_stash_ref() -> str | None:
+    """Returns the commit of the top stash entry, or None if there is none."""
+    result = run_shell_command(
+        ["git", "rev-parse", "-q", "--verify", "refs/stash"],
+        quiet=False,
+        check=False,
+        capture_output=True,
+    )
+    return result.stdout.decode().strip() if result.returncode == 0 else None
+
+
 def get_stack(base: str, head: str, *, verbose: bool) -> list[StackEntry]:
     if not is_ancestor(base, head, verbose=verbose):
         error(
@@ -2318,13 +2329,11 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
     stashed_changes = False
     try:
         if args.command in ["submit", "export"] and args.stash:
-            result = run_shell_command(
-                ["git", "stash", "save"], quiet=not common_args.verbose
-            )
-            # Check if stash actually saved anything
-            # git stash outputs "No local changes to save" when there's nothing to stash
-            output = result.stdout.decode() if result.stdout else ""
-            stashed_changes = "No local changes to save" not in output
+            # Only pop later if this push actually created a stash entry;
+            # otherwise we'd pop someone else's unrelated stash.
+            stash_before = get_stash_ref()
+            run_shell_command(["git", "stash", "push"], quiet=not common_args.verbose)
+            stashed_changes = get_stash_ref() != stash_before
 
         # autoland may operate in a temporary worktree (--branch), so the
         # primary checkout being dirty shouldn't block it.
