@@ -201,7 +201,7 @@ addopts = "-v"
 
 [tool.mypy]
 # Let's be strict.
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
