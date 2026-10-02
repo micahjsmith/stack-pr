@@ -735,15 +735,18 @@ def generate_available_branch_name(refs: list[str], branch_name_template: str) -
     return generate_branch_name(branch_name_template, new_branch_id)
 
 
-def get_available_branch_name(remote: str, branch_name_template: str) -> str:
+def get_remote_ref_pattern(remote: str, branch_name_template: str) -> str:
+    """Return a `git for-each-ref` pattern matching the stack's remote branches."""
     branch_name_base = get_branch_name_base(branch_name_template)
+    return f"refs/remotes/{remote}/{branch_name_base.replace(r'$ID', '*')}"
 
-    git_command_branch_template = branch_name_base.replace(r"$ID", "*")
+
+def get_available_branch_name(remote: str, branch_name_template: str) -> str:
     refs = get_command_output(
         [
             "git",
             "for-each-ref",
-            f"refs/remotes/{remote}/{git_command_branch_template}",
+            get_remote_ref_pattern(remote, branch_name_template),
             "--format='%(refname)'",
         ]
     ).split()
@@ -1575,12 +1578,11 @@ def delete_remote_branches(
     log(h("Deleting remote branches"), level=1)
     run_shell_command(["git", "fetch", "--prune", remote], quiet=not verbose)
 
-    branch_name_base = get_branch_name_base(branch_name_template)
     refs = get_command_output(
         [
             "git",
             "for-each-ref",
-            f"refs/remotes/{remote}/{branch_name_base}",
+            get_remote_ref_pattern(remote, branch_name_template),
             "--format=%(refname)",
         ]
     ).split()
