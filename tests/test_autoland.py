@@ -1823,8 +1823,13 @@ class _FakeNativeStackGitHub:
         self.created: list[list[int]] = []
         self.unstacked: list[int] = []
         self.merge_requests: list[int] = []
+        # (PR, new base) for each base change, and the open PRs' bases at the
+        # time of each merge request.
+        self.base_changes: list[tuple[int, str]] = []
+        self.bases_at_merge: list[list[tuple[int, str]]] = []
         self.create_error = ""
         self.merge_error = ""
+        self.set_base_error = ""
         # The PRs a merge request lands (default: the whole stack up to the PR
         # it was made on), and the status GitHub then reports for it.
         self.lands: list[int] | None = None
@@ -1853,8 +1858,14 @@ class _FakeNativeStackGitHub:
         self.unstacked.append(number)
         self.stacks.pop(number)
 
+    def set_base(self, pr: int, base: str) -> None:
+        if self.set_base_error:
+            raise RuntimeError(self.set_base_error)
+        self.base_changes.append((pr, base))
+
     def merge_async(self, pr: int, *, merge_queue: bool) -> str:
         self.merge_requests.append(pr)
+        self.bases_at_merge.append(list(self.base_changes))
         if self.merge_error:
             raise RuntimeError(self.merge_error)
         prs = next(p for p in self.stacks.values() if pr in p)
@@ -1932,6 +1943,30 @@ def test_consecutive_land_steps_merge_as_one_stack(mocker) -> None:  # noqa: ANN
     assert landed_one_by_one() == []
     # #104 stays open, so the stack is rebased onto the landed code — once.
     rebase.assert_called_once()
+
+
+def test_stack_merge_first_bases_the_pr_above_the_run_on_the_target(mocker) -> None:  # noqa: ANN001
+    # Otherwise GitHub closes #104 once the run's branches are deleted.
+    fake, execute, _rebase, _landed = _land_with_fake_github(
+        mocker, "l\nl\nl\n", [101, 102, 103, 104]
+    )
+
+    assert execute() is True
+
+    assert fake.bases_at_merge == [[(104, "main")]]
+
+
+def test_stack_merge_falls_back_when_the_pr_above_cannot_be_rebased(mocker) -> None:  # noqa: ANN001
+    fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\n", [101, 102, 103]
+    )
+    fake.set_base_error = "HTTP 502"
+
+    assert execute() is True
+
+    assert fake.merge_requests == []
+    assert fake.unstacked == [7]
+    assert landed_one_by_one() == [101, 102]
 
 
 def test_merge_as_stack_off_lands_one_at_a_time(mocker) -> None:  # noqa: ANN001

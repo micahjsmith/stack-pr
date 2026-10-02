@@ -9,6 +9,8 @@
   as its own commit. If the stack merge can't go ahead, the run falls back to
   landing one PR at a time. On by default; turn it off with
   `--no-merge-as-stack` or `merge_as_stack = false` under `[autoland]`.
+  Before the merge, the PR just above the run is retargeted to the target branch,
+  since GitHub would otherwise close it when the run's branches are deleted.
 * `autoland` no longer waits forever for approval on a branch that requires no
   review. GitHub reports no review decision at all there, which `autoland`
   used to read as "not approved".
