@@ -245,5 +245,23 @@ def is_rebase_in_progress(repo_dir: Path | None = None) -> bool:
     Returns:
         True if a rebase is in progress, False otherwise.
     """
-    git_dir = Path(".git") if repo_dir is None else repo_dir / ".git"
-    return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+    cwd = Path.cwd() if repo_dir is None else repo_dir
+    # Ask git where the rebase state lives rather than assuming `.git/` is a
+    # directory: in a linked worktree `.git` is a file pointing elsewhere.
+    proc = run_shell_command(
+        [
+            "git",
+            "rev-parse",
+            "--git-path",
+            "rebase-merge",
+            "--git-path",
+            "rebase-apply",
+        ],
+        cwd=cwd,
+        quiet=True,
+        check=False,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    return any((cwd / path).exists() for path in proc.stdout.splitlines() if path)

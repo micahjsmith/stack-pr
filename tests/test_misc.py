@@ -14,6 +14,7 @@ from stack_pr.cli import (
     get_taken_branch_ids,
 )
 from stack_pr.git import git_config, is_rebase_in_progress
+from stack_pr.shell_commands import run_shell_command
 
 
 @pytest.fixture(scope="module")
@@ -97,8 +98,8 @@ def test_is_rebase_in_progress() -> None:
     """Test the is_rebase_in_progress function with different git states."""
     with tempfile.TemporaryDirectory() as temp_dir:
         repo_dir = Path(temp_dir)
+        run_shell_command(["git", "init", "-q"], cwd=repo_dir, quiet=True)
         git_dir = repo_dir / ".git"
-        git_dir.mkdir()
 
         # Test no rebase in progress
         assert not is_rebase_in_progress(repo_dir)
