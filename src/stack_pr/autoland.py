@@ -689,8 +689,11 @@ class GitHub:
                     f"[yellow]Warning: could not rerun {run_id}: {e}[/yellow]"
                 )
 
-    def in_merge_queue(self, pr_number: int) -> bool:
-        """Whether the PR currently has an active merge-queue entry (GraphQL)."""
+    def in_merge_queue(self, pr_number: int) -> bool | None:
+        """Whether the PR currently has an active merge-queue entry (GraphQL).
+
+        ``None`` when the lookup failed, so it's unknown whether the PR is queued.
+        """
         try:
             owner, repo = self.owner_repo()
             result = run(
@@ -716,9 +719,9 @@ class GitHub:
                 .get("pullRequest", {})
                 .get("mergeQueueEntry")
             )
-            return entry is not None
-        except (RuntimeError, json.JSONDecodeError):
-            return False
+        except (RuntimeError, json.JSONDecodeError, AttributeError):
+            return None
+        return entry is not None
 
     def enqueue(self, pr_number: int) -> None:
         run(["gh", "pr", "merge", str(pr_number), "--squash"], quiet=False)
@@ -823,7 +826,8 @@ class GitHub:
             return MergeQueuePollResult(merged=True)
         if state == "CLOSED":
             return MergeQueuePollResult(error="PR was closed")
-        if state == "OPEN" and not self.in_merge_queue(pr_number):
+        # An unknown queue status (a failed lookup) is not a boot; poll again.
+        if state == "OPEN" and self.in_merge_queue(pr_number) is False:
             return MergeQueuePollResult(booted=True)
         return MergeQueuePollResult()
 
@@ -2332,7 +2336,7 @@ def wait_for_mergeable(
             continue
 
         # UNKNOWN can also mean "already in the merge queue".
-        if merge_state == "UNKNOWN" and github.in_merge_queue(entry.pr_number):
+        if merge_state == "UNKNOWN" and github.in_merge_queue(entry.pr_number) is True:
             console.print(
                 f"[cyan]PR #{entry.pr_number} is already in the merge queue — "
                 "skipping enqueue[/cyan]"
@@ -2596,7 +2600,8 @@ def _await_native_stack_merge(
         # off. A request still "pending" hasn't reached the queue yet; without
         # a request id to ask, give it one interval to get there.
         settled = status == "enqueued" or (not uuid and awake_elapsed > 0)
-        if settled and not github.in_merge_queue(still_open[0].pr_number):
+        # A failed lookup (None) leaves the merge undecided; keep polling.
+        if settled and github.in_merge_queue(still_open[0].pr_number) is False:
             return f"PR #{still_open[0].pr_number} was booted from the merge queue"
 
         mins = int(awake_elapsed) // 60

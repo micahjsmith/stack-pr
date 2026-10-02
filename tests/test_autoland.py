@@ -205,6 +205,18 @@ def test_poll_merge_still_queued(mocker) -> None:  # noqa: ANN001
     assert not res.error
 
 
+def test_poll_merge_lookup_failure_is_not_booted(mocker) -> None:  # noqa: ANN001
+    # A transient failure looking up the merge-queue entry says nothing about
+    # whether the PR is still queued, so it must not count as being booted.
+    mocker.patch.object(autoland.github, "pr_state", return_value="OPEN")
+    mocker.patch.object(autoland.github, "owner_repo", return_value=("o", "r"))
+    mocker.patch.object(autoland, "run", side_effect=RuntimeError("HTTP 502"))
+    res = autoland.github.poll_merge(1)
+    assert not res.merged
+    assert not res.booted
+    assert not res.error
+
+
 # --- workflow checkpoint SHA ---------------------------------------------
 
 
@@ -2022,6 +2034,26 @@ def test_native_stack_merge_waits_for_a_request_already_in_flight(mocker) -> Non
 
     assert landed_one_by_one() == []
     assert fake.unstacked == []
+
+
+def test_stack_merge_keeps_waiting_when_the_queue_lookup_fails(mocker) -> None:  # noqa: ANN001
+    fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\n", [101, 102]
+    )
+    fake.lands = []  # queued, not merged yet
+    fake.status = "enqueued"
+
+    def lookup_fails(_pr: int) -> None:
+        # The lookup fails while the stack is still queued; it merges meanwhile.
+        fake.merged.update({101, 102})
+
+    mocker.patch.object(fake, "in_merge_queue", side_effect=lookup_fails)
+
+    assert execute() is True
+
+    assert fake.merge_requests == [102]
+    assert fake.unstacked == []
+    assert landed_one_by_one() == []
 
 
 def test_native_stack_merge_reuses_a_stack_the_run_is_at_the_bottom_of(mocker) -> None:  # noqa: ANN001
