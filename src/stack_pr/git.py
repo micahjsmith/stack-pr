@@ -163,10 +163,10 @@ def check_gh_installed() -> None:
 
     try:
         run_shell_command(["gh"], capture_output=True, quiet=False)
-    except subprocess.CalledProcessError as err:
+    except (FileNotFoundError, subprocess.CalledProcessError) as err:
         raise GitError(
             "'gh' is not installed. Please visit https://cli.github.com/ for"
-            " installation instuctions."
+            " installation instructions."
         ) from err
 
 
