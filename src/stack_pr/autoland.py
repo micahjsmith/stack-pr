@@ -1084,7 +1084,14 @@ def rebase_and_resubmit(common: cli.CommonArgs) -> None:
     run(["git", "fetch", common.remote, common.target], quiet=False)
     # Rebase the current branch (don't name it) so this works even when the
     # branch is checked out in another worktree.
-    run(["git", "rebase", f"{common.remote}/{common.target}"], quiet=False)
+    try:
+        run(["git", "rebase", f"{common.remote}/{common.target}"], quiet=False)
+    except RuntimeError:
+        # Without --branch this is the user's own working copy; don't leave it
+        # stuck mid-rebase. Best-effort: `--abort` is harmless (and fails
+        # quietly) if no rebase is actually in progress.
+        run(["git", "rebase", "--abort"], check=False, quiet=True, retries=0)
+        raise
 
     # Re-deduce the base against the *current* origin/<target>. `common.base`
     # was deduced once when autoland started (merge-base with the target at
