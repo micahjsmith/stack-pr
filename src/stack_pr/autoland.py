@@ -756,6 +756,9 @@ class GitHub:
         """Remove a stack's unmerged PRs from it; queued PRs stay queued."""
         self._api("POST", f"stacks/{native_stack_number}/unstack")
 
+    def set_base(self, pr_number: int, base: str) -> None:
+        run(["gh", "pr", "edit", str(pr_number), "--base", base], quiet=True)
+
     def has_merge_queue(self, branch: str) -> bool | None:
         """Whether *branch* has a merge queue, or ``None`` if GitHub can't say."""
         try:
@@ -2675,19 +2678,35 @@ def land_as_native_stack(
             f"as a stack[/bold cyan]"
         )
         uuid: str | None = None
-        try:
-            # Ask GitHub rather than trust the config: the request body must
-            # match whether the branch really has a queue (see merge_async).
-            has_queue = github.has_merge_queue(common.target)
-            uuid = github.merge_async(
-                top.pr_number,
-                merge_queue=opts.merge_queue if has_queue is None else has_queue,
-            )
-        except (RuntimeError, json.JSONDecodeError) as e:
-            # 409: a merge request for this stack is already in flight (e.g.
-            # from a run that was interrupted) — wait for it like our own.
-            if "HTTP 409" not in str(e):
-                failure = f"stack merge request failed: {e}"
+        # The PR above the run is based on the run's top branch. When that
+        # branch is deleted after the merge, GitHub retargets the PR to the top
+        # PR's base, which is another of the run's branches, deleted along with
+        # it, so GitHub closes the PR. Basing it on the target up front keeps it
+        # open; the resubmit after the merge restores its real base. A PR above
+        # that is in the GitHub stack itself is GitHub's to retarget.
+        above = ctx.stack.index(top) + 1
+        if dissolvable and above < len(ctx.stack):
+            try:
+                github.set_base(ctx.stack[above].pr_number, common.target)
+            except RuntimeError as e:
+                failure = (
+                    f"could not base PR #{ctx.stack[above].pr_number} on "
+                    f"{common.target}: {e}"
+                )
+        if not failure:
+            try:
+                # Ask GitHub rather than trust the config: the request body must
+                # match whether the branch really has a queue (see merge_async).
+                has_queue = github.has_merge_queue(common.target)
+                uuid = github.merge_async(
+                    top.pr_number,
+                    merge_queue=opts.merge_queue if has_queue is None else has_queue,
+                )
+            except (RuntimeError, json.JSONDecodeError) as e:
+                # 409: a merge request for this stack is already in flight (e.g.
+                # from a run that was interrupted) — wait for it like our own.
+                if "HTTP 409" not in str(e):
+                    failure = f"stack merge request failed: {e}"
         if not failure:
             failure = _await_native_stack_merge(entries, uuid, opts=opts, ctx=ctx)
             if failure == "aborted":
