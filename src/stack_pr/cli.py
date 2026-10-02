@@ -64,6 +64,7 @@ from re import Pattern
 from subprocess import PIPE, SubprocessError
 
 from stack_pr.git import (
+    GitError,
     branch_exists,
     check_gh_installed,
     get_current_branch_name,
@@ -223,6 +224,12 @@ ERROR_REBASE_IN_PROGRESS = """Cannot submit while in the middle of a rebase.
 
 Please complete or abort the current rebase first.
 """
+ERROR_NOT_IN_REPO = "Not inside a git repository."
+ERROR_CONFIG_NO_FILE = (
+    "Not inside a git repository, so there is no repo config file to write. "
+    "Run this from inside a repository, or set STACKPR_CONFIG to the config "
+    "file to use."
+)
 ERROR_CONFIG_INVALID_FORMAT = """Invalid config format.
 
 Usage: stack-pr config <section>.<key>=<value>
@@ -2270,9 +2277,15 @@ def load_config(config_file: str | Path) -> configparser.ConfigParser:
 
 
 def main() -> None:  # noqa: PLR0912, PLR0915, C901
-    repo_config_file = get_repo_root() / ".stack-pr.cfg"
+    # --help, install, and config work outside a git repo, so a missing repo
+    # only means there is no repo-level config file to read.
+    try:
+        repo_root: Path | None = get_repo_root()
+    except GitError:
+        repo_root = None
+    repo_config_file = repo_root / ".stack-pr.cfg" if repo_root else None
     config_file = os.getenv("STACKPR_CONFIG", repo_config_file)
-    config = load_config(config_file)
+    config = load_config(config_file) if config_file else configparser.ConfigParser()
 
     parser = create_argparser(config)
     args = parser.parse_args()
@@ -2288,6 +2301,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
 
     # Handle config command early since it doesn't need git repo setup
     if args.command == "config":
+        if not config_file:
+            error(ERROR_CONFIG_NO_FILE)
+            sys.exit(1)
         command_config(config_file, args.setting)
         return
 
@@ -2298,6 +2314,10 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
     if args.command == "install":
         command_install(args.name, local=args.local)
         return
+
+    if repo_root is None:
+        error(ERROR_NOT_IN_REPO)
+        sys.exit(1)
 
     # Make sure "$ID" is present in the branch name template and append it if not
     args.branch_name_template = fix_branch_name_template(args.branch_name_template)
