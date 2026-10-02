@@ -6,7 +6,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 import pytest
 
-from stack_pr.shell_commands import run_shell_command
+from stack_pr.shell_commands import get_command_output, run_shell_command
 
 
 def test_cmd_success_quiet_false_print(capfd: pytest.CaptureFixture) -> None:
@@ -81,3 +81,18 @@ def test_cmd_fail_quiet_false_print(capfd: pytest.CaptureFixture) -> None:
     captured = capfd.readouterr()
     assert "stdout_msg" in captured.out
     assert "stderr_msg" in captured.err
+
+
+def test_run_shell_command_accepts_generator() -> None:
+    """A generator command is run with all of its arguments."""
+    cmd = (arg for arg in ["sh", "-c", "echo generator_msg"])
+    result = run_shell_command(cmd, quiet=True)
+
+    assert result.stdout.decode("utf-8").strip() == "generator_msg"
+
+
+def test_get_command_output_accepts_generator() -> None:
+    """get_command_output runs a generator command with all of its arguments."""
+    cmd = (arg for arg in ["sh", "-c", "echo generator_msg"])
+
+    assert get_command_output(cmd) == "generator_msg"
