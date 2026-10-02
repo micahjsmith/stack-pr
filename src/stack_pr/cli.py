@@ -1414,8 +1414,8 @@ def command_submit(
         return
 
     if (draft_bitmask is not None) and (len(draft_bitmask) != len(st)):
-        log(h("Draft bitmask passed to 'submit' doesn't match number of PRs!"))
-        return
+        error("Draft bitmask passed to 'submit' doesn't match number of PRs!")
+        sys.exit(1)
 
     # Create local branches and initialize base and head fields in the stack
     # elements
@@ -2330,7 +2330,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
         # primary checkout being dirty shouldn't block it.
         if args.command not in ("view", "autoland") and not is_repo_clean():
             error(ERROR_REPO_DIRTY)
-            return
+            sys.exit(1)
         check_target_branch_exists(common_args)
         # autoland deduces its own base: with --branch it operates in a
         # temporary worktree, so the base must be resolved against that
