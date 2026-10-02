@@ -2048,3 +2048,51 @@ def test_native_stack_merge_leaves_a_mismatched_stack_alone(mocker) -> None:  # 
     assert fake.created == []
     assert fake.unstacked == []
     assert landed_one_by_one() == [101, 102]
+
+
+# ---------------------------------------------------------------------------
+# Retrying failed commands
+# ---------------------------------------------------------------------------
+
+
+def _fake_subprocess(mocker, *, returncode: int = 1, stderr: str = "", exc=None):  # noqa: ANN001, ANN202
+    """Patch the subprocess boundary of ``run``; returns the mock to count calls."""
+    mocker.patch.object(autoland, "_RETRY_DELAY", 0)
+
+    def _run(cmd, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        if exc is not None:
+            raise exc
+        return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr)
+
+    return mocker.patch.object(autoland.subprocess, "run", side_effect=_run)
+
+
+def test_enqueue_is_not_resent_after_a_transient_looking_failure(mocker) -> None:  # noqa: ANN001
+    # The merge may have gone through server-side even though the response
+    # was lost, so it must not be sent again.
+    fake = _fake_subprocess(mocker, stderr="unexpected EOF")
+    with pytest.raises(RuntimeError):
+        autoland.github.enqueue(12)
+    assert fake.call_count == 1
+
+
+def test_merge_async_is_not_resent_after_a_transient_looking_failure(mocker) -> None:  # noqa: ANN001
+    mocker.patch.object(autoland.github, "_owner_repo", ("o", "r"))
+    fake = _fake_subprocess(mocker, stderr="HTTP 502: Bad Gateway")
+    with pytest.raises(RuntimeError):
+        autoland.github.merge_async(12, merge_queue=True)
+    assert fake.call_count == 1
+
+
+def test_read_is_retried_after_a_transient_failure(mocker) -> None:  # noqa: ANN001
+    fake = _fake_subprocess(mocker, stderr="HTTP 502: Bad Gateway")
+    with pytest.raises(RuntimeError):
+        autoland.github.pr_state(12)
+    assert fake.call_count > 1
+
+
+def test_missing_executable_is_not_retried(mocker) -> None:  # noqa: ANN001
+    fake = _fake_subprocess(mocker, exc=FileNotFoundError("gh"))
+    with pytest.raises(RuntimeError):
+        autoland.run(["gh", "pr", "view", "12"], quiet=True)
+    assert fake.call_count == 1
