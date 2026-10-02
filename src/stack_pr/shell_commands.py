@@ -43,7 +43,8 @@ def run_shell_command(
     """
     if "shell" in kwargs:
         raise ValueError("shell support has been removed")
-    _ = subprocess.list2cmdline(cmd)
+    # Materialize once: cmd may be a one-shot iterable such as a generator.
+    args = [str(c) for c in cmd]
     if quiet:
         # If quiet, capture stdout and stderr so they are not printed to the console
         # But respects explicit stderr/stdout settings at the call sites
@@ -51,8 +52,8 @@ def run_shell_command(
             kwargs["stderr"] = subprocess.PIPE
         if "stdout" not in kwargs:
             kwargs["stdout"] = subprocess.PIPE
-    logger.debug("Running: %s", cmd)
-    return subprocess.run(list(map(str, cmd)), **kwargs, check=check)
+    logger.debug("Running: %s", args)
+    return subprocess.run(args, **kwargs, check=check)
 
 
 def get_command_output(
