@@ -1261,6 +1261,56 @@ def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
     assert seen_base == ["FRESH_FROM_WORKTREE_HEAD"]
 
 
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def test_worktree_is_removed_when_autoland_exits_before_landing(
+    tmp_path,  # noqa: ANN001
+    mocker,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    mocker.patch("stack_pr.autoland.console")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(
+        repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+    )
+    # A branch with no commits on top of main has no stack to land.
+    _git(repo, "branch", "feature")
+    monkeypatch.chdir(repo)
+    mkdtemp = mocker.spy(autoland.tempfile, "mkdtemp")
+
+    with pytest.raises(SystemExit) as exc:
+        autoland.run_autoland(
+            _common(),
+            _args(branch="feature", state_file=tmp_path / "state.json"),
+            _merge_queue_cfg(),
+        )
+
+    assert exc.value.code == 1
+    assert mkdtemp.call_count == 1
+    assert not Path(mkdtemp.spy_return).exists()
+    worktrees = _git(repo, "worktree", "list", "--porcelain")
+    assert worktrees.count("worktree ") == 1
+    assert Path.cwd().resolve() == repo.resolve()
+
+
 # --- concurrency lock ----------------------------------------------------
 
 

@@ -913,12 +913,22 @@ class Worktree:
     it; ``remove`` restores the original directory and deletes the worktree.
     ``announce_preserved`` is used instead of ``remove`` to keep it around for
     debugging after a failure.
+
+    Once landing starts (``landing`` is set), the run's outcome decides
+    whether the worktree is kept (see ``_dispose_worktree``). Before then
+    nothing worth debugging has happened, so ``remove_unless_landing`` deletes
+    it however the setup ended.
     """
 
     def __init__(self, branch: str) -> None:
         self.branch = branch
         self.path: Path | None = None
+        self.landing = False
         self._orig_cwd: str | None = None
+
+    def remove_unless_landing(self) -> None:
+        if not self.landing:
+            self.remove()
 
     def create(self) -> None:
         tmpdir = tempfile.mkdtemp(prefix="autoland-")
@@ -927,12 +937,16 @@ class Worktree:
             f"[bold]Creating temporary worktree for [cyan]{self.branch}[/cyan] "
             f"at {worktree_dir}[/bold]"
         )
-        subprocess.run(
-            ["git", "worktree", "add", "-f", worktree_dir, self.branch],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", "-f", worktree_dir, self.branch],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except BaseException:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise
         self.path = Path(worktree_dir)
         self._orig_cwd = str(Path.cwd())
         os.chdir(worktree_dir)
@@ -3158,6 +3172,11 @@ def _install_signal_handler(
     worktree: Worktree | None,
     opts: AutolandOptions,
 ) -> None:
+    # Installed as landing starts: from here on, the handler and _finish
+    # decide whether the worktree is kept.
+    if worktree is not None:
+        worktree.landing = True
+
     def handler(_sig: int, _frame: object) -> None:
         ctx.aborted = True
         ctx.abort_reason = "User interrupted (Ctrl+C)"
@@ -3262,6 +3281,7 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
                 sys.exit(1)
             replan = True
 
+    worktree: Worktree | None = None
     try:
         # An existing state file means a previous run was interrupted and can be
         # resumed; starting fresh would clobber it, so ask first.
@@ -3277,7 +3297,6 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             _replan(common, opts, state_path)
             return
 
-        worktree: Worktree | None = None
         if opts.branch:
             worktree = Worktree(opts.branch)
             worktree.create()
@@ -3337,6 +3356,8 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             success=execute_plan(ctx, common, opts, checkpointer),
         )
     finally:
+        if worktree is not None:
+            worktree.remove_unless_landing()
         if lock is not None:
             lock.release()
 
@@ -3363,6 +3384,7 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         )
         sys.exit(1)
 
+    worktree: Worktree | None = None
     try:
         console.print(
             f"[bold]Resuming from checkpoint: [cyan]{sf_path}[/cyan][/bold]\n"
@@ -3380,7 +3402,6 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             )
             sys.exit(1)
 
-        worktree: Worktree | None = None
         if opts.branch or checkpointer.branch != _current_branch():
             worktree = Worktree(opts.branch or checkpointer.branch)
             worktree.create()
@@ -3415,6 +3436,8 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             success=execute_plan(ctx, common, opts, checkpointer),
         )
     finally:
+        if worktree is not None:
+            worktree.remove_unless_landing()
         lock.release()
 
 
@@ -3561,72 +3584,76 @@ def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> 
 
     console.print(f"[bold]Replanning from checkpoint: [cyan]{state_path}[/cyan][/bold]")
     worktree: Worktree | None = None
-    if opts.branch or branch != _current_branch():
-        worktree = Worktree(branch)
-        worktree.create()
-    # As in _run_fresh: deduce against the (possibly worktree) HEAD.
-    common = cli.deduce_base(common)
-
-    # The code may have changed since the checkpoint, so the stack is
-    # rediscovered rather than restored.
-    console.print("\n[bold]Rediscovering stack...[/bold]\n")
-    raw = cli.get_stack(base=common.base, head=common.head, verbose=common.verbose)
-    stack = _stack_entries(raw)
-    if not stack:
-        console.print("[red]No stack found on the current branch.[/red]")
-        sys.exit(1)
-    enrich_stack(stack)
-
-    plan, plan_file = _replacement_plan(opts, old_checkpointer, old, stack)
-    lost = carry_over_progress(old, plan, stack)
-    ctx = LandingContext(stack=stack, plan=plan)
-
-    print_status(ctx)
-    print_native_stack_runs(ctx, opts)
-    if lost:
-        console.print(
-            "\n[yellow]Done in the previous run, but not carried over (changed, "
-            "removed, or now after different PRs):[/yellow]"
-        )
-        for index in lost:
-            console.print(f"  - {_escape_markup(_describe_lost(old, index))}")
-    unpushed = _unpushed_changes(raw, common)
-    if unpushed:
-        console.print(
-            "\n[bold yellow]Warning: GitHub doesn't have all of this stack's code. "
-            "Run `stack-pr submit` first if you changed it:[/bold yellow]"
-        )
-        for problem in unpushed:
-            console.print(f"  - {_escape_markup(problem)}")
-
-    if opts.dry_run:
-        console.print("\n[yellow]Dry run — exiting.[/yellow]")
-        _dispose_worktree(worktree, opts, succeeded=True)
-        return
     try:
-        answer = console.input(
-            "\n[yellow]Continue with this plan? Type y/Y to confirm (anything "
-            "else aborts): [/yellow]"
-        ).strip()
-    except EOFError:
-        answer = ""
-    if answer not in ("y", "Y"):
-        console.print("[red]Aborted — the previous checkpoint is untouched.[/red]")
-        _dispose_worktree(worktree, opts, succeeded=True)
-        return
+        if opts.branch or branch != _current_branch():
+            worktree = Worktree(branch)
+            worktree.create()
+        # As in _run_fresh: deduce against the (possibly worktree) HEAD.
+        common = cli.deduce_base(common)
 
-    checkpointer = AutolandCheckpointer(
-        path=state_path, branch=branch, base=common.target, plan_file=plan_file
-    )
-    console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
-    _install_signal_handler(ctx, checkpointer, worktree, opts)
-    _finish(
-        ctx,
-        checkpointer,
-        worktree,
-        opts,
-        success=execute_plan(ctx, common, opts, checkpointer),
-    )
+        # The code may have changed since the checkpoint, so the stack is
+        # rediscovered rather than restored.
+        console.print("\n[bold]Rediscovering stack...[/bold]\n")
+        raw = cli.get_stack(base=common.base, head=common.head, verbose=common.verbose)
+        stack = _stack_entries(raw)
+        if not stack:
+            console.print("[red]No stack found on the current branch.[/red]")
+            sys.exit(1)
+        enrich_stack(stack)
+
+        plan, plan_file = _replacement_plan(opts, old_checkpointer, old, stack)
+        lost = carry_over_progress(old, plan, stack)
+        ctx = LandingContext(stack=stack, plan=plan)
+
+        print_status(ctx)
+        print_native_stack_runs(ctx, opts)
+        if lost:
+            console.print(
+                "\n[yellow]Done in the previous run, but not carried over (changed, "
+                "removed, or now after different PRs):[/yellow]"
+            )
+            for index in lost:
+                console.print(f"  - {_escape_markup(_describe_lost(old, index))}")
+        unpushed = _unpushed_changes(raw, common)
+        if unpushed:
+            console.print(
+                "\n[bold yellow]Warning: GitHub doesn't have all of this stack's code. "
+                "Run `stack-pr submit` first if you changed it:[/bold yellow]"
+            )
+            for problem in unpushed:
+                console.print(f"  - {_escape_markup(problem)}")
+
+        if opts.dry_run:
+            console.print("\n[yellow]Dry run — exiting.[/yellow]")
+            _dispose_worktree(worktree, opts, succeeded=True)
+            return
+        try:
+            answer = console.input(
+                "\n[yellow]Continue with this plan? Type y/Y to confirm (anything "
+                "else aborts): [/yellow]"
+            ).strip()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "Y"):
+            console.print("[red]Aborted — the previous checkpoint is untouched.[/red]")
+            _dispose_worktree(worktree, opts, succeeded=True)
+            return
+
+        checkpointer = AutolandCheckpointer(
+            path=state_path, branch=branch, base=common.target, plan_file=plan_file
+        )
+        console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
+        _install_signal_handler(ctx, checkpointer, worktree, opts)
+        _finish(
+            ctx,
+            checkpointer,
+            worktree,
+            opts,
+            success=execute_plan(ctx, common, opts, checkpointer),
+        )
+    finally:
+        if worktree is not None:
+            worktree.remove_unless_landing()
 
 
 def _run_replan(common: cli.CommonArgs, opts: AutolandOptions) -> None:
