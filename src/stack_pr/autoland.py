@@ -532,6 +532,10 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess, retrying likely-transient failures.
 
+    Pass ``retries=0`` for a command that changes state (a merge, a POST, a
+    rebase): a request that looks like it failed may still have taken effect,
+    so sending it again is not safe. The caller's later polling reconciles.
+
     Commands run in the current working directory (autoland chdirs into a
     temporary worktree when ``--branch`` is used).
     """
@@ -559,6 +563,8 @@ def run(
                 timeout=300,
                 check=False,
             )
+        except FileNotFoundError as exc:  # missing executable; not transient
+            raise RuntimeError(f"Command error: {exc}") from exc
         except (subprocess.TimeoutExpired, OSError) as exc:
             last_err = RuntimeError(f"Command error: {exc}")
             continue
@@ -683,7 +689,11 @@ class GitHub:
     def rerun_failed(self, run_ids: list[int]) -> None:
         for run_id in dict.fromkeys(run_ids):  # de-dup, preserve order
             try:
-                run(["gh", "run", "rerun", str(run_id), "--failed"], quiet=False)
+                run(
+                    ["gh", "run", "rerun", str(run_id), "--failed"],
+                    quiet=False,
+                    retries=0,
+                )
             except RuntimeError as e:
                 console.print(
                     f"[yellow]Warning: could not rerun {run_id}: {e}[/yellow]"
@@ -724,7 +734,7 @@ class GitHub:
         return entry is not None
 
     def enqueue(self, pr_number: int) -> None:
-        run(["gh", "pr", "merge", str(pr_number), "--squash"], quiet=False)
+        run(["gh", "pr", "merge", str(pr_number), "--squash"], quiet=False, retries=0)
 
     # GitHub's native stacked PRs. A stack is an explicit server-side object —
     # GitHub does not infer one from a chain of PR bases — and once a PR is in
@@ -741,6 +751,7 @@ class GitHub:
             cmd,
             quiet=True,
             input_data=json.dumps(body).encode() if body is not None else None,
+            retries=_MAX_RETRIES if method == "GET" else 0,
         )
         return json.loads(result.stdout) if result.stdout.strip() else None
 
@@ -760,7 +771,7 @@ class GitHub:
         self._api("POST", f"stacks/{native_stack_number}/unstack")
 
     def set_base(self, pr_number: int, base: str) -> None:
-        run(["gh", "pr", "edit", str(pr_number), "--base", base], quiet=True)
+        run(["gh", "pr", "edit", str(pr_number), "--base", base], quiet=True, retries=0)
 
     def has_merge_queue(self, branch: str) -> bool | None:
         """Whether *branch* has a merge queue, or ``None`` if GitHub can't say."""
@@ -1088,7 +1099,7 @@ def rebase_and_resubmit(common: cli.CommonArgs) -> None:
     run(["git", "fetch", common.remote, common.target], quiet=False)
     # Rebase the current branch (don't name it) so this works even when the
     # branch is checked out in another worktree.
-    run(["git", "rebase", f"{common.remote}/{common.target}"], quiet=False)
+    run(["git", "rebase", f"{common.remote}/{common.target}"], quiet=False, retries=0)
 
     # Re-deduce the base against the *current* origin/<target>. `common.base`
     # was deduced once when autoland started (merge-base with the target at
@@ -2524,7 +2535,7 @@ def _native_stack_for(prs: list[int]) -> tuple[int | None, bool]:
         try:
             return github.create_native_stack(prs)["number"], True
         except (RuntimeError, json.JSONDecodeError, KeyError, TypeError) as e:
-            # A retried POST may have created the stack on its first attempt.
+            # The POST may have created the stack even though it looked failed.
             with contextlib.suppress(RuntimeError, json.JSONDecodeError):
                 existing = github.find_native_stack(prs[0])
             if existing is not None and _open_native_stack_prs(existing) == prs:
