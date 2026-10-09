@@ -1,8 +1,5 @@
-import sys
 import tempfile
 from pathlib import Path
-
-sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 import pytest
 
@@ -10,17 +7,10 @@ from stack_pr.cli import (
     generate_available_branch_name,
     generate_branch_name,
     get_branch_id,
-    get_gh_username,
     get_taken_branch_ids,
 )
-from stack_pr.git import git_config, is_rebase_in_progress
+from stack_pr.git import is_rebase_in_progress
 from stack_pr.shell_commands import run_shell_command
-
-
-@pytest.fixture(scope="module")
-def username() -> str:
-    git_config.set_username_override("TestBot")
-    return get_gh_username()
 
 
 @pytest.mark.parametrize(
@@ -32,9 +22,9 @@ def username() -> str:
     ],
 )
 def test_get_branch_id(
-    username: str, template: str, branch_name: str, expected: str
+    gh_username: str, template: str, branch_name: str, expected: str
 ) -> None:
-    branch_name = branch_name.format(username=username)
+    branch_name = branch_name.format(username=gh_username)
     assert get_branch_id(template, branch_name) == expected
 
 
@@ -46,16 +36,20 @@ def test_get_branch_id(
         ("$USERNAME/stack/$ID", "{username}/main/99"),
     ],
 )
-def test_get_branch_id_no_match(username: str, template: str, branch_name: str) -> None:
-    branch_name = branch_name.format(username=username)
+def test_get_branch_id_no_match(
+    gh_username: str, template: str, branch_name: str
+) -> None:
+    branch_name = branch_name.format(username=gh_username)
     assert get_branch_id(template, branch_name) is None
 
 
+@pytest.mark.usefixtures("gh_username")
 def test_generate_branch_name() -> None:
     template = "feature/$ID/description"
     assert generate_branch_name(template, 123) == "feature/123/description"
 
 
+@pytest.mark.usefixtures("gh_username")
 def test_get_taken_branch_ids() -> None:
     template = "$USERNAME/stack/$ID"
     refs = [
@@ -75,6 +69,7 @@ def test_get_taken_branch_ids() -> None:
     assert get_taken_branch_ids(refs, template) == [104, 134]
 
 
+@pytest.mark.usefixtures("gh_username")
 def test_generate_available_branch_name() -> None:
     template = "$USERNAME/stack/$ID"
     refs = [

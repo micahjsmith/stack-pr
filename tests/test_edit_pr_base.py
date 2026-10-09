@@ -1,11 +1,6 @@
-import sys
-from pathlib import Path
+from subprocess import SubprocessError
 
 import pytest
-
-sys.path.append(str(Path(__file__).parent.parent / "src"))
-
-from subprocess import SubprocessError
 
 from stack_pr.cli import (
     edit_pr_base,
@@ -15,6 +10,7 @@ from stack_pr.cli import (
     reset_remote_base_branches,
     stale_lease_branches,
 )
+from tests.helpers import FakeShell, mock_entry
 
 PR = "https://github.com/o/r/pull/42"
 
@@ -41,43 +37,34 @@ def queued_push_err(branch: str) -> bytes:
     ).encode()
 
 
-def test_edit_pr_base_success(mocker) -> None:  # noqa: ANN001
-    run = mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=0, stderr=b""),
-    )
+def _push(*refspecs: str) -> list[str]:
+    return ["git", "push", "--force-with-lease", "--atomic", "origin", *refspecs]
 
+
+def test_edit_pr_base_success(fake_shell: FakeShell) -> None:
     edit_pr_base(PR, "main", verbose=False)
 
-    run.assert_called_once()
-    assert run.call_args.args[0] == ["gh", "pr", "edit", PR, "-B", "main"]
+    assert fake_shell.commands == [["gh", "pr", "edit", PR, "-B", "main"]]
 
 
-def test_edit_pr_base_merge_queue_skips_without_retry(mocker) -> None:  # noqa: ANN001
+def test_edit_pr_base_merge_queue_skips_without_retry(
+    fake_shell: FakeShell, capsys: pytest.CaptureFixture[str]
+) -> None:
     # No extra_args -> nothing left to apply, so we just warn and move on.
-    run = mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=1, stderr=MERGE_QUEUE_ERR),
-    )
-    warn = mocker.patch("stack_pr.cli.warning")
+    fake_shell.script((1, MERGE_QUEUE_ERR))
 
     edit_pr_base(PR, "main", verbose=False)
 
-    run.assert_called_once()
-    warn.assert_called_once()
+    assert fake_shell.commands == [["gh", "pr", "edit", PR, "-B", "main"]]
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert f"Could not change the base branch of {PR}" in out
 
 
-def test_edit_pr_base_merge_queue_retries_without_base(mocker) -> None:  # noqa: ANN001
+def test_edit_pr_base_merge_queue_retries_without_base(fake_shell: FakeShell) -> None:
     # First call (with -B) hits the merge queue; the retry drops -B so the
     # title/body edits still apply.
-    run = mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        side_effect=[
-            mocker.Mock(returncode=1, stderr=MERGE_QUEUE_ERR),
-            mocker.Mock(returncode=0, stderr=b""),
-        ],
-    )
-    mocker.patch("stack_pr.cli.warning")
+    fake_shell.script((1, MERGE_QUEUE_ERR))
 
     edit_pr_base(
         PR,
@@ -87,55 +74,35 @@ def test_edit_pr_base_merge_queue_retries_without_base(mocker) -> None:  # noqa:
         input=b"body",
     )
 
-    assert run.call_count == 2
-    first, second = run.call_args_list
-    assert first.args[0] == [
-        "gh",
-        "pr",
-        "edit",
-        PR,
-        "-B",
-        "main",
-        "-t",
-        "title",
-        "-F",
-        "-",
+    assert fake_shell.commands == [
+        ["gh", "pr", "edit", PR, "-B", "main", "-t", "title", "-F", "-"],
+        # Retry omits "-B" / "main" but keeps the other edits and the piped body.
+        ["gh", "pr", "edit", PR, "-t", "title", "-F", "-"],
     ]
-    # Retry omits "-B" / "main" but keeps the other edits and the piped body.
-    assert second.args[0] == ["gh", "pr", "edit", PR, "-t", "title", "-F", "-"]
-    assert second.kwargs["input"] == b"body"
+    assert fake_shell.calls[1][1]["input"] == b"body"
 
 
-def test_edit_pr_base_other_error_raises(mocker) -> None:  # noqa: ANN001
-    mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=1, stderr=b"some other failure"),
-    )
+def test_edit_pr_base_other_error_raises(fake_shell: FakeShell) -> None:
+    fake_shell.script((1, b"some other failure"))
 
     with pytest.raises(SubprocessError):
         edit_pr_base(PR, "main", verbose=False)
 
 
-def test_reset_remote_base_branches_preserves_draft_status(mocker) -> None:  # noqa: ANN001
+def test_reset_remote_base_branches_preserves_draft_status(
+    fake_shell: FakeShell,
+) -> None:
     # Resubmitting an existing stack must reset base branches but never toggle
     # the draft/ready status of the PRs (which is owned by the user).
-    entries = []
-    for i in range(2):
-        e = mocker.Mock()
-        e.has_pr.return_value = True
-        e.pr = f"https://github.com/o/r/pull/{i}"
-        entries.append(e)
-
-    edit = mocker.patch("stack_pr.cli.edit_pr_base")
-    run = mocker.patch("stack_pr.cli.run_shell_command")
+    entries = [mock_entry(0), mock_entry(1)]
 
     reset_remote_base_branches(entries, target="main", verbose=False)
 
-    # Base branch is reset for every existing PR...
-    assert edit.call_count == 2
-    assert [c.args[0] for c in edit.call_args_list] == [e.pr for e in entries]
-    # ...but no `gh pr ready`/`--undo` (or any other shell command) is issued.
-    run.assert_not_called()
+    # The base branch is reset for every existing PR, and no `gh pr ready`
+    # (or any other command) is issued.
+    assert fake_shell.commands == [
+        ["gh", "pr", "edit", e.pr, "-B", "main"] for e in entries
+    ]
 
 
 # --- force-with-lease push ------------------------------------------------
@@ -151,46 +118,30 @@ def test_stale_lease_branches_parses_git_stderr() -> None:
     assert stale_lease_branches(stderr) == ["micah/stack/2", "micah/stack/3"]
 
 
-def test_force_push_with_lease_uses_lease_flags(mocker) -> None:  # noqa: ANN001
-    run = mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=0, stderr=b""),
-    )
-
+def test_force_push_with_lease_uses_lease_flags(fake_shell: FakeShell) -> None:
     force_push_with_lease(["a:a", "b:b"], "origin", "main", verbose=False)
 
-    run.assert_called_once()
-    assert run.call_args.args[0] == [
-        "git",
-        "push",
-        "--force-with-lease",
-        "--atomic",
-        "origin",
-        "a:a",
-        "b:b",
-    ]
+    assert fake_shell.commands == [_push("a:a", "b:b")]
 
 
-def test_force_push_with_lease_aborts_on_stale(mocker) -> None:  # noqa: ANN001
-    stderr = b" ! [rejected]        s/2 -> s/2 (stale info)\nerror: failed to push\n"
-    mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=1, stderr=stderr),
+def test_force_push_with_lease_aborts_on_stale(
+    fake_shell: FakeShell, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_shell.script(
+        (1, b" ! [rejected]        s/2 -> s/2 (stale info)\nerror: failed to push\n")
     )
-    err = mocker.patch("stack_pr.cli.error")
 
     with pytest.raises(SystemExit):
         force_push_with_lease(["s/2:s/2"], "origin", "main", verbose=False)
 
     # The abort message names the diverged branch.
-    assert "s/2" in err.call_args.args[0]
+    out = capsys.readouterr().out
+    assert "ERROR" in out
+    assert "s/2" in out
 
 
-def test_force_push_with_lease_reraises_other_errors(mocker) -> None:  # noqa: ANN001
-    mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=1, stderr=b"fatal: unrelated failure"),
-    )
+def test_force_push_with_lease_reraises_other_errors(fake_shell: FakeShell) -> None:
+    fake_shell.script((1, b"fatal: unrelated failure"))
 
     with pytest.raises(SubprocessError):
         force_push_with_lease(["a:a"], "origin", "main", verbose=False)
@@ -211,82 +162,57 @@ def test_merge_queue_declined_branches_ignores_other_protections() -> None:
     assert merge_queue_declined_branches(stderr) == []
 
 
-def test_push_branches_skips_queued_branch_and_pushes_the_rest(mocker) -> None:  # noqa: ANN001
+def test_push_branches_skips_queued_branch_and_pushes_the_rest(
+    fake_shell: FakeShell, capsys: pytest.CaptureFixture[str]
+) -> None:
     # The bottom PR of the stack is in a merge queue. GitHub declines any
     # update to its branch, and --atomic turns that into a rejection of all
     # ten branches -- so submit drops it and pushes the rest of the stack.
-    st = []
-    for i in (1, 2, 3):
-        e = mocker.Mock()
-        e.head = f"s/{i}"
-        e.pr = f"https://github.com/o/r/pull/{40 + i}"
-        e.has_pr.return_value = True
-        st.append(e)
-    run = mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        side_effect=[
-            mocker.Mock(returncode=1, stderr=queued_push_err("s/1")),
-            mocker.Mock(returncode=0, stderr=b""),
-        ],
-    )
-    warn = mocker.patch("stack_pr.cli.warning")
+    st = [mock_entry(40 + i, head=f"s/{i}") for i in (1, 2, 3)]
+    fake_shell.script((1, queued_push_err("s/1")))
 
     push_branches(st, remote="origin", target="main", verbose=False)
 
-    assert run.call_args_list[1].args[0] == [
-        "git",
-        "push",
-        "--force-with-lease",
-        "--atomic",
-        "origin",
-        "s/2:s/2",
-        "s/3:s/3",
+    assert fake_shell.commands == [
+        _push("s/1:s/1", "s/2:s/2", "s/3:s/3"),
+        _push("s/2:s/2", "s/3:s/3"),
     ]
     # The user has to know which branch was left behind, and at which PR.
-    assert "s/1 (#41)" in warn.call_args.args[0]
+    assert "s/1 (#41)" in capsys.readouterr().out
 
 
-def test_push_branches_succeeds_when_only_branch_is_queued(mocker) -> None:  # noqa: ANN001
-    e = mocker.Mock()
-    e.head = "s/1"
-    e.pr = "https://github.com/o/r/pull/41"
-    e.has_pr.return_value = True
-    run = mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=1, stderr=queued_push_err("s/1")),
-    )
-    mocker.patch("stack_pr.cli.warning")
+def test_push_branches_succeeds_when_only_branch_is_queued(
+    fake_shell: FakeShell,
+) -> None:
+    fake_shell.script((1, queued_push_err("s/1")))
 
-    push_branches([e], remote="origin", target="main", verbose=False)
+    push_branches([mock_entry(41, head="s/1")], "origin", "main", verbose=False)
 
     # Nothing left to push, so no second attempt.
-    run.assert_called_once()
+    assert fake_shell.commands == [_push("s/1:s/1")]
 
 
-def test_force_push_with_lease_aborts_on_queued_branch_by_default(mocker) -> None:  # noqa: ANN001
+def test_force_push_with_lease_aborts_on_queued_branch_by_default(
+    fake_shell: FakeShell, capsys: pytest.CaptureFixture[str]
+) -> None:
     # Landing rebases a branch and pushes it: skipping the push would leave the
     # caller believing the remote has the rebased commits, so it must abort.
-    mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=1, stderr=queued_push_err("s/1")),
-    )
-    err = mocker.patch("stack_pr.cli.error")
+    fake_shell.script((1, queued_push_err("s/1")))
 
     with pytest.raises(SystemExit):
         force_push_with_lease(["s/1:s/1"], "origin", "main", verbose=False)
 
-    assert "s/1" in err.call_args.args[0]
+    out = capsys.readouterr().out
+    assert "ERROR" in out
+    assert "s/1" in out
 
 
-def test_force_push_with_lease_raises_on_other_gh006(mocker) -> None:  # noqa: ANN001
+def test_force_push_with_lease_raises_on_other_gh006(fake_shell: FakeShell) -> None:
     stderr = (
         b"remote: error: GH006: Protected branch update failed for refs/heads/s/1.\n"
         b"remote: - Changes must be made through a pull request.\n"
     )
-    mocker.patch(
-        "stack_pr.cli.run_shell_command",
-        return_value=mocker.Mock(returncode=1, stderr=stderr),
-    )
+    fake_shell.script((1, stderr))
 
     with pytest.raises(SubprocessError):
         force_push_with_lease(["s/1:s/1"], "origin", "main", verbose=False)

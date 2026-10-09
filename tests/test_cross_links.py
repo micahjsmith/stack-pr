@@ -1,8 +1,3 @@
-import sys
-from pathlib import Path
-
-sys.path.append(str(Path(__file__).parent.parent / "src"))
-
 from stack_pr import cli
 from stack_pr.cli import (
     CROSS_LINKS_DELIMETER,
@@ -13,21 +8,11 @@ from stack_pr.cli import (
     format_stack_info,
     generate_toc,
 )
+from tests.helpers import mock_entry
 
 
-def _entry(mocker, pr_num: int):  # noqa: ANN001, ANN202
-    e = mocker.Mock()
-    e.pr = f"https://github.com/o/r/pull/{pr_num}"
-    return e
-
-
-def _commit_entry(mocker, pr_num: int, title: str, body: str):  # noqa: ANN001, ANN202
-    e = _entry(mocker, pr_num)
-    e.base = "main"
-    e.has_base.return_value = True
-    e.commit.title.return_value = title
-    e.commit.commit_msg.return_value = f"{title}\n\n{body}"
-    return e
+def _commit_entry(pr_num: int, title: str, body: str):  # noqa: ANN202
+    return mock_entry(pr_num, base="main", title=title, commit_msg=f"{title}\n\n{body}")
 
 
 def test_extract_toc_pr_ids_bottom_first() -> None:
@@ -54,7 +39,7 @@ def test_generate_toc_renders_top_first_with_arrow() -> None:
 
 def test_build_stack_pr_list_keeps_merged(mocker) -> None:  # noqa: ANN001
     # Active stack is #2, #3 (bottom-first); #1 has landed.
-    st = [_entry(mocker, 2), _entry(mocker, 3)]
+    st = [mock_entry(2), mock_entry(3)]
     body = (
         "Stacked PRs:\n"
         " * #3\n"
@@ -76,7 +61,7 @@ def test_build_stack_pr_list_keeps_merged(mocker) -> None:  # noqa: ANN001
 def test_build_stack_pr_list_drops_open_absent(mocker) -> None:  # noqa: ANN001
     # Only #3 is active. #1 merged (keep), #9 left the stack but is still open
     # (drop).
-    st = [_entry(mocker, 3)]
+    st = [mock_entry(3)]
     body = "Stacked PRs:\n * #3\n * #9\n * #1\n\n--- --- ---\nx\n"
     mocker.patch("stack_pr.cli.get_pr_body", return_value=body)
     mocker.patch(
@@ -89,7 +74,7 @@ def test_build_stack_pr_list_drops_open_absent(mocker) -> None:  # noqa: ANN001
 
 def test_build_stack_pr_list_no_history(mocker) -> None:  # noqa: ANN001
     # Fresh stack: PR bodies have no cross-links table yet.
-    st = [_entry(mocker, 1), _entry(mocker, 2)]
+    st = [mock_entry(1), mock_entry(2)]
     mocker.patch("stack_pr.cli.get_pr_body", return_value="just the commit body")
     state = mocker.patch("stack_pr.cli.get_pr_state")
 
@@ -98,7 +83,7 @@ def test_build_stack_pr_list_no_history(mocker) -> None:  # noqa: ANN001
 
 
 def test_build_stack_pr_list_keeps_closed(mocker) -> None:  # noqa: ANN001
-    st = [_entry(mocker, 2)]
+    st = [mock_entry(2)]
     body = "Stacked PRs:\n * #2\n * #1\n\n--- --- ---\nx\n"
     mocker.patch("stack_pr.cli.get_pr_body", return_value=body)
     mocker.patch(
@@ -111,7 +96,7 @@ def test_build_stack_pr_list_keeps_closed(mocker) -> None:  # noqa: ANN001
 
 def test_generate_toc_single_active_with_history(mocker) -> None:  # noqa: ANN001
     # One active PR but merged history -> table still rendered.
-    st = [_entry(mocker, 2)]
+    st = [mock_entry(2)]
     body = "Stacked PRs:\n * #2\n * #1\n\n--- --- ---\nx\n"
     mocker.patch("stack_pr.cli.get_pr_body", return_value=body)
     mocker.patch(
@@ -128,10 +113,9 @@ def _body_written(edit_mock) -> str:  # noqa: ANN001
     return edit_mock.call_args.kwargs["input"].decode()
 
 
-def test_commit_body_for_pr_drops_title_and_stack_info(mocker) -> None:  # noqa: ANN001
-    e = mocker.Mock()
+def test_commit_body_for_pr_drops_title_and_stack_info() -> None:
     trailer = format_stack_info("https://github.com/o/r/pull/1", "user/branch")
-    e.commit.commit_msg.return_value = f"The title\n\nReal body.\n\n{trailer}"
+    e = mock_entry(commit_msg=f"The title\n\nReal body.\n\n{trailer}")
     body = commit_body_for_pr(e)
     assert "The title" not in body
     assert "stack-info:" not in body
@@ -141,7 +125,7 @@ def test_commit_body_for_pr_drops_title_and_stack_info(mocker) -> None:  # noqa:
 def test_add_cross_links_single_pr_omits_title_from_body(mocker) -> None:  # noqa: ANN001
     # A single-PR stack has no TOC; the body is just the commit body, and the
     # commit title is NOT copied into the description (it's the PR title).
-    e = _commit_entry(mocker, 1, "My feature", "Line one\nLine two")
+    e = _commit_entry(1, "My feature", "Line one\nLine two")
     mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
     edit = mocker.patch("stack_pr.cli.edit_pr_base")
 
@@ -156,7 +140,7 @@ def test_add_cross_links_single_pr_omits_title_from_body(mocker) -> None:  # noq
 
 
 def test_add_cross_links_multi_pr_has_toc_but_no_title_heading(mocker) -> None:  # noqa: ANN001
-    e = _commit_entry(mocker, 1, "Bottom PR", "Body of bottom PR")
+    e = _commit_entry(1, "Bottom PR", "Body of bottom PR")
     mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1", "2"])
     edit = mocker.patch("stack_pr.cli.edit_pr_base")
 
@@ -175,7 +159,7 @@ def test_add_cross_links_keep_title_preserves_existing_pr_title(mocker) -> None:
     # On a re-submit (PR already exists, not in `created`) keep_title takes the
     # title from the existing PR (e.g. a hand-edited ticket prefix), not the
     # local commit subject.
-    e = _commit_entry(mocker, 1, "Local commit subject", "Body")
+    e = _commit_entry(1, "Local commit subject", "Body")
     mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
     mocker.patch("stack_pr.cli.get_pr_title", return_value="[ABC-123] Curated title")
     edit = mocker.patch("stack_pr.cli.edit_pr_base")
@@ -195,7 +179,7 @@ def test_add_cross_links_keep_title_preserves_existing_pr_title(mocker) -> None:
 def test_add_cross_links_keep_body_preserves_existing_on_resubmit(mocker) -> None:  # noqa: ANN001
     # On a re-submit keep_body keeps whatever is currently on the PR (below the
     # cross-links delimiter), ignoring the local commit body.
-    e = _commit_entry(mocker, 1, "Commit title", "New local commit body")
+    e = _commit_entry(1, "Commit title", "New local commit body")
     mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
     mocker.patch("stack_pr.cli.get_pr_body", return_value="Edited on GitHub")
     edit = mocker.patch("stack_pr.cli.edit_pr_base")
@@ -211,7 +195,7 @@ def test_add_cross_links_new_pr_ignores_keep_flags(mocker) -> None:  # noqa: ANN
     # A PR created in this run (in `created`) always takes its title and body
     # from the commit, even with keep_body/keep_title on: there is nothing
     # curated upstream to keep on the first submit.
-    e = _commit_entry(mocker, 1, "Commit title", "Commit body")
+    e = _commit_entry(1, "Commit title", "Commit body")
     mocker.patch("stack_pr.cli.build_stack_pr_list", return_value=["1"])
     title_spy = mocker.patch("stack_pr.cli.get_pr_title", return_value="Upstream title")
     body_spy = mocker.patch("stack_pr.cli.get_pr_body", return_value="Upstream body")
