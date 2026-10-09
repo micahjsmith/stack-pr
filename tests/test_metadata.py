@@ -11,6 +11,7 @@ from stack_pr.cli import (
     add_or_update_metadata,
     get_stack,
     init_local_branches,
+    remove_stack_info,
     set_base_branches,
     strip_metadata,
 )
@@ -104,6 +105,44 @@ def test_add_metadata_appends_the_trailer_to_every_commit(
     )
 
 
+@pytest.mark.parametrize(
+    ("msg", "expected"),
+    [
+        # An existing trailer block gains the stack-info line at its end.
+        (
+            "c\n\nbody\n\nCo-Authored-By: A <a@b.c>",
+            "c\n\nbody\n\nCo-Authored-By: A <a@b.c>\n{si}",
+        ),
+        # A title alone gets the trailer as a new paragraph.
+        ("c", "c\n\n{si}"),
+    ],
+)
+def test_add_metadata_joins_an_existing_trailer_block(
+    tmp_path: Path,
+    monkeypatch,  # noqa: ANN001
+    msg: str,
+    expected: str,
+) -> None:
+    local = init_repo(tmp_path / "repo")
+    git(local, "checkout", "-q", "-b", "feature")
+    _commit(local, msg)
+    monkeypatch.chdir(local)
+    (e,) = get_stack("main", "HEAD", verbose=False)
+    e.head = "feature"
+    e.pr = PR_URL.format(1)
+
+    add_or_update_metadata(e, needs_rebase=False, verbose=False)
+
+    assert commit_message(local, "feature") == expected.format(
+        si=stack_info(1, "feature")
+    )
+    # Stripping it again restores the original message.
+    (e,) = get_stack("main", "HEAD", verbose=False)
+    e.head = "feature"
+    sha = strip_metadata(e, needs_rebase=False, verbose=False)
+    assert commit_message(local, sha) == msg
+
+
 def test_add_metadata_leaves_a_commit_that_already_has_it(
     tmp_path: Path,
     monkeypatch,  # noqa: ANN001
@@ -176,11 +215,6 @@ def test_strip_metadata_keeps_other_messages_intact(
     assert commit_message(local, sha) == msg
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="strip_metadata removes the blank line before the stack-info line, "
-    "so a trailer after it (e.g. Co-Authored-By) is merged into the body",
-)
 def test_strip_metadata_keeps_a_following_trailer_a_trailer(
     tmp_path: Path,
     monkeypatch,  # noqa: ANN001
@@ -198,3 +232,27 @@ def test_strip_metadata_keeps_a_following_trailer_a_trailer(
     sha = strip_metadata(e, needs_rebase=False, verbose=False)
 
     assert commit_message(local, sha) == "title\n\nbody\n\nCo-Authored-By: A <a@b.c>"
+
+
+SI = stack_info(1, "b")
+
+
+@pytest.mark.parametrize(
+    ("msg", "expected"),
+    [
+        # stack-info as the only trailer.
+        (f"title\n\nbody\n\n{SI}", "title\n\nbody"),
+        # No body, only a title.
+        (f"title\n\n{SI}", "title"),
+        # Before, after, and between other trailers.
+        (f"title\n\nbody\n\n{SI}\nA: 1", "title\n\nbody\n\nA: 1"),
+        (f"title\n\nbody\n\nA: 1\n{SI}", "title\n\nbody\n\nA: 1"),
+        (f"title\n\nbody\n\nA: 1\n{SI}\nB: 2", "title\n\nbody\n\nA: 1\nB: 2"),
+        # A paragraph of its own in the middle of the message.
+        (f"title\n\nbody\n\n{SI}\n\nmore", "title\n\nbody\n\nmore"),
+        # "stack-info:" in the title is not a trailer.
+        (SI, SI),
+    ],
+)
+def test_remove_stack_info(msg: str, expected: str) -> None:
+    assert remove_stack_info(msg) == expected

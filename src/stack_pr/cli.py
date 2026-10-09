@@ -109,6 +109,8 @@ RE_RAW_COMMIT_MSG_LINE = re.compile(r"^    (?P<line>.*)$", re.MULTILINE)
 RE_STACK_INFO_LINE = re.compile(
     r"\n^stack-info: PR: (.+), branch: (.+)\n?", re.MULTILINE
 )
+# The same trailer, as one line of a commit message.
+RE_STACK_INFO_TRAILER = re.compile(r"stack-info: PR: .+, branch: .+")
 RE_PR_TOC = re.compile(
     r"^Stacked PRs:\r?\n(^ \* (__->__)?#\d+\r?\n)*\r?\n", re.MULTILINE
 )
@@ -676,6 +678,50 @@ def format_stack_info(pr: str, branch: str) -> str:
     return f"stack-info: PR: {pr}, branch: {branch}"
 
 
+def append_stack_info(msg: str, pr: str, branch: str) -> str:
+    """Add the stack-info trailer to a commit message.
+
+    The trailer joins the message's existing trailer block (e.g. a
+    ``Co-Authored-By`` line) rather than starting a new paragraph, which would
+    leave the earlier trailers in the body. Git decides what the trailer block
+    is, so this matches ``git interpret-trailers``.
+    """
+    return get_command_output(
+        [
+            "git",
+            "interpret-trailers",
+            "--no-divider",
+            "--where",
+            "end",
+            "--if-exists",
+            "add",
+            "--if-missing",
+            "add",
+            "--trailer",
+            format_stack_info(pr, branch),
+        ],
+        input=msg.encode(),
+    )
+
+
+def remove_stack_info(msg: str) -> str:
+    """Remove the stack-info trailer from a commit message.
+
+    Only the stack-info line itself is removed, so trailers around it stay in
+    the trailer block. The blank line before it goes too when it was the only
+    line of its paragraph.
+    """
+    lines = msg.split("\n")
+    # The first line is the title, never a trailer.
+    for i in reversed(range(1, len(lines))):
+        if i >= len(lines) or not RE_STACK_INFO_TRAILER.fullmatch(lines[i]):
+            continue
+        del lines[i]
+        if lines[i - 1] == "" and (i == len(lines) or lines[i] == ""):
+            del lines[i - 1]
+    return "\n".join(lines)
+
+
 def add_or_update_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) -> bool:
     if needs_rebase:
         if not e.has_base() or not e.has_head():
@@ -706,7 +752,7 @@ def add_or_update_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) 
         return needs_rebase
 
     # Add the stack info metadata to the commit message
-    commit_msg += "\n\n" + format_stack_info(e.pr, e.head)
+    commit_msg = append_stack_info(commit_msg, e.pr, e.head)
     run_shell_command(
         ["git", "commit", "--amend", "-F", "-"],
         input=commit_msg.encode(),
@@ -983,9 +1029,8 @@ def commit_body_for_pr(e: StackEntry) -> str:
     is redundant) and the ``stack-info`` trailer. This is the body
     ``add_cross_links`` writes unless it is asked to keep the existing one.
     """
-    body = e.commit.commit_msg()
-    body = "\n".join(body.splitlines()[1:])
-    return RE_STACK_INFO_LINE.sub("", body)
+    body = remove_stack_info(e.commit.commit_msg())
+    return "\n".join(body.splitlines()[1:])
 
 
 def create_pr(e: StackEntry, *, is_draft: bool, reviewer: str = "") -> None:
@@ -1576,7 +1621,7 @@ def land_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None:
 
     # Form the commit message: it should contain the original commit message
     # and nothing else.
-    pr_body = RE_STACK_INFO_LINE.sub("", e.commit.commit_msg())
+    pr_body = remove_stack_info(e.commit.commit_msg())
 
     # Since title is passed separately, we need to strip the first line from the
     # body:
@@ -1709,7 +1754,7 @@ def strip_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) -> str:
     """
     m = e.commit.commit_msg()
 
-    m = RE_STACK_INFO_LINE.sub("", m)
+    m = remove_stack_info(m)
     if needs_rebase:
         if not e.has_base() or not e.has_head():
             error("Stack entry has no base or head branch")
@@ -1856,7 +1901,7 @@ def adopt_commit(
     is replayed onto the rewritten commit.
     """
     old_sha = e.commit.commit_id()
-    new_msg = e.commit.commit_msg() + "\n\n" + format_stack_info(pr, branch)
+    new_msg = append_stack_info(e.commit.commit_msg(), pr, branch)
 
     run_shell_command(["git", "checkout", old_sha], quiet=not verbose)
     run_shell_command(
