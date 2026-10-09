@@ -1,7 +1,4 @@
-import sys
 from pathlib import Path
-
-sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 import pytest
 
@@ -12,6 +9,7 @@ from stack_pr.cli import (
     get_adopt_pr_info,
     select_adopt_entry,
 )
+from tests.helpers import common_args, git, init_repo, mock_entry
 
 
 def test_format_stack_info() -> None:
@@ -56,54 +54,25 @@ def test_get_adopt_pr_info_with_arg(mocker) -> None:  # noqa: ANN001
     assert "9" in cmd
 
 
-def _fake_entry(mocker, *, commit_msg: str, commit_id: str = "abc123"):  # noqa: ANN001, ANN202
-    commit = mocker.Mock()
-    commit.commit_msg.return_value = commit_msg
-    commit.commit_id.return_value = commit_id
-    commit.tree.return_value = "tree-sha"
-    entry = mocker.Mock()
-    entry.commit = commit
-    entry.pprint.return_value = "entry"
-    return entry
-
-
-def _fake_stack(mocker, *, commit_msg: str):  # noqa: ANN001, ANN202
-    return [_fake_entry(mocker, commit_msg=commit_msg)]
-
-
-def _common_args() -> cli.CommonArgs:
-    return cli.CommonArgs(
-        base="main",
-        head="HEAD",
-        remote="origin",
-        target="main",
-        hyperlinks=False,
-        verbose=False,
-        branch_name_template="$USERNAME/stack/$ID",
-        show_tips=False,
-        land_disabled=False,
-    )
-
-
-def test_select_adopt_entry_defaults_to_bottom(mocker) -> None:  # noqa: ANN001
+def test_select_adopt_entry_defaults_to_bottom() -> None:
     st = [
-        _fake_entry(mocker, commit_msg="bottom", commit_id="aaa"),
-        _fake_entry(mocker, commit_msg="top", commit_id="bbb"),
+        mock_entry(commit_msg="bottom", commit_id="aaa"),
+        mock_entry(commit_msg="top", commit_id="bbb"),
     ]
     assert select_adopt_entry(st, None) is st[0]
 
 
 def test_select_adopt_entry_matches_commit(mocker) -> None:  # noqa: ANN001
     st = [
-        _fake_entry(mocker, commit_msg="bottom", commit_id="aaa"),
-        _fake_entry(mocker, commit_msg="top", commit_id="bbb"),
+        mock_entry(commit_msg="bottom", commit_id="aaa"),
+        mock_entry(commit_msg="top", commit_id="bbb"),
     ]
     mocker.patch("stack_pr.cli.get_command_output", return_value="bbb")
     assert select_adopt_entry(st, "HEAD") is st[1]
 
 
 def test_select_adopt_entry_commit_not_in_stack(mocker) -> None:  # noqa: ANN001
-    st = [_fake_entry(mocker, commit_msg="bottom", commit_id="aaa")]
+    st = [mock_entry(commit_msg="bottom", commit_id="aaa")]
     mocker.patch("stack_pr.cli.get_command_output", return_value="zzz")
     with pytest.raises(SystemExit):
         select_adopt_entry(st, "deadbeef")
@@ -111,18 +80,16 @@ def test_select_adopt_entry_commit_not_in_stack(mocker) -> None:  # noqa: ANN001
 
 def test_command_adopt_refuses_already_managed(mocker) -> None:  # noqa: ANN001
     msg = "Title\n\nstack-info: PR: https://x/pull/1, branch: feat\n"
-    mocker.patch(
-        "stack_pr.cli.get_stack", return_value=_fake_stack(mocker, commit_msg=msg)
-    )
+    mocker.patch("stack_pr.cli.get_stack", return_value=[mock_entry(commit_msg=msg)])
 
     with pytest.raises(SystemExit):
-        cli.command_adopt(_common_args(), None, None)
+        cli.command_adopt(common_args(), None, None)
 
 
 def test_command_adopt_refuses_non_open_pr(mocker) -> None:  # noqa: ANN001
     mocker.patch(
         "stack_pr.cli.get_stack",
-        return_value=_fake_stack(mocker, commit_msg="Plain title\n\nbody"),
+        return_value=[mock_entry(commit_msg="Plain title\n\nbody")],
     )
     mocker.patch(
         "stack_pr.cli.get_adopt_pr_info",
@@ -130,34 +97,33 @@ def test_command_adopt_refuses_non_open_pr(mocker) -> None:  # noqa: ANN001
     )
 
     with pytest.raises(SystemExit):
-        cli.command_adopt(_common_args(), "5", None)
+        cli.command_adopt(common_args(), "5", None)
 
 
-def test_command_adopt_embeds_metadata(mocker) -> None:  # noqa: ANN001
-    stack = _fake_stack(mocker, commit_msg="Plain title\n\nbody")
-    # First call returns the unmanaged stack; second call (after adoption) is
-    # only used to print, so the same stack is fine.
-    mocker.patch("stack_pr.cli.get_stack", return_value=stack)
+@pytest.mark.usefixtures("gh_username")
+def test_command_adopt_embeds_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,  # noqa: ANN001
+) -> None:
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    repo = init_repo(tmp_path / "repo")
+    git(repo, "remote", "add", "origin", str(origin))
+    git(repo, "push", "-q", "origin", "main")
+    git(repo, "checkout", "-q", "-b", "feat")
+    (repo / "file.txt").write_text("feature\n")
+    git(repo, "commit", "-q", "-am", "Plain title\n\nbody")
+    monkeypatch.chdir(repo)
+    url = "https://github.com/o/r/pull/5"
     mocker.patch(
         "stack_pr.cli.get_adopt_pr_info",
-        return_value={
-            "state": "OPEN",
-            "url": "https://github.com/o/r/pull/5",
-            "headRefName": "feat",
-            "headRefOid": "deadbeef",
-        },
+        return_value={"state": "OPEN", "url": url, "headRefName": "feat"},
     )
-    mocker.patch("stack_pr.cli.get_current_branch_name", return_value="feat")
-    mocker.patch("stack_pr.cli.warn_if_content_differs")
-    mocker.patch("stack_pr.cli.set_head_branches")
-    mocker.patch("stack_pr.cli.set_base_branches")
-    mocker.patch("stack_pr.cli.print_stack")
-    adopt_spy = mocker.patch("stack_pr.cli.adopt_commit")
-    mocker.patch("stack_pr.cli.run_shell_command")
 
-    cli.command_adopt(_common_args(), "5", None)
+    cli.command_adopt(common_args(), "5", None)
 
-    adopt_spy.assert_called_once()
-    args = adopt_spy.call_args.args
-    assert args[1] == "https://github.com/o/r/pull/5"  # pr url
-    assert args[2] == "feat"  # branch == PR head ref
+    # The commit now carries the PR's metadata, pointing at the PR's head ref.
+    msg = git(repo, "log", "-1", "--format=%B").strip()
+    assert msg == "Plain title\n\nbody\n\n" + format_stack_info(url, "feat")
+    assert git(repo, "symbolic-ref", "--short", "HEAD").strip() == "feat"

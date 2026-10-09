@@ -7,8 +7,7 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
-
-sys.path.append(str(Path(__file__).parent.parent / "src"))
+from unittest.mock import Mock
 
 import pytest
 
@@ -46,7 +45,7 @@ from stack_pr.autoland import (
     parse_plan,
     plan_from_file,
 )
-from stack_pr.cli import CommonArgs
+from tests.helpers import common_args, git, init_repo
 
 
 def _args(**overrides) -> argparse.Namespace:  # noqa: ANN003
@@ -67,24 +66,34 @@ def _args(**overrides) -> argparse.Namespace:  # noqa: ANN003
     return argparse.Namespace(**base)
 
 
-def _common() -> CommonArgs:
-    return CommonArgs(
-        base="main",
-        head="HEAD",
-        remote="origin",
-        target="main",
-        hyperlinks=False,
-        verbose=False,
-        branch_name_template="$USERNAME/stack/$ID",
-        show_tips=False,
-        land_disabled=False,
+def _parsed_opts(**overrides) -> AutolandOptions:  # noqa: ANN003
+    """Options as parsed from an empty config and the given CLI flags."""
+    return AutolandOptions.from_config_and_args(
+        configparser.ConfigParser(), _args(**overrides)
     )
 
 
 def _opts(**overrides) -> AutolandOptions:  # noqa: ANN003
-    return AutolandOptions.from_config_and_args(
-        configparser.ConfigParser(), _args(**overrides)
-    )
+    """Options built directly, with every wait and retry turned off."""
+    base = {
+        "merge_queue": True,
+        "required_checks": [],
+        "poll_interval": 0,
+        "max_check_retries": 0,
+        "max_queue_retries": 0,
+        "merge_timeout": 0,
+        "workflow_timeout": 3600,
+        "default_workflow": None,
+        "count": None,
+        "dry_run": False,
+        "branch": None,
+        "interactive": False,
+        "resume": False,
+        "state_file": None,
+        "always_cleanup": False,
+    }
+    base.update(overrides)
+    return AutolandOptions(**base)
 
 
 # --- options -------------------------------------------------------------
@@ -129,7 +138,7 @@ def test_default_workflow_absent_is_none() -> None:
 def test_run_autoland_requires_merge_queue() -> None:
     cfg = configparser.ConfigParser()  # no [autoland] -> merge_queue False
     with pytest.raises(NotImplementedError):
-        autoland.run_autoland(_common(), _args(), cfg)
+        autoland.run_autoland(common_args(), _args(), cfg)
 
 
 # --- check evaluation (pure: takes the check list) ------------------------
@@ -220,28 +229,6 @@ def test_poll_merge_lookup_failure_is_not_booted(mocker) -> None:  # noqa: ANN00
 # --- workflow checkpoint SHA ---------------------------------------------
 
 
-def _opts(**overrides) -> AutolandOptions:  # noqa: ANN003
-    base = {
-        "merge_queue": True,
-        "required_checks": [],
-        "poll_interval": 0,
-        "max_check_retries": 0,
-        "max_queue_retries": 0,
-        "merge_timeout": 0,
-        "workflow_timeout": 3600,
-        "default_workflow": None,
-        "count": None,
-        "dry_run": False,
-        "branch": None,
-        "interactive": False,
-        "resume": False,
-        "state_file": None,
-        "always_cleanup": False,
-    }
-    base.update(overrides)
-    return AutolandOptions(**base)
-
-
 def test_merge_commit_parses_oid(mocker) -> None:  # noqa: ANN001
     mocker.patch.object(
         autoland, "gh_json", return_value={"mergeCommit": {"oid": "deadbeef"}}
@@ -260,7 +247,7 @@ def test_refresh_last_landed_sha_prefers_merge_commit(mocker) -> None:  # noqa: 
     mocker.patch.object(autoland, "run")  # git fetch is a no-op
     mocker.patch.object(autoland.github, "merge_commit", return_value="mergesha")
     ctx = LandingContext(last_landed_sha="")
-    autoland._refresh_last_landed_sha(ctx, _common(), pr_number=42)  # noqa: SLF001
+    autoland._refresh_last_landed_sha(ctx, common_args(), pr_number=42)  # noqa: SLF001
     assert ctx.last_landed_sha == "mergesha"
 
 
@@ -274,7 +261,7 @@ def test_refresh_last_landed_sha_falls_back_to_head(mocker) -> None:  # noqa: AN
     )
     mocker.patch.object(autoland.github, "merge_commit", return_value=None)
     ctx = LandingContext(last_landed_sha="")
-    autoland._refresh_last_landed_sha(ctx, _common(), pr_number=42)  # noqa: SLF001
+    autoland._refresh_last_landed_sha(ctx, common_args(), pr_number=42)  # noqa: SLF001
     assert ctx.last_landed_sha == "headsha"
 
 
@@ -290,7 +277,7 @@ def test_wait_for_workflow_accepts_run_on_merge_commit(mocker) -> None:  # noqa:
     )
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
+    assert autoland.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
     assert step.state == "succeeded"
 
 
@@ -321,7 +308,7 @@ def test_wait_for_workflow_fetches_when_run_sha_is_unknown_locally(mocker) -> No
     contains = mocker.patch.object(autoland.github, "contains")
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
+    assert autoland.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
     assert step.state == "succeeded"
     assert ["git", "fetch", "origin", "main"] in calls
     contains.assert_not_called()  # the fetch answered it; no API call needed
@@ -345,7 +332,7 @@ def test_wait_for_workflow_falls_back_to_github_compare(mocker) -> None:  # noqa
     contains = mocker.patch.object(autoland.github, "contains", return_value=True)
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
+    assert autoland.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
     contains.assert_called_once_with("mergesha", "queuesha")
 
 
@@ -366,7 +353,9 @@ def test_wait_for_workflow_keeps_waiting_when_ancestry_unknown(mocker) -> None: 
     mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert not autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
+    assert not autoland.wait_for_workflow(
+        step, opts=_opts(), common=common_args(), ctx=ctx
+    )
     assert step.state != "succeeded"
 
 
@@ -411,10 +400,15 @@ def test_ancestry_caches_verdicts(mocker) -> None:  # noqa: ANN001
         "run",
         return_value=argparse.Namespace(stdout="", returncode=128),
     )
-    ancestry = autoland._Ancestry(_common())  # noqa: SLF001
+    ancestry = autoland._Ancestry(common_args())  # noqa: SLF001
     assert ancestry.contains("landedsha", "runsha1") is False
     assert ancestry.contains("landedsha", "runsha1") is False
-    contains.assert_called_once()
+    assert ancestry.contains("landedsha", "runsha2") is False
+    # One GitHub request per distinct pair, however often it is asked about.
+    assert [c.args for c in contains.call_args_list] == [
+        ("landedsha", "runsha1"),
+        ("landedsha", "runsha2"),
+    ]
 
 
 def test_wait_for_workflow_ignores_failed_and_incomplete(mocker) -> None:  # noqa: ANN001
@@ -434,7 +428,9 @@ def test_wait_for_workflow_ignores_failed_and_incomplete(mocker) -> None:  # noq
     mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert not autoland.wait_for_workflow(step, opts=_opts(), common=_common(), ctx=ctx)
+    assert not autoland.wait_for_workflow(
+        step, opts=_opts(), common=common_args(), ctx=ctx
+    )
 
 
 # --- plan parsing --------------------------------------------------------
@@ -718,15 +714,15 @@ def test_plan_from_file_parses_hand_written_plan(tmp_path) -> None:  # noqa: ANN
     assert steps[2].condition == "QA sign-off complete"
 
 
-def test_plan_from_file_missing_file_exits(tmp_path, mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console")
+@pytest.mark.usefixtures("autoland_console")
+def test_plan_from_file_missing_file_exits(tmp_path) -> None:  # noqa: ANN001
     with pytest.raises(SystemExit) as exc:
         plan_from_file(tmp_path / "nope.txt", _stack(1))
     assert exc.value.code == 1
 
 
-def test_plan_from_file_invalid_content_exits(tmp_path, mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console")
+@pytest.mark.usefixtures("autoland_console")
+def test_plan_from_file_invalid_content_exits(tmp_path) -> None:  # noqa: ANN001
     path = tmp_path / "plan.txt"
     path.write_text("frobnicate\n")
     with pytest.raises(SystemExit) as exc:
@@ -763,20 +759,20 @@ def _merge_queue_cfg() -> configparser.ConfigParser:
     return cfg
 
 
-def test_run_autoland_rejects_plan_file_with_count(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console")
+@pytest.mark.usefixtures("autoland_console")
+def test_run_autoland_rejects_plan_file_with_count() -> None:
     with pytest.raises(SystemExit) as exc:
         autoland.run_autoland(
-            _common(), _args(plan_file="plan.txt", count=2), _merge_queue_cfg()
+            common_args(), _args(plan_file="plan.txt", count=2), _merge_queue_cfg()
         )
     assert exc.value.code == 1
 
 
-def test_run_autoland_rejects_plan_file_with_resume(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console")
+@pytest.mark.usefixtures("autoland_console")
+def test_run_autoland_rejects_plan_file_with_resume() -> None:
     with pytest.raises(SystemExit) as exc:
         autoland.run_autoland(
-            _common(), _args(plan_file="plan.txt", resume=True), _merge_queue_cfg()
+            common_args(), _args(plan_file="plan.txt", resume=True), _merge_queue_cfg()
         )
     assert exc.value.code == 1
 
@@ -1063,8 +1059,8 @@ def test_next_steps_lines_empty_for_final_step() -> None:
 # --- executing a partially-landed plan -----------------------------------
 
 
+@pytest.mark.usefixtures("autoland_console")
 def test_execute_plan_skips_landed_prefix_and_targets_last_landed_sha(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console")
     refresh = mocker.patch("stack_pr.autoland._refresh_last_landed_sha")
     wait_for_workflow = mocker.patch(
         "stack_pr.autoland.wait_for_workflow", return_value=True
@@ -1082,22 +1078,22 @@ def test_execute_plan_skips_landed_prefix_and_targets_last_landed_sha(mocker) ->
     )
     mocker.patch.object(checkpointer, "save")
 
-    assert autoland.execute_plan(ctx, _common(), _opts(), checkpointer) is True
+    assert autoland.execute_plan(ctx, common_args(), _opts(), checkpointer) is True
 
     # Only the trailing workflow runs; the skipped one and the confirmation
     # (which would otherwise block on stdin) are passed over.
-    wait_for_workflow.assert_called_once()
+    (waited_on,) = [c.args[0] for c in wait_for_workflow.call_args_list]
+    assert waited_on is plan[-1]
     # The trailing workflow waits for #102's code: only the last PR of the
     # landed prefix is looked up, not every PR in it.
     pinned = [c.args[2] for c in refresh.call_args_list if len(c.args) > 2]
     assert pinned == [102]
 
 
-def test_confirm_step_banner_is_a_single_line(mocker) -> None:  # noqa: ANN001
+def test_confirm_step_banner_is_a_single_line(mocker, autoland_console) -> None:  # noqa: ANN001
     # Regression: the banner was once built as two list elements, so the join
     # split "Step 1/1: Manual confirmation required" across two lines.
-    console = mocker.patch("stack_pr.autoland.console")
-    console.input.return_value = "y"
+    autoland_console.input.return_value = "y"
     mocker.patch("stack_pr.autoland._refresh_last_landed_sha")
 
     ctx = LandingContext(stack=_pinned_stack([101]), plan=[ConfirmStep(condition="QA")])
@@ -1106,14 +1102,16 @@ def test_confirm_step_banner_is_a_single_line(mocker) -> None:  # noqa: ANN001
     )
     mocker.patch.object(checkpointer, "save")
 
-    assert autoland.execute_plan(ctx, _common(), _opts(), checkpointer) is True
+    assert autoland.execute_plan(ctx, common_args(), _opts(), checkpointer) is True
 
-    printed = "\n".join(str(c.args[0]) for c in console.print.call_args_list if c.args)
+    printed = "\n".join(
+        str(c.args[0]) for c in autoland_console.print.call_args_list if c.args
+    )
     assert "Step 1/1: Manual confirmation required" in printed
 
 
+@pytest.mark.usefixtures("autoland_console")
 def test_execute_plan_lands_a_pinned_step_that_is_still_open(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console")
     mocker.patch("stack_pr.autoland._refresh_last_landed_sha")
     approval = mocker.patch("stack_pr.autoland.wait_for_approval", return_value=True)
     checks = mocker.patch("stack_pr.autoland.wait_for_checks", return_value=True)
@@ -1127,7 +1125,7 @@ def test_execute_plan_lands_a_pinned_step_that_is_still_open(mocker) -> None:  #
     )
     mocker.patch.object(checkpointer, "save")
 
-    assert autoland.execute_plan(ctx, _common(), _opts(), checkpointer) is True
+    assert autoland.execute_plan(ctx, common_args(), _opts(), checkpointer) is True
 
     for mock in (approval, checks, enqueue):
         assert mock.call_args.args[0] is stack[0]
@@ -1195,16 +1193,16 @@ def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
 # --- rebase + resubmit ---------------------------------------------------
 
 
+@pytest.mark.usefixtures("autoland_console")
 def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     # After rebasing onto an advanced target, the base cached at autoland start
     # is stale; resubmit must re-deduce it (else it sweeps others' commits into
     # the stack). Verify the stale base is cleared before deduce_base and that
     # command_submit receives the freshly-deduced base, not the stale one.
-    stale = dataclasses.replace(_common(), base="STALE_MERGE_BASE")
+    stale = dataclasses.replace(common_args(), base="STALE_MERGE_BASE")
     fresh = dataclasses.replace(stale, base="FRESH_ORIGIN_MASTER")
 
     mocker.patch("stack_pr.autoland.run")  # git fetch / rebase
-    mocker.patch("stack_pr.autoland.console")
     deduce = mocker.patch("stack_pr.autoland.cli.deduce_base", return_value=fresh)
     submit = mocker.patch("stack_pr.autoland.cli.command_submit")
 
@@ -1216,16 +1214,7 @@ def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     assert submit.call_args.args[0].base == "FRESH_ORIGIN_MASTER"
 
 
-def _git_out(cwd: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args],  # noqa: S607
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-
+@pytest.mark.usefixtures("autoland_console")
 def test_rebase_and_resubmit_aborts_conflicted_rebase(
     tmp_path,  # noqa: ANN001
     monkeypatch,  # noqa: ANN001
@@ -1236,45 +1225,39 @@ def test_rebase_and_resubmit_aborts_conflicted_rebase(
     # rather than leaving the checkout stuck mid-rebase.
     origin = tmp_path / "origin.git"
     work = tmp_path / "work"
-    _git_out(tmp_path, "init", "--bare", "-b", "main", str(origin))
-    _git_out(tmp_path, "init", "-b", "main", str(work))
-    _git_out(work, "config", "user.name", "Test")
-    _git_out(work, "config", "user.email", "test@example.com")
-    _git_out(work, "config", "commit.gpgsign", "false")
-    _git_out(work, "remote", "add", "origin", str(origin))
-    (work / "file.txt").write_text("base\n")
-    _git_out(work, "add", "file.txt")
-    _git_out(work, "commit", "-m", "base")
-    _git_out(work, "push", "origin", "main")
+    git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    init_repo(work)
+    git(work, "remote", "add", "origin", str(origin))
+    git(work, "push", "origin", "main")
 
-    _git_out(work, "checkout", "-b", "feature")
+    git(work, "checkout", "-b", "feature")
     (work / "file.txt").write_text("feature\n")
-    _git_out(work, "commit", "-am", "feature change")
-    feature_sha = _git_out(work, "rev-parse", "HEAD")
+    git(work, "commit", "-am", "feature change")
+    feature_sha = git(work, "rev-parse", "HEAD").strip()
 
-    _git_out(work, "checkout", "main")
+    git(work, "checkout", "main")
     (work / "file.txt").write_text("target\n")
-    _git_out(work, "commit", "-am", "conflicting target change")
-    _git_out(work, "push", "origin", "main")
-    _git_out(work, "checkout", "feature")
+    git(work, "commit", "-am", "conflicting target change")
+    git(work, "push", "origin", "main")
+    git(work, "checkout", "feature")
 
     monkeypatch.chdir(work)
-    mocker.patch("stack_pr.autoland.console")
     submit = mocker.patch("stack_pr.autoland.cli.command_submit")
 
     with pytest.raises(RuntimeError, match="rebase"):
-        autoland.rebase_and_resubmit(_common())
+        autoland.rebase_and_resubmit(common_args())
 
     submit.assert_not_called()
     for state_dir in ("rebase-merge", "rebase-apply"):
         assert not (
-            work / _git_out(work, "rev-parse", "--git-path", state_dir)
+            work / git(work, "rev-parse", "--git-path", state_dir).strip()
         ).exists()
-    assert _git_out(work, "status", "--porcelain") == ""
-    assert _git_out(work, "symbolic-ref", "--short", "HEAD") == "feature"
-    assert _git_out(work, "rev-parse", "HEAD") == feature_sha
+    assert git(work, "status", "--porcelain") == ""
+    assert git(work, "symbolic-ref", "--short", "HEAD").strip() == "feature"
+    assert git(work, "rev-parse", "HEAD").strip() == feature_sha
 
 
+@pytest.mark.usefixtures("autoland_console")
 def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
     # With --branch, autoland lands in a temporary worktree whose HEAD is the
     # target branch. The base must be deduced *after* that worktree exists,
@@ -1282,12 +1265,10 @@ def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
     # branch) and yields a commit that isn't an ancestor of the stack, tripping
     # the "not an ancestor of HEAD" error. Verify the ordering and that
     # discover_stack receives the freshly-deduced base.
-    stale = dataclasses.replace(_common(), base="STALE_FROM_PRIMARY_HEAD")
+    stale = dataclasses.replace(common_args(), base="STALE_FROM_PRIMARY_HEAD")
     fresh = dataclasses.replace(stale, base="FRESH_FROM_WORKTREE_HEAD")
 
     calls: list[str] = []
-
-    mocker.patch("stack_pr.autoland.console")
     mocker.patch("stack_pr.autoland.AutolandLock")
 
     worktree = mocker.Mock()
@@ -1320,44 +1301,21 @@ def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
     assert seen_base == ["FRESH_FROM_WORKTREE_HEAD"]
 
 
-def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],  # noqa: S607
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-
-
+@pytest.mark.usefixtures("autoland_console")
 def test_worktree_is_removed_when_autoland_exits_before_landing(
     tmp_path,  # noqa: ANN001
     mocker,  # noqa: ANN001
     monkeypatch,  # noqa: ANN001
 ) -> None:
-    mocker.patch("stack_pr.autoland.console")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q", "-b", "main")
-    _git(
-        repo,
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@t",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "init",
-    )
+    repo = init_repo(tmp_path / "repo")
     # A branch with no commits on top of main has no stack to land.
-    _git(repo, "branch", "feature")
+    git(repo, "branch", "feature")
     monkeypatch.chdir(repo)
     mkdtemp = mocker.spy(autoland.tempfile, "mkdtemp")
 
     with pytest.raises(SystemExit) as exc:
         autoland.run_autoland(
-            _common(),
+            common_args(),
             _args(branch="feature", state_file=tmp_path / "state.json"),
             _merge_queue_cfg(),
         )
@@ -1365,7 +1323,7 @@ def test_worktree_is_removed_when_autoland_exits_before_landing(
     assert exc.value.code == 1
     assert mkdtemp.call_count == 1
     assert not Path(mkdtemp.spy_return).exists()
-    worktrees = _git(repo, "worktree", "list", "--porcelain")
+    worktrees = git(repo, "worktree", "list", "--porcelain")
     assert worktrees.count("worktree ") == 1
     assert Path.cwd().resolve() == repo.resolve()
 
@@ -1424,15 +1382,15 @@ def test_lock_release_is_idempotent(tmp_path) -> None:  # noqa: ANN001
     ("answer", "choice"),
     [("", "replan"), ("r", "replan"), ("R", "replan"), ("o", "overwrite"), ("n", None)],
 )
-def test_ask_replan_or_overwrite(tmp_path, mocker, answer, choice) -> None:  # noqa: ANN001
-    console = mocker.patch("stack_pr.autoland.console")
-    console.input.return_value = answer
+def test_ask_replan_or_overwrite(tmp_path, autoland_console, answer, choice) -> None:  # noqa: ANN001
+    autoland_console.input.return_value = answer
     assert _ask_replan_or_overwrite(tmp_path / "state.json") == choice
 
 
-def test_ask_replan_or_overwrite_aborts_without_a_terminal(tmp_path, mocker) -> None:  # noqa: ANN001
-    console = mocker.patch("stack_pr.autoland.console")
-    console.input.side_effect = EOFError
+def test_ask_replan_or_overwrite_aborts_without_a_terminal(
+    tmp_path: Path, autoland_console: Mock
+) -> None:
+    autoland_console.input.side_effect = EOFError
     assert _ask_replan_or_overwrite(tmp_path / "state.json") is None
 
 
@@ -1451,7 +1409,7 @@ def plain_output(mocker, monkeypatch, tmp_path):  # noqa: ANN001, ANN201
 def _status(**overrides) -> None:  # noqa: ANN003
     # No [autoland] config: --status must work even without the merge queue.
     autoland.run_autoland(
-        _common(), _args(status=True, **overrides), configparser.ConfigParser()
+        common_args(), _args(status=True, **overrides), configparser.ConfigParser()
     )
 
 
@@ -1595,12 +1553,12 @@ def test_status_json_reports_an_unreadable_state_file_on_stderr(
     assert "Failed to load state file" in captured.err
 
 
-def test_output_requires_status(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console")
+@pytest.mark.usefixtures("autoland_console")
+def test_output_requires_status() -> None:
     cfg = configparser.ConfigParser()
     cfg["autoland"] = {"merge_queue": "true"}
     with pytest.raises(SystemExit):
-        autoland.run_autoland(_common(), _args(output="json"), cfg)
+        autoland.run_autoland(common_args(), _args(output="json"), cfg)
 
 
 # --- replanning ------------------------------------------------------------
@@ -1766,7 +1724,7 @@ def test_replan_rereads_the_runs_plan_file_and_keeps_progress(
     _write_checkpoint(sf, plan_file)
     execute = _patch_replan_io(mocker, answer="y")
 
-    _replan(_common(), _opts(), sf)
+    _replan(common_args(), _opts(), sf)
 
     ctx, _common_args, _o, checkpointer = execute.call_args.args
     assert _pending(ctx.plan) == ["c docs updated"]
@@ -1781,7 +1739,7 @@ def test_replan_declined_leaves_the_checkpoint_alone(tmp_path, mocker) -> None: 
     before = sf.read_text()
     execute = _patch_replan_io(mocker, answer="n")
 
-    _replan(_common(), _opts(), sf)
+    _replan(common_args(), _opts(), sf)
 
     execute.assert_not_called()
     assert sf.read_text() == before
@@ -1793,29 +1751,31 @@ def test_replan_dry_run_previews_without_running(tmp_path, mocker) -> None:  # n
     before = sf.read_text()
     execute = _patch_replan_io(mocker, answer="y")
 
-    _replan(_common(), _opts(dry_run=True), sf)
+    _replan(common_args(), _opts(dry_run=True), sf)
 
     execute.assert_not_called()
     assert sf.read_text() == before
 
 
-def test_replan_without_a_checkpoint_exits(tmp_path, mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console")
+@pytest.mark.usefixtures("autoland_console")
+def test_replan_without_a_checkpoint_exits(tmp_path) -> None:  # noqa: ANN001
     cfg = configparser.ConfigParser()
     cfg["autoland"] = {"merge_queue": "true"}
     with pytest.raises(SystemExit):
         autoland.run_autoland(
-            _common(), _args(replan=True, state_file=tmp_path / "nope.json"), cfg
+            common_args(), _args(replan=True, state_file=tmp_path / "nope.json"), cfg
         )
 
 
 # --- taking over a running autoland -----------------------------------------
 
 _HOLDER = """
-import sys, time
-sys.path.insert(0, {src!r})
+import signal, time
 from pathlib import Path
 from stack_pr.autoland import AutolandLock
+# A shell runs background jobs with SIGINT ignored, and Python keeps an
+# inherited SIG_IGN; restore Ctrl+C so the takeover's SIGINT stops this holder.
+signal.signal(signal.SIGINT, signal.default_int_handler)
 lock = AutolandLock(Path({path!r}))
 assert lock.acquire()
 print("locked", flush=True)
@@ -1827,9 +1787,8 @@ finally:
 
 
 def _spawn_holder(path: Path) -> subprocess.Popen:
-    src = str(Path(__file__).parent.parent / "src")
     proc = subprocess.Popen(
-        [sys.executable, "-c", _HOLDER.format(src=src, path=str(path))],
+        [sys.executable, "-c", _HOLDER.format(path=str(path))],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -1839,8 +1798,8 @@ def _spawn_holder(path: Path) -> subprocess.Popen:
     return proc
 
 
-def test_stop_running_autoland_takes_over_the_lock(tmp_path, mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console").input.return_value = "y"
+def test_stop_running_autoland_takes_over_the_lock(tmp_path, autoland_console) -> None:  # noqa: ANN001
+    autoland_console.input.return_value = "y"
     path = tmp_path / "state.json.lock"
     holder = _spawn_holder(path)
     lock = AutolandLock(path)
@@ -1854,8 +1813,10 @@ def test_stop_running_autoland_takes_over_the_lock(tmp_path, mocker) -> None:  #
         holder.kill()
 
 
-def test_stop_running_autoland_declined_leaves_it_running(tmp_path, mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.console").input.return_value = "n"
+def test_stop_running_autoland_declined_leaves_it_running(
+    tmp_path: Path, autoland_console: Mock
+) -> None:
+    autoland_console.input.return_value = "n"
     path = tmp_path / "state.json.lock"
     holder = _spawn_holder(path)
     try:
@@ -1879,12 +1840,12 @@ def test_stop_running_autoland_declined_leaves_it_running(tmp_path, mocker) -> N
         ("CHANGES_REQUESTED", False),
     ],
 )
+@pytest.mark.usefixtures("autoland_console")
 def test_wait_for_approval_by_review_decision(
     mocker,  # noqa: ANN001
     decision: str,
     approved: bool,
 ) -> None:
-    mocker.patch("stack_pr.autoland.console")
     mocker.patch.object(autoland.github, "pr_state", return_value="OPEN")
     mocker.patch.object(autoland.github, "review_decision", return_value=decision)
     ctx = LandingContext()
@@ -1902,7 +1863,7 @@ def test_wait_for_approval_by_review_decision(
 
 
 def test_merge_as_stack_defaults_on_and_flag_overrides_config() -> None:
-    assert _opts().merge_as_stack is True
+    assert _parsed_opts().merge_as_stack is True
 
     cfg = configparser.ConfigParser()
     cfg.add_section("autoland")
@@ -2043,7 +2004,7 @@ def _land_with_fake_github(mocker, plan_text: str, prs: list[int], **opts):  # n
     mocker.patch.object(checkpointer, "save")
 
     def execute() -> bool:
-        return autoland.execute_plan(ctx, _common(), _opts(**opts), checkpointer)
+        return autoland.execute_plan(ctx, common_args(), _opts(**opts), checkpointer)
 
     def landed_one_by_one() -> list[int]:
         return [c.args[0].pr_number for c in one_at_a_time.call_args_list]

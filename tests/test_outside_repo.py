@@ -4,8 +4,6 @@ import configparser
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).parent.parent / "src"))
-
 import pytest
 
 from stack_pr import cli

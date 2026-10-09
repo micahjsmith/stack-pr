@@ -1,27 +1,36 @@
 import configparser
-import sys
 from pathlib import Path
-
-sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 import pytest
 
 from stack_pr import cli
+from tests.helpers import git, init_repo
 
 
-def test_install_writes_global_alias(mocker) -> None:  # noqa: ANN001
-    spy = mocker.patch("stack_pr.cli.run_shell_command")
+def test_install_writes_global_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    global_config = tmp_path / "gitconfig"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
     cli.command_install("stack", local=False)
-    spy.assert_called_once()
-    cmd = spy.call_args.args[0]
-    assert cmd == ["git", "config", "--global", "alias.stack", "!stack-pr"]
+
+    alias = git(tmp_path, "config", "--file", str(global_config), "alias.stack")
+    assert alias.strip() == "!stack-pr"
 
 
-def test_install_local_and_custom_name(mocker) -> None:  # noqa: ANN001
-    spy = mocker.patch("stack_pr.cli.run_shell_command")
+def test_install_local_and_custom_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    global_config = tmp_path / "gitconfig"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    repo = init_repo(tmp_path / "repo")
+    monkeypatch.chdir(repo)
+
     cli.command_install("sp", local=True)
-    cmd = spy.call_args.args[0]
-    assert cmd == ["git", "config", "--local", "alias.sp", "!stack-pr"]
+
+    assert git(repo, "config", "--local", "alias.sp").strip() == "!stack-pr"
+    assert not global_config.exists()
 
 
 def test_help_no_topic_prints_main_help(capsys) -> None:  # noqa: ANN001

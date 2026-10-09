@@ -4,7 +4,6 @@ Scripts (and autoland, which shells out to stack-pr) rely on the exit code to
 tell whether a command succeeded.
 """
 
-import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -12,23 +11,13 @@ from unittest import mock
 
 import pytest
 
-sys.path.append(str(Path(__file__).parent.parent / "src"))
-
 from stack_pr import cli
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)  # noqa: S607
+from tests.helpers import common_args, init_repo
 
 
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    _git(tmp_path, "init", "-q", "-b", "main")
-    _git(tmp_path, "config", "user.name", "Test")
-    _git(tmp_path, "config", "user.email", "test@example.com")
-    (tmp_path / "file.txt").write_text("one\n")
-    _git(tmp_path, "add", "file.txt")
-    _git(tmp_path, "commit", "-q", "-m", "initial")
+    init_repo(tmp_path, content="one\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("STACKPR_CONFIG", raising=False)
     yield tmp_path
@@ -53,17 +42,7 @@ def test_submit_with_uncommitted_changes_exits_nonzero(
 
 
 def test_submit_draft_bitmask_mismatch_exits_nonzero(repo: Path) -> None:
-    args = cli.CommonArgs(
-        base="main",
-        head="HEAD",
-        remote="origin",
-        target="main",
-        hyperlinks=False,
-        verbose=False,
-        branch_name_template="$USERNAME/stack",
-        show_tips=False,
-        land_disabled=False,
-    )
+    args = common_args(branch_name_template="$USERNAME/stack")
     two_entries = [mock.MagicMock(), mock.MagicMock()]
 
     with (
