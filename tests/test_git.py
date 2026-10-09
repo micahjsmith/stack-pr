@@ -14,6 +14,7 @@ from stack_pr.git import (
     get_gh_username,
     get_repo_root,
     get_uncommitted_changes,
+    is_ancestor,
     is_full_git_sha,
     is_rebase_in_progress,
 )
@@ -194,3 +195,17 @@ def test_check_gh_installed_raises_git_error_when_gh_missing(
     monkeypatch.setenv("PATH", str(tmp_path))
     with pytest.raises(GitError, match="not installed"):
         check_gh_installed()
+
+
+def test_is_ancestor(repo: Path) -> None:
+    git(repo, "commit", "-q", "--allow-empty", "-m", "second")
+
+    assert is_ancestor("HEAD~1", "HEAD", repo_dir=repo)
+    assert is_ancestor("HEAD", "HEAD", repo_dir=repo)
+    assert not is_ancestor("HEAD", "HEAD~1", repo_dir=repo)
+
+
+def test_is_ancestor_raises_when_git_cannot_tell(repo: Path) -> None:
+    # A commit missing from the repo is not a "no": git exits 128, not 1.
+    with pytest.raises(GitError, match=r"(?i)not a valid commit"):
+        is_ancestor("0" * 40, "HEAD", repo_dir=repo)

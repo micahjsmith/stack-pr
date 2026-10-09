@@ -7,8 +7,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from stack_pr import cli
+from stack_pr import cli, shell_commands
 from stack_pr.git import git_config
+from stack_pr.shell_commands import CommandFailedError
 from tests.helpers import FakeGitHub, FakeShell
 
 
@@ -39,12 +40,13 @@ def fake_shell(mocker) -> FakeShell:  # noqa: ANN001
 
 @pytest.fixture
 def fake_gh(mocker) -> FakeGitHub:  # noqa: ANN001
-    """Route cli's `gh` commands to a FakeGitHub; everything else runs for real.
+    """Route stack-pr's `gh` commands to a FakeGitHub; everything else runs for real.
 
     Set the fixture's `remote` to a bare repo to have merges land there.
     """
     gh = FakeGitHub()
     real_run, real_output = cli.run_shell_command, cli.get_command_output
+    real_run_with_retry = shell_commands.run_with_retry
 
     def stdin(kwargs: dict[str, Any]) -> str | None:
         data = kwargs.get("input")
@@ -70,6 +72,22 @@ def fake_gh(mocker) -> FakeGitHub:  # noqa: ANN001
             return real_output(args, **kwargs)
         return gh(args, stdin(kwargs)).rstrip()
 
+    def run_with_retry(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        if cmd[0] != "gh":
+            return real_run_with_retry(cmd, **kwargs)
+        try:
+            out = gh(cmd, stdin({"input": kwargs.get("input_data")}))
+        except subprocess.CalledProcessError as e:
+            result = subprocess.CompletedProcess(
+                cmd, e.returncode, stdout="", stderr=(e.stderr or b"").decode()
+            )
+            if kwargs.get("check", True):
+                raise CommandFailedError(result) from e
+            return result
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
     mocker.patch("stack_pr.cli.run_shell_command", side_effect=run)
     mocker.patch("stack_pr.cli.get_command_output", side_effect=output)
+    # The shared gh JSON helpers (stack_pr.github) run gh through this.
+    mocker.patch("stack_pr.shell_commands.run_with_retry", side_effect=run_with_retry)
     return gh

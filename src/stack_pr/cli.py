@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import argparse
 import configparser
-import json
 import logging
 import os
 import re
@@ -73,8 +72,11 @@ from stack_pr.git import (
     get_gh_username,
     get_repo_root,
     get_uncommitted_changes,
+    is_ancestor,
     is_rebase_in_progress,
 )
+from stack_pr.github import gh_dict, pr_view
+from stack_pr.github import pr_state as gh_pr_state
 from stack_pr.shell_commands import (
     get_command_output,
     run_shell_command,
@@ -531,21 +533,6 @@ def last(ref: str, sep: str = "/") -> str:
     return ref.rsplit(sep, 1)[-1]
 
 
-# TODO: Move to 'modular.utils.git'
-def is_ancestor(commit1: str, commit2: str, *, verbose: bool) -> bool:
-    """
-    Returns true if 'commit1' is an ancestor of 'commit2'.
-    """
-    # TODO: We need to check returncode of this command more carefully, as the
-    # command simply might fail (rc != 0 and rc != 1).
-    p = run_shell_command(
-        ["git", "merge-base", "--is-ancestor", commit1, commit2],
-        check=False,
-        quiet=not verbose,
-    )
-    return p.returncode == 0
-
-
 def is_repo_clean() -> bool:
     """
     Returns true if there are no uncommitted changes in the repo.
@@ -567,7 +554,7 @@ def get_stash_ref() -> str | None:
 
 
 def get_stack(base: str, head: str, *, verbose: bool) -> list[StackEntry]:
-    if not is_ancestor(base, head, verbose=verbose):
+    if not is_ancestor(base, head, quiet=not verbose):
         raise StackPRError(
             f"{base} is not an ancestor of {head}.\n"
             "Could not find commits for the stack."
@@ -607,17 +594,11 @@ def verify(st: list[StackEntry], *, check_base: bool = False) -> None:
         if len(e.pr.split("/")) == 0 or not last(e.pr).isnumeric():
             raise StackPRError(ERROR_STACKINFO_BAD_LINK.format(e=e))
 
-        ghinfo = get_command_output(
-            [
-                "gh",
-                "pr",
-                "view",
-                e.pr,
-                "--json",
-                "baseRefName,headRefName,number,state,body,title,url,mergeStateStatus",
-            ]
+        d = pr_view(
+            e.pr,
+            "baseRefName,headRefName,number,state,body,title,url,mergeStateStatus",
+            retries=0,
         )
-        d = json.loads(ghinfo)
         for required_field in ["state", "number", "baseRefName", "headRefName"]:
             if required_field not in d:
                 raise StackPRError(
@@ -1078,8 +1059,7 @@ def extract_toc_pr_ids(body: str) -> list[str]:
 
 def get_pr_state(pr_id: str) -> str:
     """Return the GitHub state of a PR: 'OPEN', 'MERGED', or 'CLOSED'."""
-    out = get_command_output(["gh", "pr", "view", pr_id, "--json", "state"])
-    return str(json.loads(out)["state"])
+    return gh_pr_state(pr_id, retries=0)
 
 
 def build_stack_pr_list(st: list[StackEntry]) -> list[str]:
@@ -1126,17 +1106,11 @@ def generate_toc(pr_ids: list[str], current: str) -> str:
 
 
 def get_pr_body(e: StackEntry) -> str:
-    out = get_command_output(
-        ["gh", "pr", "view", e.pr, "--json", "body"],
-    )
-    return str(json.loads(out)["body"] or "").strip()
+    return str(pr_view(e.pr, "body", retries=0)["body"] or "").strip()
 
 
 def get_pr_title(e: StackEntry) -> str:
-    out = get_command_output(
-        ["gh", "pr", "view", e.pr, "--json", "title"],
-    )
-    return str(json.loads(out)["title"] or "").strip()
+    return str(pr_view(e.pr, "title", retries=0)["title"] or "").strip()
 
 
 def edit_pr_base(
@@ -1292,8 +1266,8 @@ def should_update_local_base(
     base_hash = get_command_output(["git", "rev-parse", base])
     target_hash = get_command_output(["git", "rev-parse", f"{remote}/{target}"])
     return (
-        is_ancestor(base, f"{remote}/{target}", verbose=verbose)
-        and is_ancestor(f"{remote}/{target}", head, verbose=verbose)
+        is_ancestor(base, f"{remote}/{target}", quiet=not verbose)
+        and is_ancestor(f"{remote}/{target}", head, quiet=not verbose)
         and base_hash != target_hash
     )
 
@@ -1494,7 +1468,7 @@ def command_submit(
     # rebase it in the end since the commits will be modified.
     top_branch = st[-1].head
     need_to_rebase_current = is_ancestor(
-        top_branch, current_branch, verbose=args.verbose
+        top_branch, current_branch, quiet=not args.verbose
     )
 
     reset_remote_base_branches(st, target=args.target, verbose=args.verbose)
@@ -1826,19 +1800,15 @@ def get_adopt_pr_info(pr: str | None) -> dict[str, Any]:
     With no explicit `pr`, this resolves the PR associated with the currently
     checked-out branch. Returns the parsed JSON object from 'gh pr view'.
     """
-    cmd = ["gh", "pr", "view"]
+    cmd = ["pr", "view"]
     if pr:
         cmd.append(pr)
     cmd += ["--json", "number,headRefName,headRefOid,state,url"]
     try:
-        out = get_command_output(cmd)
+        return gh_dict(cmd, retries=0)
     except SubprocessError:
-        error(ERROR_ADOPT_NO_PR.format(cmd=cmd))
+        error(ERROR_ADOPT_NO_PR.format(cmd=["gh", *cmd]))
         raise
-    info = json.loads(out)
-    if not isinstance(info, dict):
-        raise TypeError(f"Unexpected output from {cmd}: {out!r}")
-    return info
 
 
 def warn_if_content_differs(
