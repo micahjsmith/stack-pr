@@ -152,9 +152,17 @@ def branches(repo: Path, pattern: str = "refs/heads") -> set[str]:
     return set(out.split())
 
 
+GH_MERGE_QUEUE_BASE_ERR = (
+    b"GraphQL: Cannot change the base branch because the branch has been "
+    b"added to a merge queue. (updatePullRequest)\n"
+)
+
+
 @dataclass
 class FakeGitHub:
     """Stands in for the `gh` CLI: serves PRs from memory, records commands.
+
+    A failing command raises CalledProcessError carrying gh's stderr.
 
     `gh pr merge` squash-merges the PR's head branch into its base in *remote*
     (a bare repo), as GitHub would.
@@ -172,6 +180,7 @@ class FakeGitHub:
         base: str = "main",
         state: str = "OPEN",
         merge_state: str = "CLEAN",
+        queued: bool = False,
     ) -> str:
         url = PR_URL.format(number)
         self.prs[number] = {
@@ -183,6 +192,7 @@ class FakeGitHub:
             "mergeStateStatus": merge_state,
             "title": "",
             "body": "",
+            "queued": queued,
         }
         return url
 
@@ -204,7 +214,13 @@ class FakeGitHub:
         if sub == ["pr", "view"] and args[1] == "--json":
             return json.dumps(self._pr(args[0]))
         if sub == ["pr", "edit"] and args[1] == "-B":
-            self._pr(args[0])["baseRefName"] = args[2]
+            pr = self._pr(args[0])
+            if pr["queued"]:
+                # What gh reports when GitHub refuses to retarget a queued PR.
+                raise subprocess.CalledProcessError(
+                    1, cmd, stderr=GH_MERGE_QUEUE_BASE_ERR
+                )
+            pr["baseRefName"] = args[2]
             return ""
         if sub == ["pr", "merge"] and args[1:3] == ["--squash", "-t"]:
             self._squash_merge(self._pr(args[0]), args[3], stdin or "")

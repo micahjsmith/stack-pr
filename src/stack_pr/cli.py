@@ -1564,7 +1564,7 @@ def land_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None:
         raise
 
     # Switch PR base branch to 'main'
-    run_shell_command(["gh", "pr", "edit", e.pr, "-B", target], quiet=not verbose)
+    edit_pr_base(e.pr, target, verbose=verbose)
 
     # Form the commit message: it should contain the original commit message
     # and nothing else.
@@ -1661,10 +1661,7 @@ def command_land(args: CommonArgs) -> None:
         for e in prs_to_rebase:
             rebase_pr(e, remote=args.remote, target=args.target, verbose=args.verbose)
         # Change the target of the new bottom-most PR in the stack to 'target'
-        run_shell_command(
-            ["gh", "pr", "edit", prs_to_rebase[0].pr, "-B", args.target],
-            quiet=not args.verbose,
-        )
+        edit_pr_base(prs_to_rebase[0].pr, args.target, verbose=args.verbose)
 
     # Delete local and remote stack branches
     run_shell_command(["git", "checkout", current_branch], quiet=not args.verbose)

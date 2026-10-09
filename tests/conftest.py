@@ -54,7 +54,14 @@ def fake_gh(mocker) -> FakeGitHub:  # noqa: ANN001
         args = [str(c) for c in cmd]
         if args[0] != "gh":
             return real_run(args, **kwargs)
-        out = gh(args, stdin(kwargs)).encode()
+        try:
+            out = gh(args, stdin(kwargs)).encode()
+        except subprocess.CalledProcessError as e:
+            if kwargs.get("check", True):
+                raise
+            return subprocess.CompletedProcess(
+                args, e.returncode, stdout=b"", stderr=e.stderr
+            )
         return subprocess.CompletedProcess(args, 0, stdout=out, stderr=b"")
 
     def output(cmd: Iterable[Any], **kwargs: Any) -> str:
