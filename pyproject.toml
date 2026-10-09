@@ -160,7 +160,8 @@ multiline-quotes = "double"
 
 [tool.ruff.lint.extend-per-file-ignores]
 # autoland is a long-running orchestration state machine driving git/gh.
-"src/stack_pr/autoland.py" = [
+"src/stack_pr/autoland/*.py" = [
+    "SLF001",  # modules reach each other's private helpers (e.g. waits._refresh_last_landed_sha)
     "S101",  # asserts used to narrow gh JSON result types
     "S607",  # git/gh/$EDITOR invoked by name (same class as the global S603)
     "C901",  # the land/enqueue/execute loops are intrinsically branchy

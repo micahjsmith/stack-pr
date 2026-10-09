@@ -59,7 +59,7 @@
       }
     },
     "land-url": {
-      "comment": "l <url> — the URL shape mirrors RE_PR_URL in autoland.py.",
+      "comment": "l <url> — the URL shape mirrors RE_PR_URL in autoland/plan.py.",
       "match": "^[ \\t]*(l)[ \\t]+(https?://[^/\\s]+/[^/\\s]+/[^/\\s]+/pull/\\d+/?)(?=[ \\t]*$| +#)",
       "captures": {
         "1": {
