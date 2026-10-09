@@ -97,11 +97,6 @@ def test_land_a_single_pr_stack(tmp_path: Path, monkeypatch, fake_gh) -> None:  
     assert commit_message(remote, "main").startswith("c1 (#1)")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="land never fetches after merging the last PR, so with a one-PR stack "
-    "the user's branch is rebased onto a stale origin/main",
-)
 def test_land_a_single_pr_stack_updates_the_users_branch(
     tmp_path: Path,
     monkeypatch,  # noqa: ANN001

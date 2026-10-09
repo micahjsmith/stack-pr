@@ -1671,6 +1671,9 @@ def command_land(args: CommonArgs) -> None:
 
     delete_local_branches(st, verbose=args.verbose)
 
+    # Fetch so that {remote}/{target} includes the PR that was just merged.
+    run_shell_command(["git", "fetch", "--prune", args.remote], quiet=not args.verbose)
+
     # If local branch {target} exists, rebase it on the remote/target
     if branch_exists(args.target):
         run_shell_command(
