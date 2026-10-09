@@ -12,6 +12,7 @@ from unittest import mock
 import pytest
 
 from stack_pr import cli
+from stack_pr.errors import StackPRError
 from tests.helpers import common_args, init_repo
 
 
@@ -41,20 +42,18 @@ def test_submit_with_uncommitted_changes_exits_nonzero(
     assert excinfo.value.code not in (0, None)
 
 
-def test_submit_draft_bitmask_mismatch_exits_nonzero(repo: Path) -> None:
+def test_submit_draft_bitmask_mismatch_is_an_error(repo: Path) -> None:
     args = common_args(branch_name_template="$USERNAME/stack")
     two_entries = [mock.MagicMock(), mock.MagicMock()]
 
     with (
         mock.patch.object(cli, "should_update_local_base", return_value=False),
         mock.patch.object(cli, "get_stack", return_value=two_entries),
-        pytest.raises(SystemExit) as excinfo,
+        pytest.raises(StackPRError, match="Draft bitmask"),
     ):
         cli.command_submit(
             args, draft=False, reviewer="", draft_bitmask=[True, False, True]
         )
-
-    assert excinfo.value.code not in (0, None)
 
 
 def test_no_subcommand_is_a_usage_error(

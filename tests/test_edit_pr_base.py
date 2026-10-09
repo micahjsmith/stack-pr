@@ -10,6 +10,7 @@ from stack_pr.cli import (
     reset_remote_base_branches,
     stale_lease_branches,
 )
+from stack_pr.errors import StackPRError
 from tests.helpers import FakeShell, mock_entry
 
 PR = "https://github.com/o/r/pull/42"
@@ -124,20 +125,16 @@ def test_force_push_with_lease_uses_lease_flags(fake_shell: FakeShell) -> None:
     assert fake_shell.commands == [_push("a:a", "b:b")]
 
 
-def test_force_push_with_lease_aborts_on_stale(
-    fake_shell: FakeShell, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_force_push_with_lease_aborts_on_stale(fake_shell: FakeShell) -> None:
     fake_shell.script(
         (1, b" ! [rejected]        s/2 -> s/2 (stale info)\nerror: failed to push\n")
     )
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(StackPRError) as excinfo:
         force_push_with_lease(["s/2:s/2"], "origin", "main", verbose=False)
 
     # The abort message names the diverged branch.
-    out = capsys.readouterr().out
-    assert "ERROR" in out
-    assert "s/2" in out
+    assert "s/2" in excinfo.value.message
 
 
 def test_force_push_with_lease_reraises_other_errors(fake_shell: FakeShell) -> None:
@@ -193,18 +190,16 @@ def test_push_branches_succeeds_when_only_branch_is_queued(
 
 
 def test_force_push_with_lease_aborts_on_queued_branch_by_default(
-    fake_shell: FakeShell, capsys: pytest.CaptureFixture[str]
+    fake_shell: FakeShell,
 ) -> None:
     # Landing rebases a branch and pushes it: skipping the push would leave the
     # caller believing the remote has the rebased commits, so it must abort.
     fake_shell.script((1, queued_push_err("s/1")))
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(StackPRError) as excinfo:
         force_push_with_lease(["s/1:s/1"], "origin", "main", verbose=False)
 
-    out = capsys.readouterr().out
-    assert "ERROR" in out
-    assert "s/1" in out
+    assert "s/1" in excinfo.value.message
 
 
 def test_force_push_with_lease_raises_on_other_gh006(fake_shell: FakeShell) -> None:

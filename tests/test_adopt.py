@@ -9,6 +9,7 @@ from stack_pr.cli import (
     get_adopt_pr_info,
     select_adopt_entry,
 )
+from stack_pr.errors import StackPRError
 from tests.helpers import common_args, git, init_repo, mock_entry
 
 
@@ -74,7 +75,7 @@ def test_select_adopt_entry_matches_commit(mocker) -> None:  # noqa: ANN001
 def test_select_adopt_entry_commit_not_in_stack(mocker) -> None:  # noqa: ANN001
     st = [mock_entry(commit_msg="bottom", commit_id="aaa")]
     mocker.patch("stack_pr.cli.get_command_output", return_value="zzz")
-    with pytest.raises(SystemExit):
+    with pytest.raises(StackPRError):
         select_adopt_entry(st, "deadbeef")
 
 
@@ -82,7 +83,7 @@ def test_command_adopt_refuses_already_managed(mocker) -> None:  # noqa: ANN001
     msg = "Title\n\nstack-info: PR: https://x/pull/1, branch: feat\n"
     mocker.patch("stack_pr.cli.get_stack", return_value=[mock_entry(commit_msg=msg)])
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(StackPRError):
         cli.command_adopt(common_args(), None, None)
 
 
@@ -96,7 +97,7 @@ def test_command_adopt_refuses_non_open_pr(mocker) -> None:  # noqa: ANN001
         return_value={"state": "MERGED", "url": "u", "headRefName": "feat"},
     )
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(StackPRError):
         cli.command_adopt(common_args(), "5", None)
 
 

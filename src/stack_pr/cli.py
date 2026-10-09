@@ -64,6 +64,7 @@ from re import Pattern
 from subprocess import PIPE, SubprocessError
 from typing import Any
 
+from stack_pr.errors import StackPRError
 from stack_pr.git import (
     GitError,
     branch_exists,
@@ -567,11 +568,10 @@ def get_stash_ref() -> str | None:
 
 def get_stack(base: str, head: str, *, verbose: bool) -> list[StackEntry]:
     if not is_ancestor(base, head, verbose=verbose):
-        error(
+        raise StackPRError(
             f"{base} is not an ancestor of {head}.\n"
             "Could not find commits for the stack."
         )
-        sys.exit(1)
 
     # Find list of commits since merge base.
     st: list[StackEntry] = []
@@ -602,12 +602,10 @@ def verify(st: list[StackEntry], *, check_base: bool = False) -> None:
     log(h("Verifying stack info"), level=2)
     for index, e in enumerate(st):
         if e.has_missing_info():
-            error(ERROR_STACKINFO_MISSING.format(**locals()))
-            raise RuntimeError
+            raise StackPRError(ERROR_STACKINFO_MISSING.format(e=e))
 
         if len(e.pr.split("/")) == 0 or not last(e.pr).isnumeric():
-            error(ERROR_STACKINFO_BAD_LINK.format(**locals()))
-            raise RuntimeError
+            raise StackPRError(ERROR_STACKINFO_BAD_LINK.format(e=e))
 
         ghinfo = get_command_output(
             [
@@ -622,28 +620,27 @@ def verify(st: list[StackEntry], *, check_base: bool = False) -> None:
         d = json.loads(ghinfo)
         for required_field in ["state", "number", "baseRefName", "headRefName"]:
             if required_field not in d:
-                error(ERROR_STACKINFO_MALFORMED_RESPONSE.format(**locals()))
-                raise RuntimeError
+                raise StackPRError(
+                    ERROR_STACKINFO_MALFORMED_RESPONSE.format(
+                        required_field=required_field, d=d, e=e
+                    )
+                )
 
         if d["state"] != "OPEN":
-            error(ERROR_STACKINFO_PR_NOT_OPEN.format(**locals()))
-            raise RuntimeError
+            raise StackPRError(ERROR_STACKINFO_PR_NOT_OPEN.format(e=e, d=d))
 
         if int(last(e.pr)) != d["number"]:
-            error(ERROR_STACKINFO_PR_NUMBER_MISMATCH.format(**locals()))
-            raise RuntimeError
+            raise StackPRError(ERROR_STACKINFO_PR_NUMBER_MISMATCH.format(e=e, d=d))
 
         if e.head != d["headRefName"]:
-            error(ERROR_STACKINFO_PR_HEAD_MISMATCH.format(**locals()))
-            raise RuntimeError
+            raise StackPRError(ERROR_STACKINFO_PR_HEAD_MISMATCH.format(e=e, d=d))
 
         # 'Base' branch might diverge when the stack is modified (e.g. when a
         # new commit is added to the middle of the stack). It is not an issue
         # if we're updating the stack (i.e. in 'submit'), but it is an issue if
         # we are trying to land it.
         if check_base and e.base != d["baseRefName"]:
-            error(ERROR_STACKINFO_PR_BASE_MISMATCH.format(**locals()))
-            raise RuntimeError
+            raise StackPRError(ERROR_STACKINFO_PR_BASE_MISMATCH.format(e=e, d=d))
 
         # The first entry on the stack needs to be actually mergeable on GitHub.
         if (
@@ -651,8 +648,7 @@ def verify(st: list[StackEntry], *, check_base: bool = False) -> None:
             and index == 0
             and d["mergeStateStatus"] not in ["CLEAN", "UNKNOWN", "UNSTABLE"]
         ):
-            error(ERROR_STACKINFO_PR_NOT_MERGEABLE.format(**locals()))
-            raise RuntimeError
+            raise StackPRError(ERROR_STACKINFO_PR_NOT_MERGEABLE.format(e=e, d=d))
 
 
 def print_stack(st: list[StackEntry], *, links: bool, level: int = 1) -> None:
@@ -725,8 +721,7 @@ def remove_stack_info(msg: str) -> str:
 def add_or_update_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) -> bool:
     if needs_rebase:
         if not e.has_base() or not e.has_head():
-            error("Stack entry has no base or head branch")
-            raise RuntimeError
+            raise StackPRError("Stack entry has no base or head branch")
 
         run_shell_command(
             [
@@ -740,8 +735,7 @@ def add_or_update_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) 
         )
     else:
         if not e.has_head():
-            error("Stack entry has no head branch")
-            raise RuntimeError
+            raise StackPRError("Stack entry has no head branch")
 
         run_shell_command(["git", "checkout", e.head], quiet=not verbose)
 
@@ -938,21 +932,19 @@ def force_push_with_lease(
         stale = stale_lease_branches(stderr)
         if stale or "stale info" in stderr:
             branches = ", ".join(stale) if stale else "one or more PR branches"
-            error(
+            raise StackPRError(
                 ERROR_STALE_REMOTE_BRANCHES.format(
                     branches=branches, remote=remote, target=target
                 )
             )
-            sys.exit(1)
 
         queued = merge_queue_declined_branches(stderr)
         if queued and not skip_queued:
-            error(
+            raise StackPRError(
                 ERROR_QUEUED_BRANCH_PUSH.format(
                     branches=describe_branches(queued, pr_by_branch)
                 )
             )
-            sys.exit(1)
 
         kept = [r for r in remaining if refspec_dst(r) not in queued]
         if len(kept) < len(remaining):
@@ -1038,8 +1030,7 @@ def create_pr(e: StackEntry, *, is_draft: bool, reviewer: str = "") -> None:
     if e.has_pr():
         return
     if not e.has_base() or not e.has_head():
-        error("Stack entry has no base or head branch")
-        raise RuntimeError
+        raise StackPRError("Stack entry has no base or head branch")
     log(h("Creating PR " + green(f"'{e.head}' -> '{e.base}'")), level=1)
     cmd = [
         "gh",
@@ -1062,7 +1053,7 @@ def create_pr(e: StackEntry, *, is_draft: bool, reviewer: str = "") -> None:
     try:
         r = get_command_output(cmd, input=e.commit.commit_msg().encode())
     except Exception:
-        error(ERROR_CANT_CREATE_PR.format(**locals()))
+        error(ERROR_CANT_CREATE_PR.format(e=e, cmd=cmd))
         raise
 
     log(b("Created: ") + r, level=2)
@@ -1246,8 +1237,7 @@ def add_cross_links(
                 input="\n".join(pr_body).encode(),
             )
         else:
-            error("Stack entry has no base branch")
-            raise RuntimeError
+            raise StackPRError("Stack entry has no base branch")
 
 
 # Temporarily set base branches of existing PRs to the bottom of the stack.
@@ -1349,7 +1339,7 @@ def check_target_branch_exists(args: CommonArgs) -> None:
         args: CommonArgs containing remote and target branch information
 
     Raises:
-        SystemExit: If the target branch doesn't exist
+        StackPRError: If the target branch doesn't exist
     """
     # Check if target branch exists using git rev-parse --verify
     # This is fast and doesn't require listing all branches
@@ -1373,22 +1363,20 @@ def check_target_branch_exists(args: CommonArgs) -> None:
         )
         if master_result.returncode == 0:
             # Master exists, show helpful error
-            error(
+            raise StackPRError(
                 ERROR_TARGET_BRANCH_MASTER_INSTEAD_OF_MAIN.format(
                     remote=args.remote,
                     target=args.target,
                 )
             )
-            sys.exit(1)
 
     # Generic error for other cases
-    error(
+    raise StackPRError(
         ERROR_TARGET_BRANCH_MISSING.format(
             remote=args.remote,
             target=args.target,
         )
     )
-    sys.exit(1)
 
 
 def deduce_base(args: CommonArgs) -> CommonArgs:
@@ -1435,7 +1423,7 @@ def print_tips_after_export(st: list[StackEntry], args: CommonArgs) -> None:
 
     log(b("\nOnce the stack is reviewed, it is ready to land!"), level=1)
     if not args.land_disabled:
-        log(LAND_STACK_TIP.format(**locals()))
+        log(LAND_STACK_TIP.format(top_commit=top_commit, stack_size=stack_size))
 
 
 # ===----------------------------------------------------------------------=== #
@@ -1464,8 +1452,7 @@ def command_submit(
     log(h("SUBMIT"), level=1)
 
     if is_rebase_in_progress():
-        error(ERROR_REBASE_IN_PROGRESS)
-        sys.exit(1)
+        raise StackPRError(ERROR_REBASE_IN_PROGRESS)
 
     current_branch = get_current_branch_name()
 
@@ -1489,8 +1476,9 @@ def command_submit(
         return
 
     if (draft_bitmask is not None) and (len(draft_bitmask) != len(st)):
-        error("Draft bitmask passed to 'submit' doesn't match number of PRs!")
-        sys.exit(1)
+        raise StackPRError(
+            "Draft bitmask passed to 'submit' doesn't match number of PRs!"
+        )
 
     # Create local branches and initialize base and head fields in the stack
     # elements
@@ -1541,7 +1529,7 @@ def command_submit(
                 e, needs_rebase=needs_rebase, verbose=args.verbose
             )
         except Exception:
-            error(ERROR_CANT_UPDATE_META.format(**locals()))
+            error(ERROR_CANT_UPDATE_META.format(e=e))
             raise
 
     push_branches(st, remote=args.remote, target=args.target, verbose=args.verbose)
@@ -1587,7 +1575,7 @@ def rebase_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None
     try:
         run_shell_command(cmd, quiet=not verbose)
     except Exception:
-        error(ERROR_CANT_CHECKOUT_REMOTE_BRANCH.format(**locals()))
+        error(ERROR_CANT_CHECKOUT_REMOTE_BRANCH.format(e=e, cmd=cmd))
         raise
 
     cmd = [
@@ -1600,7 +1588,7 @@ def rebase_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None
     try:
         run_shell_command(cmd, quiet=not verbose)
     except Exception:
-        error(ERROR_CANT_REBASE.format(**locals()))
+        error(ERROR_CANT_REBASE.format(target=target, e=e, cmd=cmd))
         raise
     force_push_with_lease([f"{e.head}:{e.head}"], remote, target, verbose=verbose)
 
@@ -1613,7 +1601,7 @@ def land_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None:
     try:
         run_shell_command(cmd, quiet=not verbose)
     except Exception:
-        error(ERROR_CANT_CHECKOUT_REMOTE_BRANCH.format(**locals()))
+        error(ERROR_CANT_CHECKOUT_REMOTE_BRANCH.format(e=e, cmd=cmd))
         raise
 
     # Switch PR base branch to 'main'
@@ -1757,8 +1745,7 @@ def strip_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) -> str:
     m = remove_stack_info(m)
     if needs_rebase:
         if not e.has_base() or not e.has_head():
-            error("Stack entry has no base or head branch")
-            raise RuntimeError
+            raise StackPRError("Stack entry has no base or head branch")
         run_shell_command(
             [
                 "git",
@@ -1771,8 +1758,7 @@ def strip_metadata(e: StackEntry, *, needs_rebase: bool, verbose: bool) -> str:
         )
     else:
         if not e.has_head():
-            error("Stack entry has no head branch")
-            raise RuntimeError
+            raise StackPRError("Stack entry has no head branch")
         run_shell_command(["git", "checkout", e.head or ""], quiet=not verbose)
 
     run_shell_command(
@@ -1956,8 +1942,7 @@ def select_adopt_entry(st: list[StackEntry], commit: str | None) -> StackEntry:
         if e.commit.commit_id() == sha:
             return e
 
-    error(ERROR_ADOPT_COMMIT_NOT_IN_STACK.format(commit=commit, sha=sha))
-    sys.exit(1)
+    raise StackPRError(ERROR_ADOPT_COMMIT_NOT_IN_STACK.format(commit=commit, sha=sha))
 
 
 # ===----------------------------------------------------------------------=== #
@@ -1976,14 +1961,14 @@ def command_adopt(args: CommonArgs, pr: str | None, commit: str | None) -> None:
     # is the target branch); a specific commit can be targeted with --commit.
     e = select_adopt_entry(st, commit)
     if RE_STACK_INFO_LINE.search(e.commit.commit_msg()):
-        error(ERROR_ADOPT_ALREADY_MANAGED.format(e=e))
-        sys.exit(1)
+        raise StackPRError(ERROR_ADOPT_ALREADY_MANAGED.format(e=e))
 
     pr_info = get_adopt_pr_info(pr)
     state = pr_info.get("state")
     if state != "OPEN":
-        error(ERROR_ADOPT_PR_NOT_OPEN.format(pr=pr_info.get("url", pr), state=state))
-        sys.exit(1)
+        raise StackPRError(
+            ERROR_ADOPT_PR_NOT_OPEN.format(pr=pr_info.get("url", pr), state=state)
+        )
 
     pr_url = pr_info["url"]
     head_ref = pr_info["headRefName"]
@@ -2027,14 +2012,14 @@ def print_tips_after_view(st: list[StackEntry], args: CommonArgs) -> None:
 
     if ready_to_land:
         log(b("\nThis stack is ready to land!"))
-        log(UPDATE_STACK_TIP.format(**locals()))
+        log(UPDATE_STACK_TIP.format(top_commit=top_commit, stack_size=stack_size))
         if not args.land_disabled:
-            log(LAND_STACK_TIP.format(**locals()))
+            log(LAND_STACK_TIP.format(top_commit=top_commit, stack_size=stack_size))
         return
 
     # Stack is not ready to land, suggest exporting it first
     log(b("\nThis stack can't be landed yet, you need to export it first."))
-    log(EXPORT_STACK_TIP.format(**locals()))
+    log(EXPORT_STACK_TIP.format(top_commit=top_commit, stack_size=stack_size))
 
 
 # ===----------------------------------------------------------------------=== #
@@ -2091,14 +2076,12 @@ def command_config(config_file: Path, setting: str) -> None:
         setting: Setting in the format "section.key=value"
     """
     if "=" not in setting:
-        error(ERROR_CONFIG_INVALID_FORMAT)
-        sys.exit(1)
+        raise StackPRError(ERROR_CONFIG_INVALID_FORMAT)
 
     key_path, value = setting.split("=", 1)
 
     if "." not in key_path:
-        error(ERROR_CONFIG_INVALID_FORMAT)
-        sys.exit(1)
+        raise StackPRError(ERROR_CONFIG_INVALID_FORMAT)
 
     section, key = key_path.split(".", 1)
 
@@ -2346,7 +2329,21 @@ def load_config(config_file: Path) -> configparser.ConfigParser:
     return config
 
 
-def main() -> None:  # noqa: PLR0912, PLR0915, C901
+def main() -> None:
+    """Run stack-pr, reporting a StackPRError as a plain message.
+
+    By the time the error reaches here, ``_main`` has already done its cleanup
+    (checking out the original branch, restoring a stash). Any other exception
+    is unexpected and propagates with its traceback.
+    """
+    try:
+        _main()
+    except StackPRError as exc:
+        error(exc.message)
+        sys.exit(1)
+
+
+def _main() -> None:  # noqa: PLR0912, PLR0915, C901
     # --help, install, and config work outside a git repo, so a missing repo
     # only means there is no repo-level config file to read.
     try:
@@ -2374,8 +2371,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
     # Handle config command early since it doesn't need git repo setup
     if args.command == "config":
         if not config_file:
-            error(ERROR_CONFIG_NO_FILE)
-            sys.exit(1)
+            raise StackPRError(ERROR_CONFIG_NO_FILE)
         command_config(config_file, args.setting)
         return
 
@@ -2388,8 +2384,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
         return
 
     if repo_root is None:
-        error(ERROR_NOT_IN_REPO)
-        sys.exit(1)
+        raise StackPRError(ERROR_NOT_IN_REPO)
 
     # Make sure "$ID" is present in the branch name template and append it if not
     args.branch_name_template = fix_branch_name_template(args.branch_name_template)
@@ -2420,8 +2415,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
         # autoland may operate in a temporary worktree (--branch), so the
         # primary checkout being dirty shouldn't block it.
         if args.command not in ("view", "autoland") and not is_repo_clean():
-            error(ERROR_REPO_DIRTY)
-            sys.exit(1)
+            raise StackPRError(ERROR_REPO_DIRTY)  # noqa: TRY301
         check_target_branch_exists(common_args)
         # autoland deduces its own base: with --branch it operates in a
         # temporary worktree, so the base must be resolved against that
