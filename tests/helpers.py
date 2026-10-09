@@ -222,5 +222,9 @@ class FakeGitHub:
         base, head = pr["baseRefName"], pr["headRefName"]
         tree, parent = f"{head}^{{tree}}", f"refs/heads/{base}"
         msg = f"{title}\n\n{body}"
-        sha = git(self.remote, "commit-tree", tree, "-p", parent, "-m", msg).strip()
+        # The bare remote has no identity configured, and CI none globally.
+        identity = ["-c", "user.name=GitHub", "-c", "user.email=noreply@github.com"]
+        sha = git(
+            self.remote, *identity, "commit-tree", tree, "-p", parent, "-m", msg
+        ).strip()
         git(self.remote, "update-ref", f"refs/heads/{base}", sha)
