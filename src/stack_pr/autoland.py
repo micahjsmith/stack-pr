@@ -16,6 +16,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1785,7 +1786,9 @@ def edit_plan_interactive(
 
     try:
         console.print(f"[bold]Opening plan in {editor}...[/bold]")
-        subprocess.run([editor, plan_file], check=True)
+        # $EDITOR is a command line, not just a program name ("code --wait").
+        # An empty value splits to nothing; keep it so the error names it.
+        subprocess.run([*(shlex.split(editor) or [editor]), plan_file], check=True)
         edited_text = Path(plan_file).read_text()
 
         non_comment = [
