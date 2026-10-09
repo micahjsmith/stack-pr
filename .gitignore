@@ -78,11 +78,6 @@ venv.bak/
 
 .pdm-python
 
-# pixi environments
-.pixi
-*.egg-info
-pixi.lock
-
 .vscode
 
 # Claude Code working files (worktrees, local settings, etc.)
