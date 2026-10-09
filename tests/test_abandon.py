@@ -4,8 +4,20 @@ from pathlib import Path
 import pytest
 
 from stack_pr import cli
-from stack_pr.cli import CommitHeader, StackEntry, delete_remote_branches
-from tests.helpers import git, init_repo
+from stack_pr.cli import (
+    CommitHeader,
+    StackEntry,
+    command_abandon,
+    delete_remote_branches,
+)
+from tests.helpers import (
+    branches,
+    commit_message,
+    common_args,
+    git,
+    init_repo,
+    init_stack_repo,
+)
 
 TEMPLATE = "$USERNAME/stack/$ID"
 
@@ -45,3 +57,36 @@ def test_delete_remote_branches_deletes_stack_branches(repo) -> None:  # noqa: A
     )
 
     assert _remote_branches(remote) == {"main", "alice/other"}
+
+
+@pytest.mark.usefixtures("gh_username")
+def test_abandon_strips_metadata_and_deletes_the_stack_branches(
+    tmp_path: Path,
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    local, remote = init_stack_repo(tmp_path, 2, submitted=True)
+    tree_before = git(local, "rev-parse", "feature^{tree}")
+    monkeypatch.chdir(local)
+
+    command_abandon(common_args())
+
+    assert git(local, "branch", "--show-current").strip() == "feature"
+    assert [commit_message(local, rev) for rev in ("feature~1", "feature")] == [
+        "c1\n\nBody of c1.",
+        "c2\n\nBody of c2.",
+    ]
+    assert git(local, "rev-parse", "feature~2") == git(local, "rev-parse", "main")
+    assert git(local, "rev-parse", "feature^{tree}") == tree_before
+    assert branches(local) == {"main", "feature"}
+    assert _remote_branches(remote) == {"main"}
+
+
+def test_abandon_an_empty_stack_changes_nothing(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    local, remote = init_stack_repo(tmp_path, 0, submitted=False)
+    monkeypatch.chdir(local)
+    head_before = git(local, "rev-parse", "HEAD")
+
+    command_abandon(common_args())
+
+    assert git(local, "rev-parse", "HEAD") == head_before
+    assert _remote_branches(remote) == {"main"}

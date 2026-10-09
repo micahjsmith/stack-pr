@@ -8,6 +8,7 @@ from stack_pr.cli import (
     generate_branch_name,
     get_branch_id,
     get_taken_branch_ids,
+    load_config,
 )
 from stack_pr.git import is_rebase_in_progress
 from stack_pr.shell_commands import run_shell_command
@@ -119,3 +120,14 @@ def test_is_rebase_in_progress() -> None:
         # Test with None repo_dir (current directory)
         # This should not raise an error even if .git doesn't exist in cwd
         assert not is_rebase_in_progress(None)
+
+
+def test_load_config_reads_the_file(tmp_path: Path) -> None:
+    cfg_file = tmp_path / ".stack-pr.cfg"
+    cfg_file.write_text("[repo]\ntarget = develop\n")
+
+    assert load_config(cfg_file).get("repo", "target") == "develop"
+
+
+def test_load_config_without_a_file_is_empty(tmp_path: Path) -> None:
+    assert load_config(tmp_path / "missing.cfg").sections() == []

@@ -36,6 +36,7 @@ from stack_pr.autoland import (
     _plan_rows,
     _replan,
     _run_fresh,
+    _run_resume,
     _StepRow,
     _stop_running_autoland,
     carry_over_progress,
@@ -1765,6 +1766,99 @@ def test_replan_without_a_checkpoint_exits(tmp_path) -> None:  # noqa: ANN001
         autoland.run_autoland(
             common_args(), _args(replan=True, state_file=tmp_path / "nope.json"), cfg
         )
+
+
+# --- resume flow -------------------------------------------------------------
+
+
+def _patch_resume_io(mocker, *, success: bool = True):  # noqa: ANN001, ANN202
+    """Stub the git/GitHub side of a resume; return the execute_plan mock."""
+    mocker.patch("stack_pr.autoland.console")
+    mocker.patch("stack_pr.autoland._current_branch", return_value="feat")
+    mocker.patch("stack_pr.autoland.cli.deduce_base", side_effect=lambda c: c)
+    mocker.patch("stack_pr.autoland.enrich_stack")
+    mocker.patch("stack_pr.autoland.signal.signal")
+    return mocker.patch("stack_pr.autoland.execute_plan", return_value=success)
+
+
+def _resume(sf: Path, **overrides) -> None:  # noqa: ANN003
+    _run_resume(common_args(), _opts(resume=True, state_file=sf, **overrides))
+
+
+def test_resume_continues_from_the_checkpointed_step(tmp_path, mocker) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf, abort_reason="CI failed on #0")
+    execute = _patch_resume_io(mocker)
+
+    _resume(sf)
+
+    ctx = execute.call_args.args[0]
+    assert ctx.current_step == 1
+    assert [e.pr_number for e in ctx.stack] == [0, 1]
+    # The earlier failure no longer stands: this run gets a fresh attempt.
+    assert not ctx.aborted
+    assert ctx.abort_reason == ""
+    # A run that finishes leaves no checkpoint behind.
+    assert not sf.exists()
+
+
+def test_resume_that_fails_again_keeps_the_checkpoint(tmp_path, mocker) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf)
+    _patch_resume_io(mocker, success=False)
+
+    with pytest.raises(SystemExit) as exc:
+        _resume(sf)
+
+    assert exc.value.code == 1
+    assert sf.exists()
+
+
+def test_resume_of_a_finished_plan_just_cleans_up(tmp_path, mocker) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    ctx = LandingContext(stack=_stack(2), plan=generate_default_plan(_stack(2)))
+    ctx.current_step = len(ctx.plan)
+    AutolandCheckpointer(path=sf, branch="feat", base="main").save(ctx)
+    execute = _patch_resume_io(mocker)
+
+    _resume(sf)
+
+    execute.assert_not_called()
+    assert not sf.exists()
+
+
+@pytest.mark.usefixtures("autoland_console")
+def test_resume_without_a_checkpoint_exits(tmp_path) -> None:  # noqa: ANN001
+    with pytest.raises(SystemExit):
+        _resume(tmp_path / "nope.json")
+
+
+def test_resume_refuses_while_another_run_holds_the_lock(tmp_path, mocker) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf)
+    execute = _patch_resume_io(mocker)
+    lock = AutolandLock.for_state(sf)
+    assert lock.acquire()
+    try:
+        with pytest.raises(SystemExit):
+            _resume(sf)
+    finally:
+        lock.release()
+
+    execute.assert_not_called()
+    assert sf.exists()
+
+
+def test_resume_refuses_a_different_branch(tmp_path, mocker) -> None:  # noqa: ANN001
+    sf = tmp_path / "state.json"
+    _save_state(sf)  # saved for branch "feat"
+    execute = _patch_resume_io(mocker)
+
+    with pytest.raises(SystemExit):
+        _resume(sf, branch="other")
+
+    execute.assert_not_called()
+    assert sf.exists()
 
 
 # --- taking over a running autoland -----------------------------------------

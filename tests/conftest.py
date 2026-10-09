@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import subprocess
+from collections.abc import Iterable, Iterator
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
 from stack_pr import cli
 from stack_pr.git import git_config
-from tests.helpers import FakeShell
+from tests.helpers import FakeGitHub, FakeShell
 
 
 @pytest.fixture
@@ -33,3 +35,34 @@ def fake_shell(mocker) -> FakeShell:  # noqa: ANN001
     fake = FakeShell()
     mocker.patch("stack_pr.cli.run_shell_command", side_effect=fake)
     return fake
+
+
+@pytest.fixture
+def fake_gh(mocker) -> FakeGitHub:  # noqa: ANN001
+    """Route cli's `gh` commands to a FakeGitHub; everything else runs for real.
+
+    Set the fixture's `remote` to a bare repo to have merges land there.
+    """
+    gh = FakeGitHub()
+    real_run, real_output = cli.run_shell_command, cli.get_command_output
+
+    def stdin(kwargs: dict[str, Any]) -> str | None:
+        data = kwargs.get("input")
+        return data.decode() if isinstance(data, bytes) else data
+
+    def run(cmd: Iterable[Any], **kwargs: Any) -> subprocess.CompletedProcess:
+        args = [str(c) for c in cmd]
+        if args[0] != "gh":
+            return real_run(args, **kwargs)
+        out = gh(args, stdin(kwargs)).encode()
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr=b"")
+
+    def output(cmd: Iterable[Any], **kwargs: Any) -> str:
+        args = [str(c) for c in cmd]
+        if args[0] != "gh":
+            return real_output(args, **kwargs)
+        return gh(args, stdin(kwargs)).rstrip()
+
+    mocker.patch("stack_pr.cli.run_shell_command", side_effect=run)
+    mocker.patch("stack_pr.cli.get_command_output", side_effect=output)
+    return gh
