@@ -211,6 +211,11 @@ class StackEntry:
         # requires no review, and then there is no approval to wait for.
         return self.review_decision in ("APPROVED", "")
 
+    def is_merged(self) -> bool:
+        # A method, not a property, so that mypy does not carry narrowing of
+        # `state` across calls (e.g. the wait_* helpers) that update it.
+        return self.state == PRState.MERGED
+
 
 @dataclass
 class LandStep:
@@ -270,6 +275,11 @@ class LandingContext:
     aborted: bool = False
     abort_reason: str = ""
     last_landed_sha: str = ""  # merge commit of the last landed PR
+
+    def abort_requested(self) -> bool:
+        # A method, not a plain attribute read, so that mypy does not carry
+        # narrowing of `aborted` across calls (or the SIGINT handler) that set it.
+        return self.aborted
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +620,10 @@ def _is_likely_transient(result: subprocess.CompletedProcess[str]) -> bool:
 def gh_json(cmd: list[str]) -> dict | list:
     """Run a gh command and parse JSON output."""
     result = run(["gh", *cmd], quiet=True)
-    return json.loads(result.stdout)
+    data = json.loads(result.stdout)
+    if not isinstance(data, (dict, list)):
+        raise TypeError(f"Unexpected JSON from gh {cmd}: {result.stdout!r}")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -662,13 +675,14 @@ class GitHub:
         return data
 
     def pr_state(self, pr_number: int) -> str:
-        return self._pr_view(pr_number, "state").get("state", "OPEN")
+        return str(self._pr_view(pr_number, "state").get("state", "OPEN"))
 
     def merge_state(self, pr_number: int) -> dict:
         return self._pr_view(pr_number, "state,mergeStateStatus,mergeable")
 
     def review_decision(self, pr_number: int) -> str:
-        return self._pr_view(pr_number, "reviewDecision").get("reviewDecision", "")
+        data = self._pr_view(pr_number, "reviewDecision")
+        return str(data.get("reviewDecision") or "")
 
     def summary(self, pr_number: int) -> dict:
         return self._pr_view(pr_number, "title,state,reviewDecision")
@@ -2212,10 +2226,14 @@ def _next_steps_lines(
 # ---------------------------------------------------------------------------
 
 
-def _refresh_review(entry: StackEntry) -> None:
-    """Update the entry's review decision, tolerating a transient gh failure."""
+def _refresh_review(entry: StackEntry) -> bool:
+    """Update the entry's review decision, tolerating a transient gh failure.
+
+    Returns whether the entry is now approved.
+    """
     with contextlib.suppress(RuntimeError):
         entry.review_decision = github.review_decision(entry.pr_number)
+    return entry.is_approved
 
 
 def wait_for_approval(
@@ -2231,8 +2249,7 @@ def wait_for_approval(
         entry.error_message = "PR was closed"
         return False
 
-    _refresh_review(entry)
-    if entry.is_approved:
+    if _refresh_review(entry):
         return True
 
     entry.state = PRState.WAITING_FOR_APPROVAL
@@ -2261,8 +2278,7 @@ def wait_for_approval(
             entry.error_message = "PR was closed"
             return False
 
-        _refresh_review(entry)
-        if entry.is_approved:
+        if _refresh_review(entry):
             entry.error_message = ""
             console.print(f"[green]PR #{entry.pr_number} is now approved[/green]")
             return True
@@ -2441,7 +2457,7 @@ def enqueue_and_wait(
         entry.error_message = "Waiting in merge queue..."
         awake_elapsed = 0.0
         while True:
-            if ctx.aborted:
+            if ctx.abort_requested():
                 return False
             if awake_elapsed > opts.merge_timeout:
                 entry.state = PRState.FAILED
@@ -2840,7 +2856,7 @@ def execute_plan(
                     unstacked_through = step_idx + len(run_entries) - 1
                 checkpointer.save(ctx)
 
-            if entry.state == PRState.MERGED:
+            if entry.is_merged():
                 console.print(
                     f"\n[green]PR #{entry.pr_number} already merged, skipping[/green]"
                 )
@@ -2859,7 +2875,7 @@ def execute_plan(
                     f"PR #{entry.pr_number} approval wait was aborted",
                 )
 
-            if entry.state == PRState.MERGED:
+            if entry.is_merged():
                 _refresh_last_landed_sha(ctx, common, entry.pr_number)
             else:
                 if not wait_for_checks(entry, opts=opts, ctx=ctx):
@@ -2869,7 +2885,7 @@ def execute_plan(
                         f"PR #{entry.pr_number} checks failed after retries",
                     )
 
-                if entry.state == PRState.MERGED:
+                if entry.is_merged():
                     _refresh_last_landed_sha(ctx, common, entry.pr_number)
                 else:
                     if not enqueue_and_wait(entry, opts=opts, ctx=ctx):
