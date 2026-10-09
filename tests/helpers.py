@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -99,3 +100,127 @@ class FakeShell:
         if returncode and kwargs.get("check", True):
             raise subprocess.CalledProcessError(returncode, cmd, stderr=stderr)
         return subprocess.CompletedProcess(cmd, returncode, stdout=b"", stderr=stderr)
+
+
+PR_URL = "https://github.com/o/r/pull/{}"
+
+
+def stack_info(pr_number: int, branch: str) -> str:
+    """The stack-info trailer stack-pr writes into a submitted commit."""
+    return f"stack-info: PR: {PR_URL.format(pr_number)}, branch: {branch}"
+
+
+def init_stack_repo(
+    tmp_path: Path, n: int, *, submitted: bool, user: str = "TestBot"
+) -> tuple[Path, Path]:
+    """A clone of a bare 'origin', checked out on 'feature' with *n* commits.
+
+    Commit i (1-based) is titled "c<i>", has the body "Body of c<i>." and adds
+    file<i>.txt. With *submitted*, each commit carries a stack-info trailer for
+    PR #i on branch <user>/stack/<i>, and that branch is pushed to origin.
+
+    Returns (local, remote).
+    """
+    remote = tmp_path / "remote.git"
+    local = tmp_path / "local"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(remote))
+    init_repo(local)
+    git(local, "remote", "add", "origin", str(remote))
+    git(local, "push", "-q", "origin", "main:refs/heads/main")
+    git(local, "fetch", "-q", "origin")
+    git(local, "checkout", "-q", "-b", "feature")
+    for i in range(1, n + 1):
+        (local / f"file{i}.txt").write_text(f"{i}\n")
+        git(local, "add", f"file{i}.txt")
+        msg = f"c{i}\n\nBody of c{i}."
+        if submitted:
+            msg += "\n\n" + stack_info(i, f"{user}/stack/{i}")
+        git(local, "commit", "-q", "-m", msg)
+        if submitted:
+            git(local, "push", "-q", "origin", f"HEAD:refs/heads/{user}/stack/{i}")
+    return local, remote
+
+
+def commit_message(repo: Path, rev: str) -> str:
+    """The full message of *rev*, without git's trailing newline."""
+    return git(repo, "log", "-1", "--format=%B", rev).rstrip("\n")
+
+
+def branches(repo: Path, pattern: str = "refs/heads") -> set[str]:
+    """Short names of the refs under *pattern* in *repo*."""
+    out = git(repo, "for-each-ref", pattern, "--format=%(refname:short)")
+    return set(out.split())
+
+
+@dataclass
+class FakeGitHub:
+    """Stands in for the `gh` CLI: serves PRs from memory, records commands.
+
+    `gh pr merge` squash-merges the PR's head branch into its base in *remote*
+    (a bare repo), as GitHub would.
+    """
+
+    remote: Path | None = None
+    prs: dict[int, dict[str, Any]] = field(default_factory=dict)
+    calls: list[tuple[list[str], str | None]] = field(default_factory=list)
+
+    def add_pr(
+        self,
+        number: int,
+        *,
+        head: str,
+        base: str = "main",
+        state: str = "OPEN",
+        merge_state: str = "CLEAN",
+    ) -> str:
+        url = PR_URL.format(number)
+        self.prs[number] = {
+            "number": number,
+            "url": url,
+            "headRefName": head,
+            "baseRefName": base,
+            "state": state,
+            "mergeStateStatus": merge_state,
+            "title": "",
+            "body": "",
+        }
+        return url
+
+    @property
+    def commands(self) -> list[list[str]]:
+        return [cmd for cmd, _ in self.calls]
+
+    def mutations(self) -> list[list[str]]:
+        """The commands issued, minus read-only `gh pr view` lookups."""
+        return [cmd for cmd in self.commands if cmd[1:3] != ["pr", "view"]]
+
+    def _pr(self, ref: str) -> dict[str, Any]:
+        return self.prs[int(ref.rsplit("/", 1)[-1])]
+
+    def __call__(self, cmd: list[str], stdin: str | None) -> str:
+        """Run a gh command; return its stdout."""
+        self.calls.append((cmd, stdin))
+        sub, args = cmd[1:3], cmd[3:]
+        if sub == ["pr", "view"] and args[1] == "--json":
+            return json.dumps(self._pr(args[0]))
+        if sub == ["pr", "edit"] and args[1] == "-B":
+            self._pr(args[0])["baseRefName"] = args[2]
+            return ""
+        if sub == ["pr", "merge"] and args[1:3] == ["--squash", "-t"]:
+            self._squash_merge(self._pr(args[0]), args[3], stdin or "")
+            return ""
+        if sub == ["pr", "create"]:
+            base, head = args[args.index("-B") + 1], args[args.index("-H") + 1]
+            number = max(self.prs, default=0) + 1
+            return self.add_pr(number, head=head, base=base) + "\n"
+        raise AssertionError(f"unexpected gh command: {cmd}")
+
+    def _squash_merge(self, pr: dict[str, Any], title: str, body: str) -> None:
+        pr["state"] = "MERGED"
+        if self.remote is None:
+            return
+        base, head = pr["baseRefName"], pr["headRefName"]
+        tree, parent = f"{head}^{{tree}}", f"refs/heads/{base}"
+        msg = f"{title}\n\n{body}"
+        sha = git(self.remote, "commit-tree", tree, "-p", parent, "-m", msg).strip()
+        git(self.remote, "update-ref", f"refs/heads/{base}", sha)
