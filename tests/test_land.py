@@ -70,6 +70,23 @@ def test_land_rebases_the_rest_of_the_stack_onto_the_target(stack, fake_gh) -> N
     )
 
 
+def test_land_skips_retargeting_a_pr_in_the_merge_queue(
+    stack,  # noqa: ANN001
+    fake_gh,  # noqa: ANN001
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # GitHub refuses to change the base of a queued PR. Like submit, land
+    # warns and leaves that PR's base alone instead of failing.
+    fake_gh.prs[2]["queued"] = True
+
+    command_land(common_args())
+
+    assert fake_gh.prs[1]["state"] == "MERGED"
+    assert fake_gh.prs[2]["baseRefName"] == "TestBot/stack/1"
+    out = capsys.readouterr().out
+    assert "Could not change the base branch of https://github.com/o/r/pull/2" in out
+
+
 def test_land_leaves_the_user_on_their_branch_rebased_onto_the_target(stack) -> None:  # noqa: ANN001
     local, remote = stack
 
