@@ -2354,6 +2354,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
     current_branch = get_current_branch_name()
     get_branch_name_base(common_args.branch_name_template)
     stashed_changes = False
+    failed = False
     try:
         if args.command in ["submit", "export"] and args.stash:
             # Only pop later if this push actually created a stash entry;
@@ -2404,16 +2405,37 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
             print(h(red("Unknown command: " + args.command)))
             return
     except Exception as exc:
-        # If something failed, checkout the original branch
-        run_shell_command(
-            ["git", "checkout", current_branch], quiet=not common_args.verbose
-        )
+        failed = True
         if isinstance(exc, SubprocessError):
             print_cmd_failure_details(exc)
+        # Try to return to the original branch, but only as a best effort: the
+        # failure may have left a rebase in progress or a dirty tree, and a
+        # failing checkout must not replace the error that got us here.
+        checkout = run_shell_command(
+            ["git", "checkout", current_branch],
+            quiet=not common_args.verbose,
+            check=False,
+        )
+        if checkout.returncode != 0:
+            warning(
+                f"Could not switch back to your original branch '{current_branch}'."
+                " Once the repository is in a clean state, return to it with"
+                f" `git checkout {current_branch}`."
+            )
         raise
     finally:
         if args.command in ["submit", "export"] and args.stash and stashed_changes:
-            run_shell_command(["git", "stash", "pop"], quiet=not common_args.verbose)
+            # After a failure, a failing pop must not hide the original error.
+            pop = run_shell_command(
+                ["git", "stash", "pop"],
+                quiet=not common_args.verbose,
+                check=not failed,
+            )
+            if pop.returncode != 0:
+                warning(
+                    "Could not restore your stashed changes; they are still in"
+                    " the stash. Restore them with `git stash pop`."
+                )
 
 
 if __name__ == "__main__":
