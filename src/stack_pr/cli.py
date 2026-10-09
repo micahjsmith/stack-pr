@@ -731,9 +731,15 @@ def get_branch_name_base(branch_name_template: str) -> str:
 
 
 def get_branch_id(branch_name_template: str, branch_name: str) -> str | None:
+    """Return the `$ID` of `branch_name` if it is one of the stack's branches.
+
+    `branch_name` may be a bare branch name or a remote-tracking ref such as
+    `refs/remotes/origin/<branch>`. The whole name must match the template, so
+    branches that merely contain one of ours as a substring are ignored.
+    """
     branch_name_base = get_branch_name_base(branch_name_template)
-    pattern = branch_name_base.replace(r"$ID", r"(\d+)")
-    match = re.search(pattern, branch_name)
+    pattern = r"(\d+)".join(re.escape(part) for part in branch_name_base.split("$ID"))
+    match = re.fullmatch(rf"(?:refs/remotes/[^/]+/)?{pattern}", branch_name)
     if match:
         return match.group(1)
     return None
