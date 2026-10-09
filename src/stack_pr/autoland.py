@@ -28,7 +28,7 @@ from dataclasses import asdict, astuple, dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, TypeVar, Union
 
 # FIXME(stack-pr): autoland reaches into cli for shared building blocks
 # (get_stack, command_submit, last) and reimplements a retrying subprocess
@@ -618,12 +618,38 @@ def _is_likely_transient(result: subprocess.CompletedProcess[str]) -> bool:
     return any(ind in text for ind in indicators)
 
 
+class GitHubError(RuntimeError):
+    """A ``gh`` call returned output that isn't the JSON autoland expected."""
+
+
+def _parse_json(stdout: str, what: str) -> Any:  # noqa: ANN401
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as e:
+        raise GitHubError(f"Unexpected output from {what}: {stdout[:200]!r}") from e
+
+
 def gh_json(cmd: list[str]) -> dict | list:
-    """Run a gh command and parse JSON output."""
-    result = run(["gh", *cmd], quiet=True)
-    data = json.loads(result.stdout)
+    """Run a gh command and parse its JSON output."""
+    data = _parse_json(run(["gh", *cmd], quiet=True).stdout, f"gh {' '.join(cmd)}")
     if not isinstance(data, (dict, list)):
-        raise TypeError(f"Unexpected JSON from gh {cmd}: {result.stdout!r}")
+        raise GitHubError(f"Unexpected JSON from gh {' '.join(cmd)}: {data!r}")
+    return data
+
+
+def gh_dict(cmd: list[str]) -> dict:
+    """Run a gh command whose output is a JSON object."""
+    data = gh_json(cmd)
+    if not isinstance(data, dict):
+        raise GitHubError(f"Expected a JSON object from gh {' '.join(cmd)}")
+    return data
+
+
+def gh_dicts(cmd: list[str]) -> list[dict]:
+    """Run a gh command whose output is a JSON list of objects."""
+    data = gh_json(cmd)
+    if not isinstance(data, list) or not all(isinstance(d, dict) for d in data):
+        raise GitHubError(f"Expected a JSON list of objects from gh {' '.join(cmd)}")
     return data
 
 
@@ -665,15 +691,12 @@ class GitHub:
 
     def owner_repo(self) -> tuple[str, str]:
         if self._owner_repo is None:
-            data = gh_json(["repo", "view", "--json", "owner,name"])
-            assert isinstance(data, dict)
+            data = gh_dict(["repo", "view", "--json", "owner,name"])
             self._owner_repo = (data["owner"]["login"], data["name"])
         return self._owner_repo
 
     def _pr_view(self, pr_number: int, fields: str) -> dict:
-        data = gh_json(["pr", "view", str(pr_number), "--json", fields])
-        assert isinstance(data, dict)
-        return data
+        return gh_dict(["pr", "view", str(pr_number), "--json", fields])
 
     def pr_state(self, pr_number: int) -> str:
         return str(self._pr_view(pr_number, "state").get("state", "OPEN"))
@@ -689,7 +712,7 @@ class GitHub:
         return self._pr_view(pr_number, "title,state,reviewDecision")
 
     def checks(self, pr_number: int) -> list[dict]:
-        data = gh_json(
+        return gh_dicts(
             [
                 "pr",
                 "checks",
@@ -698,8 +721,6 @@ class GitHub:
                 "name,state,bucket,link,workflow",
             ]
         )
-        assert isinstance(data, list)
-        return data
 
     def rerun_failed(self, run_ids: list[int]) -> None:
         for run_id in dict.fromkeys(run_ids):  # de-dup, preserve order
@@ -768,7 +789,9 @@ class GitHub:
             input_data=json.dumps(body).encode() if body is not None else None,
             retries=_MAX_RETRIES if method == "GET" else 0,
         )
-        return json.loads(result.stdout) if result.stdout.strip() else None
+        if not result.stdout.strip():
+            return None
+        return _parse_json(result.stdout, f"gh api {method} {path}")
 
     def find_native_stack(self, pr_number: int) -> dict | None:
         """The GitHub stack *pr_number* belongs to, or ``None`` if it has none."""
@@ -778,7 +801,8 @@ class GitHub:
     def create_native_stack(self, pr_numbers: list[int]) -> dict:
         """Register *pr_numbers* (bottom first) as a GitHub stack."""
         stack = self._api("POST", "stacks", {"pull_requests": pr_numbers})
-        assert isinstance(stack, dict)
+        if not isinstance(stack, dict):
+            raise GitHubError(f"Unexpected response creating a stack: {stack!r}")
         return stack
 
     def unstack_native_stack(self, native_stack_number: int) -> None:
@@ -858,7 +882,7 @@ class GitHub:
         return MergeQueuePollResult()
 
     def workflow_runs(self, workflow: str, branch: str) -> list[dict]:
-        data = gh_json(
+        return gh_dicts(
             [
                 "run",
                 "list",
@@ -872,8 +896,6 @@ class GitHub:
                 "10",
             ]
         )
-        assert isinstance(data, list)
-        return data
 
     def merge_commit(self, pr_number: int) -> str | None:
         """Return the SHA of the commit ``pr_number`` merged as, if any."""
@@ -1442,7 +1464,7 @@ def _current_owner_repo() -> tuple[str, str]:
     """The repository autoland is landing into, as ``(owner, name)``."""
     try:
         return github.owner_repo()
-    except (RuntimeError, KeyError, json.JSONDecodeError) as e:
+    except (RuntimeError, KeyError) as e:
         raise ValueError(f"Could not determine the current repository: {e}") from e
 
 
@@ -2229,6 +2251,26 @@ def _next_steps_lines(
 # ---------------------------------------------------------------------------
 
 
+_T = TypeVar("_T")
+
+
+def _poll_read(read: Callable[[int], _T], pr_number: int) -> _T | None:
+    """One poll's read of a PR from GitHub, or ``None`` if it failed.
+
+    A long wait shouldn't die on one bad response from GitHub, whether the
+    ``gh`` call failed (after ``run``'s retries) or returned something
+    malformed: the failure is reported, and the caller polls again on its next
+    interval.
+    """
+    try:
+        return read(pr_number)
+    except RuntimeError as e:  # includes GitHubError
+        console.print(
+            f"[yellow]Warning: could not poll PR #{pr_number}: {e}; will retry[/yellow]"
+        )
+        return None
+
+
 def _refresh_review(entry: StackEntry) -> bool:
     """Update the entry's review decision, tolerating a transient gh failure.
 
@@ -2243,7 +2285,8 @@ def wait_for_approval(
     entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
 ) -> bool:
     """Wait until the PR has required approvals. Returns False if aborted."""
-    pr_state = github.pr_state(entry.pr_number)
+    # An unknown state (a failed read) is settled by the checks wait after this.
+    pr_state = _poll_read(github.pr_state, entry.pr_number)
     if pr_state == "MERGED":
         entry.state = PRState.MERGED
         return True
@@ -2272,7 +2315,9 @@ def wait_for_approval(
         )
         resilient_sleep(opts.poll_interval)
 
-        pr_state = github.pr_state(entry.pr_number)
+        pr_state = _poll_read(github.pr_state, entry.pr_number)
+        if pr_state is None:
+            continue
         if pr_state == "MERGED":
             entry.state = PRState.MERGED
             return True
@@ -2303,7 +2348,7 @@ def wait_for_checks(
         if ctx.aborted:
             return False
 
-        pr_state = github.pr_state(entry.pr_number)
+        pr_state = _poll_read(github.pr_state, entry.pr_number)
         if pr_state == "MERGED":
             entry.state = PRState.MERGED
             return True
@@ -2312,7 +2357,13 @@ def wait_for_checks(
             entry.error_message = "PR was closed"
             return False
 
-        result = evaluate_checks(github.checks(entry.pr_number), opts.required_checks)
+        checks = (
+            None if pr_state is None else _poll_read(github.checks, entry.pr_number)
+        )
+        if checks is None:
+            resilient_sleep(opts.poll_interval)
+            continue
+        result = evaluate_checks(checks, opts.required_checks)
         entry.error_message = result.summary
 
         if result.status == CheckStatus.ALL_PASSING:
@@ -2360,7 +2411,10 @@ def wait_for_mergeable(
         if ctx.aborted:
             return MergeableResult(error="aborted")
 
-        data = github.merge_state(entry.pr_number)
+        data = _poll_read(github.merge_state, entry.pr_number)
+        if data is None:
+            resilient_sleep(opts.poll_interval)
+            continue
         pr_state = data.get("state", "")
         merge_state = data.get("mergeStateStatus", "UNKNOWN")
         mergeable = data.get("mergeable", "UNKNOWN")
@@ -2467,7 +2521,10 @@ def enqueue_and_wait(
                 entry.error_message = "Timed out waiting for merge queue"
                 return False
 
-            poll = github.poll_merge(entry.pr_number)
+            # A failed read leaves the merge undecided; poll again.
+            poll = (
+                _poll_read(github.poll_merge, entry.pr_number) or MergeQueuePollResult()
+            )
             if poll.merged:
                 entry.state = PRState.MERGED
                 entry.error_message = ""
@@ -2571,16 +2628,16 @@ def _native_stack_for(prs: list[int]) -> tuple[int | None, bool]:
     """
     try:
         existing = github.find_native_stack(prs[0])
-    except (RuntimeError, json.JSONDecodeError) as e:
+    except RuntimeError as e:
         console.print(f"[yellow]Could not look up GitHub stacks: {e}[/yellow]")
         return None, False
 
     if existing is None:
         try:
             return github.create_native_stack(prs)["number"], True
-        except (RuntimeError, json.JSONDecodeError, KeyError, TypeError) as e:
+        except (RuntimeError, KeyError) as e:
             # The POST may have created the stack even though it looked failed.
-            with contextlib.suppress(RuntimeError, json.JSONDecodeError):
+            with contextlib.suppress(RuntimeError):
                 existing = github.find_native_stack(prs[0])
             if existing is not None and _open_native_stack_prs(existing) == prs:
                 return existing["number"], True
@@ -2630,10 +2687,14 @@ def _await_native_stack_merge(
             return "timed out waiting for the stack to merge"
 
         still_open = []
+        # Whether some PR's state couldn't be read this poll, in which case one
+        # counted as still open may already have merged and left the queue.
+        unread = False
         for entry in entries:
             if entry.state == PRState.MERGED:
                 continue
-            state = github.pr_state(entry.pr_number)
+            state = _poll_read(github.pr_state, entry.pr_number)
+            unread = unread or state is None
             if state == "MERGED":
                 entry.state = PRState.MERGED
                 entry.error_message = ""
@@ -2646,7 +2707,7 @@ def _await_native_stack_merge(
 
         status, message = "", ""
         if uuid:
-            with contextlib.suppress(RuntimeError, json.JSONDecodeError):
+            with contextlib.suppress(RuntimeError):
                 status, message = github.merge_async_status(top.pr_number, uuid)
         if status == "failed":
             return message or "GitHub reported the stack merge as failed"
@@ -2654,7 +2715,9 @@ def _await_native_stack_merge(
         # PR that leaves it, so the lowest open PR leaving means the merge is
         # off. A request still "pending" hasn't reached the queue yet; without
         # a request id to ask, give it one interval to get there.
-        settled = status == "enqueued" or (not uuid and awake_elapsed > 0)
+        settled = not unread and (
+            status == "enqueued" or (not uuid and awake_elapsed > 0)
+        )
         # A failed lookup (None) leaves the merge undecided; keep polling.
         if settled and github.in_merge_queue(still_open[0].pr_number) is False:
             return f"PR #{still_open[0].pr_number} was booted from the merge queue"
@@ -2762,7 +2825,7 @@ def land_as_native_stack(
                     top.pr_number,
                     merge_queue=opts.merge_queue if has_queue is None else has_queue,
                 )
-            except (RuntimeError, json.JSONDecodeError) as e:
+            except RuntimeError as e:
                 # 409: a merge request for this stack is already in flight (e.g.
                 # from a run that was interrupted) — wait for it like our own.
                 if "HTTP 409" not in str(e):
@@ -2778,7 +2841,7 @@ def land_as_native_stack(
         # that aren't in one. Queued PRs stay queued.
         try:
             github.unstack_native_stack(native_stack_number)
-        except (RuntimeError, json.JSONDecodeError) as e:
+        except RuntimeError as e:
             console.print(
                 f"[yellow]Could not dissolve GitHub stack #{native_stack_number}: {e}[/yellow]"
             )
