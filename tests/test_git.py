@@ -129,13 +129,12 @@ def test_get_changed_files_and_dirs(repo: Path) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="get_changed_files splits empty `git diff` output into [Path('.')] "
-    "instead of returning no files",
-)
 def test_get_changed_files_with_no_changes(repo: Path) -> None:
     assert get_changed_files(repo_dir=repo) == []
+
+
+def test_get_changed_dirs_with_no_changes(repo: Path) -> None:
+    assert get_changed_dirs(repo_dir=repo) == set()
 
 
 @pytest.mark.parametrize(

@@ -220,7 +220,7 @@ def get_changed_files(
         "HEAD",
     ]
     result = get_command_output(get_file_changes, cwd=repo_dir)
-    return [Path(r) for r in result.split("\n")]
+    return [Path(r) for r in result.splitlines()]
 
 
 def get_changed_dirs(
