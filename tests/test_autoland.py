@@ -2247,6 +2247,141 @@ def test_native_stack_merge_leaves_a_mismatched_stack_alone(mocker) -> None:  # 
 
 
 # ---------------------------------------------------------------------------
+# A failed GitHub read while polling
+# ---------------------------------------------------------------------------
+
+
+def _gh_replies(mocker, **replies: list) -> None:  # noqa: ANN001
+    """Answer each ``gh <cmd> <subcommand>`` with the next of *replies[subcommand]*.
+
+    A reply is the command's stdout, or an exception for the call to raise. The
+    last reply repeats once the others are used up.
+    """
+
+    def _run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+        queue = replies[cmd[2]]
+        reply = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(reply, Exception):
+            raise reply
+        return subprocess.CompletedProcess(cmd, 0, stdout=reply, stderr="")
+
+    mocker.patch.object(autoland, "run", side_effect=_run)
+    mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
+
+
+_OPEN = json.dumps({"state": "OPEN"})
+_PASSING = json.dumps([{"name": "ci", "bucket": "pass"}])
+
+
+@pytest.mark.usefixtures("autoland_console")
+@pytest.mark.parametrize(
+    "bad_reply",
+    [
+        RuntimeError("HTTP 502: Bad Gateway"),
+        "<html>502 Bad Gateway</html>",  # not JSON
+        "[]",  # JSON, but not the object asked for
+    ],
+)
+def test_wait_for_checks_polls_again_after_a_failed_state_read(
+    mocker,  # noqa: ANN001
+    bad_reply: object,
+) -> None:
+    _gh_replies(mocker, view=[bad_reply, _OPEN], checks=[_PASSING])
+    entry = _pinned_stack([101])[0]
+
+    assert autoland.wait_for_checks(entry, opts=_opts(), ctx=LandingContext())
+
+
+@pytest.mark.usefixtures("autoland_console")
+def test_wait_for_checks_polls_again_after_a_malformed_checks_read(mocker) -> None:  # noqa: ANN001
+    _gh_replies(mocker, view=[_OPEN], checks=['{"oops": 1}', "[1]", _PASSING])
+    entry = _pinned_stack([101])[0]
+
+    assert autoland.wait_for_checks(entry, opts=_opts(), ctx=LandingContext())
+
+
+@pytest.mark.usefixtures("autoland_console")
+def test_wait_for_approval_polls_again_after_a_failed_state_read(mocker) -> None:  # noqa: ANN001
+    _gh_replies(
+        mocker,
+        view=[
+            _OPEN,
+            json.dumps({"reviewDecision": "REVIEW_REQUIRED"}),
+            RuntimeError("HTTP 502: Bad Gateway"),
+            "not json",
+            json.dumps({"state": "MERGED"}),
+        ],
+    )
+    entry = _pinned_stack([101])[0]
+
+    assert autoland.wait_for_approval(entry, opts=_opts(), ctx=LandingContext())
+    assert entry.state == autoland.PRState.MERGED
+
+
+@pytest.mark.usefixtures("autoland_console")
+def test_wait_for_mergeable_polls_again_after_a_malformed_read(mocker) -> None:  # noqa: ANN001
+    clean = json.dumps({"state": "OPEN", "mergeStateStatus": "CLEAN"})
+    _gh_replies(mocker, view=["", RuntimeError("timed out"), clean])
+    entry = _pinned_stack([101])[0]
+
+    result = autoland.wait_for_mergeable(entry, opts=_opts(), ctx=LandingContext())
+
+    assert result.ready
+
+
+def _enqueued(mocker) -> None:  # noqa: ANN001
+    """Skip straight to waiting in the merge queue."""
+    mocker.patch("stack_pr.autoland.console")
+    mocker.patch.object(
+        autoland,
+        "wait_for_mergeable",
+        return_value=autoland.MergeableResult(ready=True),
+    )
+    mocker.patch.object(autoland.github, "enqueue")
+
+
+def test_merge_queue_wait_polls_again_after_a_failed_read(mocker) -> None:  # noqa: ANN001
+    _enqueued(mocker)
+    _gh_replies(
+        mocker, view=["{truncated", RuntimeError("HTTP 502"), '{"state": "MERGED"}']
+    )
+    entry = _pinned_stack([101])[0]
+
+    assert autoland.enqueue_and_wait(entry, opts=_opts(), ctx=LandingContext())
+    assert entry.state == autoland.PRState.MERGED
+
+
+def test_merge_queue_wait_still_times_out_while_reads_fail(mocker) -> None:  # noqa: ANN001
+    _enqueued(mocker)
+    _gh_replies(mocker, view=[RuntimeError("HTTP 502")])
+    entry = _pinned_stack([101])[0]
+
+    opts = _opts(poll_interval=60, merge_timeout=300)
+    assert not autoland.enqueue_and_wait(entry, opts=opts, ctx=LandingContext())
+    assert entry.error_message == "Timed out waiting for merge queue"
+
+
+def test_stack_merge_wait_polls_again_after_a_failed_read(mocker) -> None:  # noqa: ANN001
+    fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
+        mocker, "l\nl\n", [101, 102]
+    )
+    real_pr_state = fake.pr_state
+    failures = [RuntimeError("HTTP 502: Bad Gateway")]
+
+    def flaky_pr_state(pr: int) -> str:
+        if failures:
+            raise failures.pop()
+        return real_pr_state(pr)
+
+    mocker.patch.object(fake, "pr_state", side_effect=flaky_pr_state)
+
+    assert execute() is True
+
+    assert fake.merge_requests == [102]
+    assert landed_one_by_one() == []
+
+
+# ---------------------------------------------------------------------------
 # Retrying failed commands
 # ---------------------------------------------------------------------------
 
