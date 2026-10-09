@@ -3,6 +3,7 @@ import configparser
 import dataclasses
 import json
 import os
+import shlex
 import subprocess
 import sys
 import unicodedata
@@ -665,8 +666,8 @@ def test_interactive_plan_file_carries_the_plan_suffix(mocker) -> None:  # noqa:
     seen = {}
 
     def _editor(cmd, **_kwargs):  # noqa: ANN001, ANN003, ANN202
-        seen["path"] = cmd[1]
-        Path(cmd[1]).write_text("l\n")
+        seen["path"] = cmd[-1]
+        Path(cmd[-1]).write_text("l\n")
         return argparse.Namespace(returncode=0)
 
     mocker.patch.object(autoland.subprocess, "run", side_effect=_editor)
@@ -674,6 +675,26 @@ def test_interactive_plan_file_carries_the_plan_suffix(mocker) -> None:  # noqa:
     autoland.edit_plan_interactive(_stack(1))
 
     assert seen["path"].endswith(".autoland-plan")
+
+
+def test_interactive_plan_editor_may_carry_arguments(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    # $EDITOR is a shell-style command line ("code --wait", "vim -u NONE"),
+    # not just an executable name: its arguments must reach the editor.
+    script = tmp_path / "fake editor.py"
+    script.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "assert args[:2] == ['--wait', 'two words'], args\n"
+        "Path(args[-1]).write_text('l\\nw deploy.yaml\\n')\n"
+    )
+    editor = shlex.join([sys.executable, str(script), "--wait", "two words"])
+    monkeypatch.setenv("EDITOR", editor)
+
+    steps = autoland.edit_plan_interactive(_stack(1))
+
+    assert [type(s) for s in steps] == [LandStep, WorkflowStep]
+    assert steps[1].workflow == "deploy.yaml"
 
 
 def test_editor_format_pins_pr_numbers() -> None:
