@@ -3,7 +3,9 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-from stack_pr.git import is_rebase_in_progress
+import pytest
+
+from stack_pr.git import GitError, check_gh_installed, is_rebase_in_progress
 from stack_pr.shell_commands import run_shell_command
 
 
@@ -43,3 +45,11 @@ def test_is_rebase_in_progress_in_linked_worktree(tmp_path: Path) -> None:
 
     assert is_rebase_in_progress(worktree)
     assert not is_rebase_in_progress(repo)
+
+
+def test_check_gh_installed_raises_git_error_when_gh_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(GitError, match="not installed"):
+        check_gh_installed()
