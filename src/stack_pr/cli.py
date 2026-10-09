@@ -2315,7 +2315,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
     if not args.command:
         print(h(red("Invalid usage of the stack-pr command.")))
         parser.print_help()
-        return
+        # 2 matches argparse's exit status for usage errors.
+        sys.exit(2)
 
     # Handle config command early since it doesn't need git repo setup
     if args.command == "config":
@@ -2402,7 +2403,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
             autoland.run_autoland(common_args, args, config)
         else:
             print(h(red("Unknown command: " + args.command)))
-            return
+            sys.exit(2)
     except Exception as exc:
         # If something failed, checkout the original branch
         run_shell_command(
