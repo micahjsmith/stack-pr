@@ -55,3 +55,26 @@ def test_submit_draft_bitmask_mismatch_exits_nonzero(repo: Path) -> None:
         )
 
     assert excinfo.value.code not in (0, None)
+
+
+def test_no_subcommand_is_a_usage_error(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["stack-pr"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    # 2 matches argparse's exit status for usage errors.
+    assert excinfo.value.code == 2
+    assert "usage:" in capsys.readouterr().out
+
+
+def test_help_subcommand_exits_zero(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["stack-pr", "help"])
+
+    cli.main()  # returning normally means exit status 0
+
+    assert "usage:" in capsys.readouterr().out
