@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from stack_pr.cli import CommitHeader, StackEntry, create_pr, verify
+from stack_pr.errors import StackPRError
 from tests.helpers import PR_URL, FakeGitHub
 
 
@@ -59,7 +60,7 @@ def test_create_pr_skips_an_entry_that_has_a_pr(fake_gh: FakeGitHub) -> None:
 
 
 def test_create_pr_requires_head_and_base(fake_gh: FakeGitHub) -> None:
-    with pytest.raises(RuntimeError):
+    with pytest.raises(StackPRError):
         create_pr(_entry(base=None), is_draft=False)
     assert fake_gh.commands == []
 
@@ -91,34 +92,32 @@ def test_verify_accepts_a_stack_matching_github(two_prs: list[StackEntry]) -> No
         (2, {"headRefName": "someone/else"}, "Head branch name on github mismatches"),
     ],
 )
-def test_verify_rejects_a_pr_that_does_not_match(  # noqa: PLR0917
+def test_verify_rejects_a_pr_that_does_not_match(
     fake_gh: FakeGitHub,
     two_prs: list[StackEntry],
-    capsys,  # noqa: ANN001
     pr: int,
     fields: dict[str, object],
     reason: str,
 ) -> None:
     fake_gh.prs[pr].update(fields)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(StackPRError) as excinfo:
         verify(two_prs)
 
-    assert reason in capsys.readouterr().out
+    assert reason in excinfo.value.message
 
 
 def test_verify_checks_bases_and_mergeability_only_when_asked(
     fake_gh: FakeGitHub,
     two_prs: list[StackEntry],
-    capsys,  # noqa: ANN001
 ) -> None:
     # submit tolerates a diverged base, since it is about to fix it up; land
     # does not.
     fake_gh.prs[2]["baseRefName"] = "main"
     verify(two_prs)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(StackPRError) as excinfo:
         verify(two_prs, check_base=True)
-    assert "Base branch name on github mismatches" in capsys.readouterr().out
+    assert "Base branch name on github mismatches" in excinfo.value.message
 
 
 @pytest.mark.parametrize(
@@ -138,7 +137,7 @@ def test_verify_requires_the_bottom_pr_to_be_mergeable(
     if ok:
         verify(two_prs, check_base=True)
     else:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(StackPRError):
             verify(two_prs, check_base=True)
 
 
@@ -151,12 +150,11 @@ def test_verify_requires_the_bottom_pr_to_be_mergeable(
 )
 def test_verify_rejects_bad_metadata_without_asking_github(
     fake_gh: FakeGitHub,
-    capsys,  # noqa: ANN001
     entry: StackEntry,
     reason: str,
 ) -> None:
-    with pytest.raises(RuntimeError):
+    with pytest.raises(StackPRError) as excinfo:
         verify([entry])
 
-    assert reason in capsys.readouterr().out
+    assert reason in excinfo.value.message
     assert fake_gh.commands == []

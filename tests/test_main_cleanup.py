@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from stack_pr import cli
+from stack_pr.errors import StackPRError
 from tests.helpers import git, init_repo
 
 
@@ -59,3 +60,27 @@ def test_failed_checkout_back_does_not_mask_original_error(
     out = capsys.readouterr().out
     assert "main" in out
     assert "git checkout main" in out
+
+
+def test_user_error_is_reported_after_returning_to_original_branch(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,  # noqa: ANN001
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_on_another_branch(_args: object) -> None:
+        git(repo, "checkout", "-q", "-b", "elsewhere")
+        msg = "the stack can't be landed"
+        raise StackPRError(msg)
+
+    mocker.patch.object(cli, "command_land", side_effect=fail_on_another_branch)
+    monkeypatch.setattr(sys, "argv", ["stack-pr", "land"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "ERROR: " in out
+    assert "the stack can't be landed" in out
+    assert git(repo, "branch", "--show-current").strip() == "main"

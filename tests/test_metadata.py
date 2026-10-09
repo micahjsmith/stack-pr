@@ -15,6 +15,7 @@ from stack_pr.cli import (
     set_base_branches,
     strip_metadata,
 )
+from stack_pr.errors import StackPRError
 from tests.helpers import (
     PR_URL,
     branches,
@@ -163,7 +164,7 @@ def test_add_metadata_requires_a_head_branch(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.chdir(local)
     (e,) = get_stack("main", "HEAD", verbose=False)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(StackPRError):
         add_or_update_metadata(e, needs_rebase=False, verbose=False)
 
 

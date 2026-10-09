@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from stack_pr.cli import command_land
+from stack_pr.errors import StackPRError
 from tests.helpers import (
     FakeGitHub,
     branches,
@@ -149,7 +150,6 @@ def test_land_an_empty_stack_does_nothing(tmp_path: Path, monkeypatch, fake_gh) 
 def test_land_refuses_a_stack_that_fails_verification(
     stack,  # noqa: ANN001
     fake_gh,  # noqa: ANN001
-    capsys,  # noqa: ANN001
     pr_fields: dict[str, str],
     reason: str,
 ) -> None:
@@ -157,10 +157,10 @@ def test_land_refuses_a_stack_that_fails_verification(
     main_before = _rev(remote, "main")
     fake_gh.prs[1].update(pr_fields)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(StackPRError) as excinfo:
         command_land(common_args())
 
-    assert reason in capsys.readouterr().out
+    assert reason in excinfo.value.message
     assert fake_gh.mutations() == []
     assert _rev(remote, "main") == main_before
 
@@ -169,13 +169,12 @@ def test_land_refuses_commits_that_were_never_submitted(
     tmp_path: Path,
     monkeypatch,  # noqa: ANN001
     fake_gh,  # noqa: ANN001
-    capsys,  # noqa: ANN001
 ) -> None:
     local, _remote = init_stack_repo(tmp_path, 1, submitted=False)
     monkeypatch.chdir(local)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(StackPRError) as excinfo:
         command_land(common_args())
 
-    assert "missing some information" in capsys.readouterr().out
+    assert "missing some information" in excinfo.value.message
     assert fake_gh.commands == []
