@@ -1216,6 +1216,65 @@ def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     assert submit.call_args.args[0].base == "FRESH_ORIGIN_MASTER"
 
 
+def _git_out(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],  # noqa: S607
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_rebase_and_resubmit_aborts_conflicted_rebase(
+    tmp_path,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+    mocker,  # noqa: ANN001
+) -> None:
+    # Without --branch, autoland rebases the user's own working copy. If that
+    # rebase conflicts, the failure must be reported *and* the rebase aborted,
+    # rather than leaving the checkout stuck mid-rebase.
+    origin = tmp_path / "origin.git"
+    work = tmp_path / "work"
+    _git_out(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    _git_out(tmp_path, "init", "-b", "main", str(work))
+    _git_out(work, "config", "user.name", "Test")
+    _git_out(work, "config", "user.email", "test@example.com")
+    _git_out(work, "config", "commit.gpgsign", "false")
+    _git_out(work, "remote", "add", "origin", str(origin))
+    (work / "file.txt").write_text("base\n")
+    _git_out(work, "add", "file.txt")
+    _git_out(work, "commit", "-m", "base")
+    _git_out(work, "push", "origin", "main")
+
+    _git_out(work, "checkout", "-b", "feature")
+    (work / "file.txt").write_text("feature\n")
+    _git_out(work, "commit", "-am", "feature change")
+    feature_sha = _git_out(work, "rev-parse", "HEAD")
+
+    _git_out(work, "checkout", "main")
+    (work / "file.txt").write_text("target\n")
+    _git_out(work, "commit", "-am", "conflicting target change")
+    _git_out(work, "push", "origin", "main")
+    _git_out(work, "checkout", "feature")
+
+    monkeypatch.chdir(work)
+    mocker.patch("stack_pr.autoland.console")
+    submit = mocker.patch("stack_pr.autoland.cli.command_submit")
+
+    with pytest.raises(RuntimeError, match="rebase"):
+        autoland.rebase_and_resubmit(_common())
+
+    submit.assert_not_called()
+    for state_dir in ("rebase-merge", "rebase-apply"):
+        assert not (
+            work / _git_out(work, "rev-parse", "--git-path", state_dir)
+        ).exists()
+    assert _git_out(work, "status", "--porcelain") == ""
+    assert _git_out(work, "symbolic-ref", "--short", "HEAD") == "feature"
+    assert _git_out(work, "rev-parse", "HEAD") == feature_sha
+
+
 def test_run_fresh_deduces_base_inside_worktree(mocker) -> None:  # noqa: ANN001
     # With --branch, autoland lands in a temporary worktree whose HEAD is the
     # target branch. The base must be deduced *after* that worktree exists,
