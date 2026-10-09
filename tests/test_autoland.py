@@ -12,7 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from stack_pr import autoland
+from stack_pr import autoland, shell_commands
 from stack_pr.autoland import (
     _ASCII_GLYPHS,
     _ICON_CELLS,
@@ -303,10 +303,13 @@ def test_wait_for_workflow_fetches_when_run_sha_is_unknown_locally(mocker) -> No
         if cmd[:3] == ["git", "merge-base", "--is-ancestor"]:
             # Unknown commit before the fetch, a genuine answer after it.
             fetched = ["git", "fetch", "origin", "main"] in calls
-            return argparse.Namespace(stdout="", returncode=0 if fetched else 128)
-        return argparse.Namespace(stdout="", returncode=0)
+            return argparse.Namespace(
+                stdout="", stderr=b"", returncode=0 if fetched else 128
+            )
+        return argparse.Namespace(stdout="", stderr=b"", returncode=0)
 
-    mocker.patch.object(autoland, "run", side_effect=_run)
+    mocker.patch.object(autoland, "run", side_effect=_run)  # the fetch
+    mocker.patch("stack_pr.git.run_shell_command", side_effect=_run)  # merge-base
     contains = mocker.patch.object(autoland.github, "contains")
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
@@ -326,11 +329,9 @@ def test_wait_for_workflow_falls_back_to_github_compare(mocker) -> None:  # noqa
             {"headSha": "queuesha", "status": "completed", "conclusion": "success"}
         ],
     )
-    mocker.patch.object(
-        autoland,
-        "run",
-        return_value=argparse.Namespace(stdout="", returncode=128),
-    )
+    unknown = argparse.Namespace(stdout="", stderr=b"", returncode=128)
+    mocker.patch.object(autoland, "run", return_value=unknown)  # the fetch
+    mocker.patch("stack_pr.git.run_shell_command", return_value=unknown)
     contains = mocker.patch.object(autoland.github, "contains", return_value=True)
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
@@ -346,11 +347,9 @@ def test_wait_for_workflow_keeps_waiting_when_ancestry_unknown(mocker) -> None: 
         return [{"headSha": "mystery", "status": "completed", "conclusion": "success"}]
 
     mocker.patch.object(autoland.github, "workflow_runs", side_effect=_runs)
-    mocker.patch.object(
-        autoland,
-        "run",
-        return_value=argparse.Namespace(stdout="", returncode=128),
-    )
+    unknown = argparse.Namespace(stdout="", stderr=b"", returncode=128)
+    mocker.patch.object(autoland, "run", return_value=unknown)  # the fetch
+    mocker.patch("stack_pr.git.run_shell_command", return_value=unknown)
     mocker.patch.object(autoland.github, "contains", return_value=None)
     mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
     step = WorkflowStep(workflow="deploy.yaml")
@@ -362,12 +361,12 @@ def test_wait_for_workflow_keeps_waiting_when_ancestry_unknown(mocker) -> None: 
 
 
 def test_local_is_ancestor_distinguishes_no_from_unknown(mocker) -> None:  # noqa: ANN001
-    run_mock = mocker.patch.object(autoland, "run")
-    run_mock.return_value = argparse.Namespace(stdout="", returncode=0)
+    run_mock = mocker.patch("stack_pr.git.run_shell_command")
+    run_mock.return_value = argparse.Namespace(stderr=b"", returncode=0)
     assert autoland._local_is_ancestor("a", "b") is True  # noqa: SLF001
-    run_mock.return_value = argparse.Namespace(stdout="", returncode=1)
+    run_mock.return_value = argparse.Namespace(stderr=b"", returncode=1)
     assert autoland._local_is_ancestor("a", "b") is False  # noqa: SLF001
-    run_mock.return_value = argparse.Namespace(stdout="", returncode=128)
+    run_mock.return_value = argparse.Namespace(stderr=b"", returncode=128)
     assert autoland._local_is_ancestor("a", "b") is None  # noqa: SLF001
 
 
@@ -397,11 +396,9 @@ def test_ancestry_caches_verdicts(mocker) -> None:  # noqa: ANN001
     # The poll loop re-examines the same runs every interval; commits are
     # immutable, so each pair is decided at most once.
     contains = mocker.patch.object(autoland.github, "contains", return_value=False)
-    mocker.patch.object(
-        autoland,
-        "run",
-        return_value=argparse.Namespace(stdout="", returncode=128),
-    )
+    unknown = argparse.Namespace(stdout="", stderr=b"", returncode=128)
+    mocker.patch.object(autoland, "run", return_value=unknown)  # the fetch
+    mocker.patch("stack_pr.git.run_shell_command", return_value=unknown)
     ancestry = autoland._Ancestry(common_args())  # noqa: SLF001
     assert ancestry.contains("landedsha", "runsha1") is False
     assert ancestry.contains("landedsha", "runsha1") is False
@@ -670,7 +667,7 @@ def test_interactive_plan_file_carries_the_plan_suffix(mocker) -> None:  # noqa:
         Path(cmd[-1]).write_text("l\n")
         return argparse.Namespace(returncode=0)
 
-    mocker.patch.object(autoland.subprocess, "run", side_effect=_editor)
+    mocker.patch.object(shell_commands.subprocess, "run", side_effect=_editor)
 
     autoland.edit_plan_interactive(_stack(1))
 
@@ -1722,7 +1719,7 @@ def _write_checkpoint(path: Path, plan_file: Path | None) -> None:
 def _patch_replan_io(mocker, answer: str):  # noqa: ANN001, ANN202
     """Stub the git/GitHub side of a replan; return the execute_plan mock."""
     mocker.patch("stack_pr.autoland.console").input.return_value = answer
-    mocker.patch("stack_pr.autoland._current_branch", return_value="feat")
+    mocker.patch("stack_pr.autoland.get_current_branch_name", return_value="feat")
     mocker.patch("stack_pr.autoland.cli.deduce_base", side_effect=lambda c: c)
     mocker.patch("stack_pr.autoland.cli.get_stack", return_value=[])
     mocker.patch("stack_pr.autoland._stack_entries", return_value=_pinned_stack([103]))
@@ -1795,7 +1792,7 @@ def test_replan_without_a_checkpoint_exits(tmp_path) -> None:  # noqa: ANN001
 def _patch_resume_io(mocker, *, success: bool = True):  # noqa: ANN001, ANN202
     """Stub the git/GitHub side of a resume; return the execute_plan mock."""
     mocker.patch("stack_pr.autoland.console")
-    mocker.patch("stack_pr.autoland._current_branch", return_value="feat")
+    mocker.patch("stack_pr.autoland.get_current_branch_name", return_value="feat")
     mocker.patch("stack_pr.autoland.cli.deduce_base", side_effect=lambda c: c)
     mocker.patch("stack_pr.autoland.enrich_stack")
     mocker.patch("stack_pr.autoland.signal.signal")
@@ -2286,7 +2283,8 @@ def _gh_replies(mocker, **replies: list) -> None:  # noqa: ANN001
             raise reply
         return subprocess.CompletedProcess(cmd, 0, stdout=reply, stderr="")
 
-    mocker.patch.object(autoland, "run", side_effect=_run)
+    # Both autoland.run and the shared gh JSON helpers run commands through it.
+    mocker.patch.object(shell_commands, "run_with_retry", side_effect=_run)
     mocker.patch.object(autoland, "resilient_sleep", return_value=0.0)
 
 
@@ -2409,14 +2407,14 @@ def test_stack_merge_wait_polls_again_after_a_failed_read(mocker) -> None:  # no
 
 def _fake_subprocess(mocker, *, returncode: int = 1, stderr: str = "", exc=None):  # noqa: ANN001, ANN202
     """Patch the subprocess boundary of ``run``; returns the mock to count calls."""
-    mocker.patch.object(autoland, "_RETRY_DELAY", 0)
+    mocker.patch.object(shell_commands, "RETRY_DELAY", 0)
 
     def _run(cmd, **_kwargs):  # noqa: ANN001, ANN003, ANN202
         if exc is not None:
             raise exc
         return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr)
 
-    return mocker.patch.object(autoland.subprocess, "run", side_effect=_run)
+    return mocker.patch.object(shell_commands.subprocess, "run", side_effect=_run)
 
 
 def test_enqueue_is_not_resent_after_a_transient_looking_failure(mocker) -> None:  # noqa: ANN001

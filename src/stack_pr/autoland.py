@@ -30,12 +30,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar, Union
 
-# FIXME(stack-pr): autoland reaches into cli for shared building blocks
-# (get_stack, command_submit, last) and reimplements a retrying subprocess
-# wrapper below (run/gh_json) that overlaps with stack_pr.shell_commands. These
-# should be consolidated into a shared module (e.g. stack_pr.git / a common
-# helpers module) usable by every subcommand, rather than importing from cli.
-from stack_pr import cli
+# Autoland automates stack-pr's own commands, so it uses cli's stack model:
+# CommonArgs, StackEntry, get_stack, deduce_base, command_submit, and last.
+# Plain shell, git, and gh helpers come from the shared modules instead.
+from stack_pr import cli, shell_commands
+from stack_pr import github as github_api
+from stack_pr.git import GitError, get_current_branch_name, is_ancestor
+from stack_pr.github import GitHubError, gh_dict, gh_dicts, gh_json, parse_json
+from stack_pr.shell_commands import MAX_RETRIES, run_shell_command
 
 # ---------------------------------------------------------------------------
 # Defaults (overridable via [autoland] config or flags)
@@ -470,10 +472,6 @@ class AutolandLock:
             self._fd = None
 
 
-def _current_branch() -> str:
-    return run(["git", "rev-parse", "--abbrev-ref", "HEAD"], quiet=True).stdout.strip()
-
-
 # ---------------------------------------------------------------------------
 # Sleep / wake resilience
 # ---------------------------------------------------------------------------
@@ -506,8 +504,9 @@ def _wait_for_network(max_wait: int = 120, interval: int = 5) -> None:
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
         try:
-            result = subprocess.run(
+            result = run_shell_command(
                 ["gh", "api", "user", "--jq", ".login"],
+                quiet=False,
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -528,8 +527,14 @@ def _wait_for_network(max_wait: int = 120, interval: int = 5) -> None:
 # Shell helpers (with transient-failure retries)
 # ---------------------------------------------------------------------------
 
-_MAX_RETRIES = 2
-_RETRY_DELAY = 10
+
+def _announce_run(cmd: list[str], attempt: int) -> None:
+    suffix = "" if attempt == 0 else f"  (attempt {attempt + 1})"
+    console.print(f"[dim]$ {' '.join(cmd)}{suffix}[/dim]")
+
+
+def _announce_retry(attempt: int, retries: int, delay: float) -> None:
+    console.print(f"[yellow]  retry {attempt}/{retries} in {delay}s...[/yellow]")
 
 
 def run(
@@ -539,118 +544,27 @@ def run(
     capture: bool = True,
     quiet: bool = False,
     input_data: bytes | None = None,
-    retries: int = _MAX_RETRIES,
+    retries: int = MAX_RETRIES,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess, retrying likely-transient failures.
 
-    Pass ``retries=0`` for a command that changes state (a merge, a POST, a
-    rebase): a request that looks like it failed may still have taken effect,
-    so sending it again is not safe. The caller's later polling reconciles.
+    See ``shell_commands.run_with_retry``; this adds autoland's console output
+    (the command, and each retry) unless *quiet*. Pass ``retries=0`` for a
+    command that changes state (a merge, a POST, a rebase): the caller's later
+    polling reconciles a request that may have taken effect despite failing.
 
     Commands run in the current working directory (autoland chdirs into a
     temporary worktree when ``--branch`` is used).
     """
-    last_err: Exception | None = None
-
-    for attempt in range(retries + 1):
-        if attempt > 0:
-            if not quiet:
-                console.print(
-                    f"[yellow]  retry {attempt}/{retries} in {_RETRY_DELAY}s..."
-                    "[/yellow]"
-                )
-            time.sleep(_RETRY_DELAY)
-
-        if not quiet:
-            suffix = "" if attempt == 0 else f"  (attempt {attempt + 1})"
-            console.print(f"[dim]$ {' '.join(cmd)}{suffix}[/dim]")
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=capture,
-                text=True,
-                input=input_data.decode() if input_data else None,
-                timeout=300,
-                check=False,
-            )
-        except FileNotFoundError as exc:  # missing executable; not transient
-            raise RuntimeError(f"Command error: {exc}") from exc
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            last_err = RuntimeError(f"Command error: {exc}")
-            continue
-
-        if check and result.returncode != 0:
-            stderr = result.stderr.strip() if result.stderr else ""
-            last_err = RuntimeError(
-                f"Command failed ({result.returncode}): {' '.join(cmd)}\n{stderr}"
-            )
-            # Only retry failures that look transient (network), not logical
-            # failures like a merge conflict.
-            if _is_likely_transient(result):
-                continue
-            raise last_err
-
-        return result
-
-    assert last_err is not None
-    raise last_err
-
-
-def _is_likely_transient(result: subprocess.CompletedProcess[str]) -> bool:
-    indicators = [
-        "could not resolve",
-        "connection refused",
-        "connection reset",
-        "timed out",
-        "timeout",
-        "network is unreachable",
-        "temporary failure",
-        "ssl",
-        "eof",
-        "broken pipe",
-        "http 5",  # 500, 502, 503, etc.
-        "server error",
-        "try again",
-        "unavailable",
-    ]
-    text = ((result.stderr or "") + (result.stdout or "")).lower()
-    return any(ind in text for ind in indicators)
-
-
-class GitHubError(RuntimeError):
-    """A ``gh`` call returned output that isn't the JSON autoland expected."""
-
-
-def _parse_json(stdout: str, what: str) -> Any:  # noqa: ANN401
-    try:
-        return json.loads(stdout)
-    except json.JSONDecodeError as e:
-        raise GitHubError(f"Unexpected output from {what}: {stdout[:200]!r}") from e
-
-
-def gh_json(cmd: list[str]) -> dict | list:
-    """Run a gh command and parse its JSON output."""
-    data = _parse_json(run(["gh", *cmd], quiet=True).stdout, f"gh {' '.join(cmd)}")
-    if not isinstance(data, (dict, list)):
-        raise GitHubError(f"Unexpected JSON from gh {' '.join(cmd)}: {data!r}")
-    return data
-
-
-def gh_dict(cmd: list[str]) -> dict:
-    """Run a gh command whose output is a JSON object."""
-    data = gh_json(cmd)
-    if not isinstance(data, dict):
-        raise GitHubError(f"Expected a JSON object from gh {' '.join(cmd)}")
-    return data
-
-
-def gh_dicts(cmd: list[str]) -> list[dict]:
-    """Run a gh command whose output is a JSON list of objects."""
-    data = gh_json(cmd)
-    if not isinstance(data, list) or not all(isinstance(d, dict) for d in data):
-        raise GitHubError(f"Expected a JSON list of objects from gh {' '.join(cmd)}")
-    return data
+    return shell_commands.run_with_retry(
+        cmd,
+        check=check,
+        capture=capture,
+        input_data=input_data,
+        retries=retries,
+        on_run=None if quiet else _announce_run,
+        on_retry=None if quiet else _announce_retry,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -696,10 +610,10 @@ class GitHub:
         return self._owner_repo
 
     def _pr_view(self, pr_number: int, fields: str) -> dict:
-        return gh_dict(["pr", "view", str(pr_number), "--json", fields])
+        return github_api.pr_view(pr_number, fields)
 
     def pr_state(self, pr_number: int) -> str:
-        return str(self._pr_view(pr_number, "state").get("state", "OPEN"))
+        return github_api.pr_state(pr_number)
 
     def merge_state(self, pr_number: int) -> dict:
         return self._pr_view(pr_number, "state,mergeStateStatus,mergeable")
@@ -787,11 +701,11 @@ class GitHub:
             cmd,
             quiet=True,
             input_data=json.dumps(body).encode() if body is not None else None,
-            retries=_MAX_RETRIES if method == "GET" else 0,
+            retries=MAX_RETRIES if method == "GET" else 0,
         )
         if not result.stdout.strip():
             return None
-        return _parse_json(result.stdout, f"gh api {method} {path}")
+        return parse_json(result.stdout, f"gh api {method} {path}")
 
     def find_native_stack(self, pr_number: int) -> dict | None:
         """The GitHub stack *pr_number* belongs to, or ``None`` if it has none."""
@@ -975,8 +889,9 @@ class Worktree:
             f"at {worktree_dir}[/bold]"
         )
         try:
-            subprocess.run(
+            run_shell_command(
                 ["git", "worktree", "add", "-f", worktree_dir, self.branch],
+                quiet=False,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -995,8 +910,9 @@ class Worktree:
             os.chdir(self._orig_cwd)
             self._orig_cwd = None
         console.print(f"\n[dim]Cleaning up worktree at {self.path}...[/dim]")
-        subprocess.run(
+        run_shell_command(
             ["git", "worktree", "remove", "--force", str(self.path)],
+            quiet=False,
             check=False,
             capture_output=True,
             text=True,
@@ -1237,22 +1153,15 @@ def _sha_eq(a: str, b: str) -> bool:
 def _local_is_ancestor(ancestor: str, descendant: str) -> bool | None:
     """Whether ``ancestor`` is an ancestor of ``descendant``, per this clone.
 
-    ``None`` means the local repo cannot answer: ``git merge-base
-    --is-ancestor`` exits 128 ("Not a valid commit name") when either commit is
-    missing from this clone, rather than 1 for a genuine "no". The two must not
-    be conflated — a workflow run's head commit is routinely absent here,
+    ``None`` means the local repo cannot answer, typically because either
+    commit is missing from this clone. That must not be conflated with a
+    genuine "no" — a workflow run's head commit is routinely absent here,
     because ``origin/<target>`` advances while we poll.
     """
-    result = run(
-        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
-        check=False,
-        quiet=True,
-    )
-    if result.returncode == 0:
-        return True
-    if result.returncode == 1:
-        return False
-    return None
+    try:
+        return is_ancestor(ancestor, descendant)
+    except GitError:
+        return None
 
 
 class _Ancestry:
@@ -1810,7 +1719,9 @@ def edit_plan_interactive(
         console.print(f"[bold]Opening plan in {editor}...[/bold]")
         # $EDITOR is a command line, not just a program name ("code --wait").
         # An empty value splits to nothing; keep it so the error names it.
-        subprocess.run([*(shlex.split(editor) or [editor]), plan_file], check=True)
+        run_shell_command(
+            [*(shlex.split(editor) or [editor]), plan_file], quiet=False, check=True
+        )
         edited_text = Path(plan_file).read_text()
 
         non_comment = [
@@ -3351,7 +3262,7 @@ def _ask_replan_or_overwrite(state_path: Path) -> str | None:
 
 
 def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
-    branch = opts.branch or _current_branch()
+    branch = opts.branch or get_current_branch_name()
     state_path = opts.state_file or AutolandCheckpointer.default_path(branch)
 
     # A dry run only previews the plan; it neither writes state nor competes for
@@ -3459,7 +3370,7 @@ def _state_path(opts: AutolandOptions) -> Path:
     """The checkpoint an existing run for *opts* would have written."""
     if opts.state_file:
         return opts.state_file
-    return AutolandCheckpointer.default_path(opts.branch or _current_branch())
+    return AutolandCheckpointer.default_path(opts.branch or get_current_branch_name())
 
 
 def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
@@ -3495,7 +3406,7 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             )
             sys.exit(1)
 
-        if opts.branch or checkpointer.branch != _current_branch():
+        if opts.branch or checkpointer.branch != get_current_branch_name():
             worktree = Worktree(opts.branch or checkpointer.branch)
             worktree.create()
 
@@ -3678,7 +3589,7 @@ def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> 
     console.print(f"[bold]Replanning from checkpoint: [cyan]{state_path}[/cyan][/bold]")
     worktree: Worktree | None = None
     try:
-        if opts.branch or branch != _current_branch():
+        if opts.branch or branch != get_current_branch_name():
             worktree = Worktree(branch)
             worktree.create()
         # As in _run_fresh: deduce against the (possibly worktree) HEAD.
@@ -3850,7 +3761,7 @@ def _gather_status(opts: AutolandOptions) -> _StatusReport:
     # Probe once: the run may start or stop while the report is being printed,
     # and the report should describe a single moment.
     running = lock.is_held()
-    branch = opts.branch or ("" if opts.state_file else _current_branch())
+    branch = opts.branch or ("" if opts.state_file else get_current_branch_name())
 
     ctx: LandingContext | None = None
     base = ""

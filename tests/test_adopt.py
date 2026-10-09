@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,10 @@ def test_format_stack_info_roundtrips_with_regex() -> None:
 
 def test_get_adopt_pr_info_no_arg_uses_current_branch(mocker) -> None:  # noqa: ANN001
     out = '{"number": 7, "headRefName": "feat", "state": "OPEN", "url": "u"}'
-    spy = mocker.patch("stack_pr.cli.get_command_output", return_value=out)
+    spy = mocker.patch(
+        "stack_pr.shell_commands.run_with_retry",
+        return_value=subprocess.CompletedProcess([], 0, stdout=out, stderr=""),
+    )
 
     info = get_adopt_pr_info(None)
 
@@ -47,7 +51,10 @@ def test_get_adopt_pr_info_no_arg_uses_current_branch(mocker) -> None:  # noqa: 
 
 def test_get_adopt_pr_info_with_arg(mocker) -> None:  # noqa: ANN001
     out = '{"number": 9, "headRefName": "feat", "state": "OPEN", "url": "u"}'
-    spy = mocker.patch("stack_pr.cli.get_command_output", return_value=out)
+    spy = mocker.patch(
+        "stack_pr.shell_commands.run_with_retry",
+        return_value=subprocess.CompletedProcess([], 0, stdout=out, stderr=""),
+    )
 
     get_adopt_pr_info("9")
 

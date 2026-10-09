@@ -266,3 +266,36 @@ def is_rebase_in_progress(repo_dir: Path | None = None) -> bool:
     if proc.returncode != 0:
         return False
     return any((cwd / path).exists() for path in proc.stdout.splitlines() if path)
+
+
+def is_ancestor(
+    ancestor: str, descendant: str, *, quiet: bool = True, repo_dir: Path | None = None
+) -> bool:
+    """Returns whether ``ancestor`` is an ancestor of (or is) ``descendant``.
+
+    Args:
+        ancestor: a commit-ish.
+        descendant: a commit-ish.
+        quiet: capture git's output instead of passing it through.
+        repo_dir: path to the repo. Defaults to the current working directory.
+
+    Raises:
+        GitError: if git cannot tell, e.g. because either commit does not exist
+        in this repo (`git merge-base --is-ancestor` exits 128 for that, as
+        opposed to 1 for a genuine "no").
+    """
+    proc = run_shell_command(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repo_dir,
+        check=False,
+        quiet=quiet,
+    )
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    stderr = proc.stderr.decode(errors="replace").strip() if proc.stderr else ""
+    raise GitError(
+        f"Could not tell whether {ancestor} is an ancestor of {descendant}"
+        f" (git exited {proc.returncode})" + (f": {stderr}" if stderr else "")
+    )
