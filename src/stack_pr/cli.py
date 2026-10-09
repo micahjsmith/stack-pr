@@ -591,7 +591,9 @@ def get_stack(base: str, head: str, *, verbose: bool) -> list[StackEntry]:
 def set_base_branches(st: list[StackEntry], target: str) -> None:
     prev_branch: str | None = target
     for e in st:
-        e.base, prev_branch = prev_branch, e.head
+        # An entry may have no head yet (e.g. a commit that was never
+        # submitted); leave the next base unset so verify() can report it.
+        e.base, prev_branch = prev_branch, e.head if e.has_head() else None
 
 
 def verify(st: list[StackEntry], *, check_base: bool = False) -> None:

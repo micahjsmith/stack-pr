@@ -148,12 +148,6 @@ def test_land_refuses_a_stack_that_fails_verification(
     assert _rev(remote, "main") == main_before
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="set_base_branches reads e.head before verify() runs, so an "
-    "unsubmitted stack crashes with 'head is not set' instead of the "
-    "ERROR_STACKINFO_MISSING guidance",
-)
 def test_land_refuses_commits_that_were_never_submitted(
     tmp_path: Path,
     monkeypatch,  # noqa: ANN001
