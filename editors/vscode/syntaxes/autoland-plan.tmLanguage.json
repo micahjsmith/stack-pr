@@ -31,6 +31,12 @@
       "include": "#confirm-bare"
     },
     {
+      "include": "#exec"
+    },
+    {
+      "include": "#exec-missing"
+    },
+    {
       "include": "#unknown-step"
     },
     {
@@ -142,6 +148,27 @@
       "captures": {
         "1": {
           "name": "keyword.control.confirm.autoland-plan"
+        }
+      }
+    },
+    "exec": {
+      "comment": "x <command> — a command line, run without a shell. Like every step it ends at the first ' #', quotes or not, so it cannot start with '#'.",
+      "match": "^[ \\t]*(x)[ \\t]+([^ \\t#](?:(?! +#).)*)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.exec.autoland-plan"
+        },
+        "2": {
+          "name": "string.unquoted.command.autoland-plan"
+        }
+      }
+    },
+    "exec-missing": {
+      "comment": "'x' requires a command.",
+      "match": "^[ \\t]*(x)(?=[ \\t]*$| +#)",
+      "captures": {
+        "1": {
+          "name": "invalid.illegal.missing-command.autoland-plan"
         }
       }
     },

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from stack_pr.autoland.steps.execution import StepContext, StepResult
     from stack_pr.autoland.steps.view import StepView
 
-# A workflow or confirm step's identity for replanning: its keyword, its text,
+# A workflow, confirm, or command step's identity for replanning: its keyword, its text,
 # and the PRs landed before it. A step means "once these PRs have landed, this
 # holds", so a result recorded under the same PRs is still true in a new plan.
 ReplanKey = tuple[str, str, frozenset[int]]

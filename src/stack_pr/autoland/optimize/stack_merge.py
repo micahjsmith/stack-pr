@@ -39,7 +39,7 @@ def stack_merge_run(run: LandingContext, indices: Iterable[int]) -> list[StackEn
     """The PRs a stack merge starting at the first of *indices* would land.
 
     That is the run of consecutive land steps, from the first of *indices*,
-    whose PRs are still open. Any other step ends the run: a ``w`` or ``c``
+    whose PRs are still open. Any other step ends the run: a ``w``, ``c``, or ``x``
     step has to see the PRs above it land separately from the ones below it.
     A run of fewer than two PRs gains nothing from a stack merge, so it comes
     back empty.

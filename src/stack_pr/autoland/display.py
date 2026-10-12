@@ -109,6 +109,7 @@ _TONE_STYLES = {
     StepTone.AWAITING_USER: "yellow",
     StepTone.IN_QUEUE: "cyan",
     StepTone.AWAITING_WORKFLOW: "blue",
+    StepTone.RUNNING: "blue",
 }
 
 

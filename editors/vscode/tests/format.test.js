@@ -33,6 +33,19 @@ test("a c step never sets the column", () => {
   );
 });
 
+test("an x step never sets the column", () => {
+  // Like a condition, a command line routinely runs long.
+  const src = ["x ./scripts/provision.sh --env staging --verbose # provision", "l 101 # land it"].join("\n");
+  assert.strictEqual(
+    formatPlan(src),
+    ["x ./scripts/provision.sh --env staging --verbose # provision", "l 101                         # land it", ""].join("\n")
+  );
+});
+
+test("collapses the space after x but not inside its command", () => {
+  assert.strictEqual(formatPlan("x    bash -c 'echo  hi' # say hi\n"), "x bash -c 'echo  hi'          # say hi\n");
+});
+
 test("a c step past the column keeps a space before its comment", () => {
   // Without the space the '#' would become part of the condition, which would
   // change what the plan does.

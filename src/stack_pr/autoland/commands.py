@@ -113,7 +113,7 @@ def register_parser(
         "-i",
         "--interactive",
         action="store_true",
-        help="Edit the landing plan in $EDITOR (add workflow/confirm checkpoints).",
+        help="Edit the landing plan in $EDITOR (add workflow/confirm/command steps).",
     )
     plan_source.add_argument(
         "--plan-file",

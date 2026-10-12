@@ -69,6 +69,7 @@ def execute_plan(
                 upcoming=functools.partial(upcoming, index),
                 landed_sha=landed_sha,
                 ends_landed_prefix=index == prefix_end,
+                branch=checkpointer.branch,
             )
         )
         _record_landed_sha(ctx, result.landed_sha)

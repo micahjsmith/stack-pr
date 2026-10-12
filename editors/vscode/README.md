@@ -1,7 +1,7 @@
 # stack-pr Autoland Plan — VS Code support
 
 Syntax highlighting and formatting for `stack-pr autoland` landing plans: the
-`l` / `w` / `c` step files you edit with `autoland -i` or pass to
+`l` / `w` / `c` / `x` step files you edit with `autoland -i` or pass to
 `autoland --plan-file`.
 
 See [`examples/example.autoland-plan`](examples/example.autoland-plan) for a
@@ -11,25 +11,27 @@ plan exercising every step type.
 
 | Plan syntax | Scope |
 | --- | --- |
-| `l`, `w`, `c` step keywords | `keyword.control.<step>.autoland-plan` |
+| `l`, `w`, `c`, `x` step keywords | `keyword.control.<step>.autoland-plan` |
 | `l 123` — the PR number | `constant.numeric.pr-number.autoland-plan` |
 | `l https://…/pull/123` — the PR URL | `markup.underline.link.autoland-plan` |
 | `w deploy.yaml` — the workflow name | `entity.name.function.workflow.autoland-plan` |
 | `c QA sign-off complete` — the condition | `string.unquoted.condition.autoland-plan` |
+| `x ./provision.sh staging` — the command | `string.unquoted.command.autoland-plan` |
 | `#` comments, whole-line and trailing | `comment.line.number-sign.autoland-plan` |
 | a step the parser would reject | `invalid.illegal.*.autoland-plan` |
 
 The `invalid` scopes mirror `parse_plan` in `stack_pr/autoland/plan.py`, so a
 plan that highlights as an error is a plan `autoland` will refuse to run: an `l`
 with something that is neither a PR number nor a PR URL, a `w` with no
-workflow, or a line that is not a step at all.
+workflow, an `x` with no command, or a line that is not a step at all.
 
 Two details worth knowing, both inherited from the parser:
 
 - A `#` only starts a comment when whitespace precedes it. `l #123` is a bare
   `l` followed by a comment (which is why `l #123` does not pin PR 123), while
   `c ship it#now` keeps the `#` inside the condition.
-- A workflow name runs to the end of the step, spaces included.
+- A workflow name runs to the end of the step, spaces included, and so does
+  an `x` command — so a ` #` ends the command even inside quotes.
 
 ## Formatting
 
@@ -45,14 +47,14 @@ does — the formatted text parses into exactly the same steps:
 - **A long `l` or `w` step widens its block**: if one reaches into column 30,
   that block's comments move to four spaces past the longest such step, so the
   block still lines up internally without affecting the rest of the file.
-- **`c` steps never set the column.** A confirm condition is free text that
-  routinely runs long, and letting it decide would drag every comment in the
-  block off to the right. Their comments are still aligned with everything
-  else; a condition already past the column keeps a single space before its
+- **`c` and `x` steps never set the column.** A confirm condition is free
+  text and a command line can be anything, and both routinely run long;
+  letting them decide would drag every comment in the block off to the right.
+  Their comments are still aligned with everything else; a condition already past the column keeps a single space before its
   `#`, since losing that space would fold the comment into the condition.
 - **The gap after a step keyword is collapsed** to a single space, and steps are
-  unindented. The argument itself is left alone: a condition is free text, and a
-  workflow name may contain spaces.
+  unindented. The argument itself is left alone: a condition is free text, a
+  workflow name may contain spaces, and a command's spacing may be quoted.
 - **Whole-line comments keep their own indentation**, since the generated plan
   header is hand-aligned. They do not break up a block.
 - **Trailing whitespace goes**, and the file ends with exactly one newline.
@@ -88,7 +90,7 @@ From this directory:
 ```bash
 # Package and install into VS Code.
 npx --yes @vscode/vsce package
-code --install-extension autoland-plan-0.2.0.vsix
+code --install-extension autoland-plan-0.3.0.vsix
 ```
 
 Or, for development, symlink it into your extensions directory and reload:

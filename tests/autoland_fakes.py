@@ -9,6 +9,8 @@ records what it was asked to do, so the test reads it back afterwards.
 - ``FakeWaits``: waits that succeed or fail at once, per outcome function.
 - ``FakeRepo``: landed SHAs from a table; counts rebases and fetches; knows
   the ancestry it is given, plus what it learns from a fetch.
+- ``FakeCommands``: records each command run; exits with a scripted status,
+  or raises a scripted error.
 - ``FakeGitHub``: an in-memory GitHub (PR states, reviews, checks, the merge
   queue, workflow runs, GitHub stacks), whose calls can be scripted.
 - ``FakeSleep``: records each sleep; can end a wait by raising
@@ -21,9 +23,10 @@ runs the real wait loops of ``autoland.waits`` over the other fakes.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
+from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from stack_pr import cli
@@ -191,6 +194,7 @@ class FakeRepo:
     lookups: list[int | None] = field(default_factory=list)
     rebases: int = 0
     fetches: int = 0
+    top_level: Path = Path("/work/repo")
 
     def fetch_target(self, common: cli.CommonArgs) -> None:
         self.fetches += 1
@@ -207,6 +211,37 @@ class FakeRepo:
         self.rebases += 1
         if self.rebase_error is not None:
             raise self.rebase_error
+
+    def root(self) -> Path:
+        return self.top_level
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CommandRun:
+    argv: list[str]
+    cwd: Path
+    env: dict[str, str]
+
+
+@dataclass
+class FakeCommands:
+    """Each command exits with the next of *results* (0 once they run out);
+    a result that is an exception is raised instead."""
+
+    results: list[int | BaseException] = field(default_factory=list)
+    runs: list[CommandRun] = field(default_factory=list)
+
+    def run(self, argv: list[str], *, cwd: Path, env: Mapping[str, str]) -> int:
+        self.runs.append(CommandRun(list(argv), cwd, dict(env)))
+        result = self.results.pop(0) if self.results else 0
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +502,7 @@ class FakeServices:
     ui: FakeUI = field(default_factory=FakeUI)
     sleep: Callable[[int], float] = field(default_factory=FakeSleep)
     repo: FakeRepo = field(default_factory=FakeRepo)
+    commands: FakeCommands = field(default_factory=FakeCommands)
     waits: FakeWaits | None = field(default_factory=FakeWaits)
 
     @classmethod
@@ -481,5 +517,6 @@ class FakeServices:
             ui=self.ui,
             sleep=self.sleep,
             repo=self.repo,
+            commands=self.commands,
             waits=cast("Any", self.waits),
         )

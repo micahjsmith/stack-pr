@@ -72,3 +72,18 @@ l 101	# a tab does not open a comment
 #<- keyword.control.land.autoland-plan
 # ^^^^^ - comment.line.number-sign.autoland-plan
 # ^^^ invalid.illegal.pr-reference.autoland-plan
+
+x ./scripts/provision.sh --env staging
+#<- keyword.control.exec.autoland-plan
+# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ string.unquoted.command.autoland-plan
+
+x bash -c 'make check' # ' #' ends the command, as for every step
+#<- keyword.control.exec.autoland-plan
+# ^^^^^^^^^^^^^^^^^^^^ string.unquoted.command.autoland-plan
+#                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ comment.line.number-sign.autoland-plan
+
+x
+#<- invalid.illegal.missing-command.autoland-plan
+
+x   # nothing to run
+#<- invalid.illegal.missing-command.autoland-plan

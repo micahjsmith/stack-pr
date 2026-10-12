@@ -61,6 +61,8 @@ def format_plan_for_editor(stack: list[StackEntry], plan: list[PlanStep]) -> str
         "# c [<condition>] = pause for manual confirmation; the optional",
         "#                   condition names what to verify before proceeding",
         "#                   (e.g. 'c QA sign-off complete')",
+        "# x <command>     = run a command, and stop unless it exits 0; it runs",
+        "#                   without a shell (use 'x bash -c ...' for pipes)",
         "#",
         "# Lines starting with # are comments and are ignored.",
         "# Blank lines are ignored.",
@@ -148,7 +150,7 @@ def landed_prefix_end(plan: list[PlanStep]) -> int:
     """Index of the last ``l`` step whose PR had already landed, or -1 for none.
 
     Every step at or before this index is complete: the PR merged, and the
-    workflow/confirm steps ahead of it must have run before it could. This is
+    workflow/confirm/command steps ahead of it must have run before it could. This is
     the boundary ``execute_plan`` resumes from and the display points at.
 
     Prefer ``is_assumed_completed`` for "is this step inside the prefix?" — the
@@ -189,14 +191,15 @@ def _checkpoint_keys(
 def carry_over_progress(
     old: LandingContext, plan: list[PlanStep], stack: list[StackEntry]
 ) -> list[int]:
-    """Credit *plan*'s workflow and confirm steps with results from *old*.
+    """Credit *plan*'s workflow, confirm, and command steps with results from
+    *old*.
 
     *plan* is a freshly parsed plan for the current *stack*. Land steps need no
     help: whether a PR merged is GitHub's to say, and parsing already asked.
-    A workflow or confirm step is credited when *old* completed a step with the
-    same kind, text, and set of PRs landed before it — so adding, removing, or
-    reordering steps keeps credit, while changing a step's text, or landing a
-    different set of PRs ahead of it, makes it run again.
+    A workflow, confirm, or command step is credited when *old* completed a
+    step with the same kind, text, and set of PRs landed before it — so adding,
+    removing, or reordering steps keeps credit, while changing a step's text,
+    or landing a different set of PRs ahead of it, makes it run again.
 
     Returns the indices (into ``old.plan``) of completed checkpoints that found
     no match in *plan*, so the caller can show what does not carry over.
@@ -228,9 +231,9 @@ def plan_from_file(path: Path, stack: list[StackEntry]) -> list[PlanStep]:
 
     The file uses the exact same format as the interactive editor (see
     ``format_plan_for_editor``): ``l [pr]`` / ``w <workflow>`` /
-    ``c [condition]`` steps, with ``#`` comments and blank lines ignored. It is
-    parsed by the same ``parse_plan`` the editor uses, so a file saved from
-    ``-i`` (or written by hand in that format) round-trips.
+    ``c [condition]`` / ``x <command>`` steps, with ``#`` comments and blank
+    lines ignored. It is parsed by the same ``parse_plan`` the editor uses, so
+    a file saved from ``-i`` (or written by hand in that format) round-trips.
     """
     try:
         text = path.read_text()

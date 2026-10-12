@@ -1,0 +1,84 @@
+
+Discovering stack...
+
+
+Autoland plan · 5 steps · 0 done · 5 remaining
+
+→ ⬜ 1. Pending | Land    | #101 - Add the widget model
+  ⬜ 2. Pending | Execute | ./scripts/provision.sh --env 'staging east'
+  ⬜ 3. Pending | Land    | #102 - Expose widgets over the API
+  ⬜ 4. Pending | Execute | ./scripts/smoke-test.sh
+  ⬜ 5. Pending | Land    | #103 - Show widgets in the dashboard
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+============================================================
+Step 1/5: Landing PR #101 — Add the widget model
+============================================================
+PR #101 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #101 to merge queue
+$ gh pr merge 101 --squash
+PR #101: in merge queue (0m) — polling in 120s
+
+PR #101 merged!
+
+Rebasing stack on origin/main...
+$ git fetch origin main
+$ git rebase origin/main
+Re-submitting stack...
+
+============================================================
+Step 2/5: Run ./scripts/provision.sh --env 'staging east'
+============================================================
+(./scripts/provision.sh --env 'staging east' in /work/repo)
+  AUTOLAND_BRANCH=feat
+  AUTOLAND_LANDED_PRS=101
+  AUTOLAND_LANDED_SHA=78e4ec1063c72debbb00f2ff966f72377789cdae
+  AUTOLAND_REMOTE=origin
+  AUTOLAND_TARGET=main
+Command succeeded
+
+============================================================
+Step 3/5: Landing PR #102 — Expose widgets over the API
+============================================================
+PR #102 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #102 to merge queue
+$ gh pr merge 102 --squash
+PR #102: in merge queue (0m) — polling in 120s
+
+PR #102 merged!
+
+Rebasing stack on origin/main...
+$ git fetch origin main
+$ git rebase origin/main
+Re-submitting stack...
+
+============================================================
+Step 4/5: Run ./scripts/smoke-test.sh
+============================================================
+(./scripts/smoke-test.sh in /work/repo)
+  AUTOLAND_BRANCH=feat
+  AUTOLAND_LANDED_PRS=101 102
+  AUTOLAND_LANDED_SHA=9cc0a8c62f2d99c85284a96fe68191bd3843f14b
+  AUTOLAND_REMOTE=origin
+  AUTOLAND_TARGET=main
+
+
+
+Autoland plan · 5 steps · 3 done · 2 remaining
+
+  ✅ 1. Merged    | Land    | #101 - Add the widget model
+  ✅ 2. Succeeded | Execute | ./scripts/provision.sh --env 'staging east'
+  ✅ 3. Merged    | Land    | #102 - Expose widgets over the API
+→ ❌ 4. Failed    | Execute | ./scripts/smoke-test.sh
+        ↳ Command exited with status 3
+  ⬜ 5. Pending   | Land    | #103 - Show widgets in the dashboard
+
+ABORTED: Command `./scripts/smoke-test.sh` exited with status 3
+
+Landing failed: Command `./scripts/smoke-test.sh` exited with status 3
+
+State saved to <TMP>/home/.stack-pr/autoland/feat.json — resume with --resume
+

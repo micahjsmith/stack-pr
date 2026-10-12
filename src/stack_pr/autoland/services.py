@@ -1,13 +1,14 @@
 """The tools a plan step may use while it executes, injected through ``Services``.
 
 A step, an execution unit, and everything they call while landing (the wait
-loops, the stack merge, the landed-SHA lookup, rebase + resubmit) reach the
-console, GitHub, the clock, and the local repo only through one ``Services``,
-never through module globals, so any of them can be run against fakes.
+loops, the stack merge, the landed-SHA lookup, rebase + resubmit, an ``x``
+step's command) reach the console, GitHub, the clock, the local repo, and
+subprocesses only through one ``Services``, never through module globals, so
+any of them can be run against fakes.
 
 ``Services.production()`` binds the real implementations: the ``gh.github``
 client, the ``runtime.console``, ``runtime.resilient_sleep``, a ``GitRepo``,
-and the polling waits of ``autoland.waits``.
+``SubprocessCommands``, and the polling waits of ``autoland.waits``.
 
 Module singletons remain only for what runs outside a plan's execution: the
 command flows' own output and prompts (``commands``), ``--status``, plan
@@ -18,10 +19,14 @@ shell runner (``runtime.run``), which echoes each command it runs to
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import os
+import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from stack_pr import shell_commands
 from stack_pr.autoland import display, gh, runtime, waits
 from stack_pr.autoland.repo import GitRepo
 
@@ -100,6 +105,26 @@ class Repo(Protocol):
         """Rebase the local stack onto the target and re-submit it. Raises on
         failure."""
 
+    def root(self) -> Path:
+        """The top-level directory of the checkout being landed (the temporary
+        worktree, with ``--branch``)."""
+
+
+class Commands(Protocol):
+    """Running a user's command, as an ``x`` step does.
+
+    A service of its own, rather than part of ``Repo``, because what it runs
+    is the user's program, not an operation on the clone; and so a step can
+    be tested against commands that just exit with a given status.
+    """
+
+    def run(self, argv: list[str], *, cwd: Path, env: Mapping[str, str]) -> int:
+        """Run *argv* (no shell) in *cwd*, with *env* set on top of autoland's
+        own environment, its output going straight to the terminal. Returns
+        its exit status: negative if a signal killed it. Raises OSError if it
+        can't be started (e.g. no such program). Ctrl+C raises
+        KeyboardInterrupt out of it once the command has been stopped."""
+
 
 @dataclass(frozen=True)
 class Services:
@@ -117,6 +142,7 @@ class Services:
     # machine spent suspended.
     sleep: Callable[[int], float]
     repo: Repo
+    commands: Commands
     waits: Waits = None  # type: ignore[assignment]  # set in __post_init__
 
     def __post_init__(self) -> None:
@@ -127,13 +153,15 @@ class Services:
 
     @classmethod
     def production(cls) -> Services:
-        """The real console, GitHub client, clock, repo, and wait loops."""
+        """The real console, GitHub client, clock, repo, commands, and wait
+        loops."""
         ui = ConsoleUI(runtime.console)
         return cls(
             github=gh.github,
             ui=ui,
             sleep=runtime.resilient_sleep,
             repo=GitRepo(gh.github, ui),
+            commands=SubprocessCommands(),
         )
 
 
@@ -157,6 +185,22 @@ class ConsoleUI:
 
     def escape(self, text: str) -> str:
         return display._escape_markup(text)
+
+
+class SubprocessCommands:
+    """``Commands`` as real subprocesses."""
+
+    def run(self, argv: list[str], *, cwd: Path, env: Mapping[str, str]) -> int:
+        # Whatever autoland has printed must reach the terminal before the
+        # command's own output, which bypasses this process's buffers.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # subprocess.run (under run_shell_command) kills the command if
+        # anything, such as Ctrl+C or a takeover's SIGINT, interrupts the wait
+        # for it, so no command outlives the run that started it.
+        return shell_commands.run_shell_command(
+            argv, quiet=False, check=False, cwd=cwd, env={**os.environ, **env}
+        ).returncode
 
 
 class PollingWaits:

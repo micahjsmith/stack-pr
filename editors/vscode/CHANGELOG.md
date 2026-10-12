@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+* Highlights `x <command>` steps, which run a command and stop the land
+  unless it exits 0: the `x` keyword, and the command as a string. A bare `x`
+  highlights as an error, since the parser rejects it. The formatter
+  collapses the gap after `x` like any other step, and, as for `c`, an `x`
+  step never sets the comment column.
+
 ## 0.2.0
 
 * The extension is now a formatter for the language: **Format Document**

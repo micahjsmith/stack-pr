@@ -3,7 +3,13 @@ import re
 from pathlib import Path
 
 from stack_pr.autoland import gh
-from stack_pr.autoland.model import ConfirmStep, LandStep, StackEntry, WorkflowStep
+from stack_pr.autoland.model import (
+    ConfirmStep,
+    ExecStep,
+    LandStep,
+    StackEntry,
+    WorkflowStep,
+)
 from stack_pr.autoland.plan import (
     PLAN_COMMENT_COLUMN,
     PLAN_COMMENT_GAP,
@@ -34,6 +40,7 @@ def test_example_plan_is_accepted_by_the_parser(mocker) -> None:  # noqa: ANN001
         "LandStep",
         "WorkflowStep",
         "ConfirmStep",
+        "ExecStep",
         "LandStep",
         "LandStep",
         "ConfirmStep",
@@ -86,6 +93,7 @@ def test_generated_plan_matches_the_formatter_fixture() -> None:
         LandStep(entry_index=0, pr_number=101),
         WorkflowStep(workflow="deploy.yaml"),
         ConfirmStep(condition="QA sign-off complete"),
+        ExecStep(command="./scripts/provision.sh --env staging"),
         LandStep(entry_index=1, pr_number=1024),
         LandStep(entry_index=2, pr_number=103),
     ]

@@ -7,6 +7,9 @@ between a step and the engine that runs it.
 
 from __future__ import annotations
 
+import json
+import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,17 +17,19 @@ import pytest
 from stack_pr.autoland import engine
 from stack_pr.autoland.model import (
     ConfirmStep,
+    ExecStep,
     LandingContext,
     LandStep,
     PRState,
     StackEntry,
     WorkflowStep,
 )
-from stack_pr.autoland.services import Services
+from stack_pr.autoland.services import Services, SubprocessCommands
 from stack_pr.autoland.state import AutolandCheckpointer
 from stack_pr.autoland.steps import AutolandStep, StepContext, StepResult
 from tests.autoland_fakes import (
     OPTS,
+    FakeCommands,
     FakeRepo,
     FakeServices,
     FakeUI,
@@ -42,6 +47,7 @@ def services(
     ui: FakeUI | None = None,
     waits: FakeWaits | None = None,
     repo: FakeRepo | None = None,
+    commands: FakeCommands | None = None,
 ) -> Services:
     """Fake services for a step, which must not call GitHub or sleep itself:
     it waits only through ``waits``."""
@@ -50,6 +56,7 @@ def services(
         ui=ui or FakeUI(),
         sleep=forbidden_sleep,
         repo=repo or FakeRepo(),
+        commands=commands or FakeCommands(),
         waits=waits or FakeWaits(),
     ).services
 
@@ -274,6 +281,202 @@ def test_confirmed_step_does_not_prompt() -> None:
 
     assert run_step(ConfirmStep(confirmed=True), services(ui)) == StepResult()
     assert ui.lines == []
+
+
+# ---------------------------------------------------------------------------
+# ExecStep
+# ---------------------------------------------------------------------------
+
+
+def run_exec(
+    step: ExecStep, svc: Services, *, landed_sha: str = "sha102"
+) -> StepResult:
+    """Execute *step* after a plan that landed #100 in an earlier run, then
+    #101 and #102 (with a confirmation between them)."""
+    entries = stack(101, 102, 103)
+    entries[0].state = entries[1].state = PRState.MERGED
+    plan: list[AutolandStep] = [
+        LandStep(entry_index=-1, pr_number=100),
+        LandStep(entry_index=0),
+        ConfirmStep(confirmed=True),
+        LandStep(entry_index=1, pr_number=102),
+        step,
+        LandStep(entry_index=2),
+    ]
+    return step.execute(
+        StepContext(
+            index=4,
+            total=len(plan),
+            run=LandingContext(stack=entries, plan=plan),
+            opts=OPTS,
+            common=common_args(remote="upstream", target="trunk"),
+            services=svc,
+            checkpoint=lambda: None,
+            upcoming=list,
+            landed_sha=lambda: landed_sha,
+            branch="feat",
+        )
+    )
+
+
+def test_exec_step_runs_its_command_in_the_repo_with_the_run_in_its_env() -> None:
+    commands, ui = FakeCommands(), FakeUI()
+    repo = FakeRepo(top_level=Path("/work/worktree/repo"))
+    step = ExecStep(command="./provision.sh --env 'staging east' $HOME")
+
+    result = run_exec(step, services(ui, repo=repo, commands=commands))
+
+    assert result == StepResult()
+    assert step.state == "succeeded"
+    [run] = commands.runs
+    # Split like a shell would, but nothing is expanded: there is no shell.
+    assert run.argv == ["./provision.sh", "--env", "staging east", "$HOME"]
+    assert run.cwd == Path("/work/worktree/repo")
+    assert run.env == {
+        "AUTOLAND_LANDED_SHA": "sha102",
+        "AUTOLAND_LANDED_PRS": "100 101 102",
+        "AUTOLAND_BRANCH": "feat",
+        "AUTOLAND_REMOTE": "upstream",
+        "AUTOLAND_TARGET": "trunk",
+    }
+    assert "Step 5/6: Run ./provision.sh" in ui.output
+
+
+def test_exec_step_shows_it_is_running_in_the_checkpoint() -> None:
+    states: list[str] = []
+    step = ExecStep(command="true")
+    entries = stack(101)
+
+    step.execute(
+        StepContext(
+            index=0,
+            total=2,
+            run=LandingContext(stack=entries, plan=[step, LandStep(entry_index=0)]),
+            opts=OPTS,
+            common=common_args(),
+            services=services(),
+            checkpoint=lambda: states.append(step.state),
+            upcoming=list,
+            landed_sha=lambda: "",
+        )
+    )
+
+    assert states == ["running"]
+    assert step.state == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        (3, "Command `./smoke-test.sh` exited with status 3"),
+        (-9, "Command `./smoke-test.sh` killed by signal 9"),
+        (
+            FileNotFoundError(2, "No such file or directory"),
+            "Command `./smoke-test.sh` could not start: No such file or directory",
+        ),
+        (
+            PermissionError(13, "Permission denied"),
+            "Command `./smoke-test.sh` could not start: Permission denied",
+        ),
+    ],
+)
+def test_exec_step_aborts_unless_its_command_succeeds(
+    result: int | OSError, reason: str
+) -> None:
+    step = ExecStep(command="./smoke-test.sh")
+
+    outcome = run_exec(step, services(commands=FakeCommands(results=[result])))
+
+    assert outcome == StepResult(abort_reason=reason)
+    assert step.state == "failed"
+    assert step.error_message == reason.replace("Command `./smoke-test.sh`", "Command")
+
+
+@pytest.mark.parametrize("state", ["skipped", "succeeded"])
+def test_exec_step_already_done_does_not_run(state: str) -> None:
+    commands, ui = FakeCommands(), FakeUI()
+
+    result = run_exec(
+        ExecStep(command="./provision.sh", state=state),
+        services(ui, commands=commands),
+    )
+
+    assert result == StepResult()
+    assert commands.runs == []
+    assert ui.lines == []
+
+
+@pytest.mark.parametrize("state", ["failed", "running"])
+def test_exec_step_runs_again_after_failing_or_being_interrupted(state: str) -> None:
+    commands = FakeCommands()
+    step = ExecStep(command="./provision.sh", state=state, error_message="boom")
+
+    result = run_exec(step, services(commands=commands))
+
+    assert result == StepResult()
+    assert len(commands.runs) == 1
+    assert (step.state, step.error_message) == ("succeeded", "")
+
+
+_ENV_SCRIPT = """\
+import json, os, sys
+names = [n for n in os.environ if n.startswith("AUTOLAND_")] + ["INHERITED"]
+facts = {"cwd": os.getcwd(), "args": sys.argv[1:]}
+facts.update({n: os.environ.get(n) for n in names})
+with open(os.environ["OUT"], "w") as f:
+    json.dump(facts, f)
+sys.exit(int(sys.argv[1]))
+"""
+
+
+@pytest.mark.parametrize("status", [0, 4])
+def test_exec_step_runs_a_real_command(
+    status: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "script.py"
+    script.write_text(_ENV_SCRIPT)
+    out = tmp_path / "facts.json"
+    monkeypatch.setenv("OUT", str(out))
+    monkeypatch.setenv("INHERITED", "yes")
+    root = tmp_path / "repo"
+    root.mkdir()
+    svc = FakeServices(
+        ui=FakeUI(),
+        repo=FakeRepo(top_level=root),
+        commands=SubprocessCommands(),  # type: ignore[arg-type]
+    ).services
+    step = ExecStep(
+        command=shlex.join([sys.executable, str(script), str(status), "a b"])
+    )
+
+    result = run_exec(step, svc)
+
+    assert result.aborted == (status != 0)
+    assert step.state == ("succeeded" if status == 0 else "failed")
+    assert json.loads(out.read_text()) == {
+        "cwd": str(root.resolve()),
+        "args": [str(status), "a b"],
+        "AUTOLAND_LANDED_SHA": "sha102",
+        "AUTOLAND_LANDED_PRS": "100 101 102",
+        "AUTOLAND_BRANCH": "feat",
+        "AUTOLAND_REMOTE": "upstream",
+        "AUTOLAND_TARGET": "trunk",
+        "INHERITED": "yes",
+    }
+
+
+def test_exec_step_reports_a_missing_program(tmp_path: Path) -> None:
+    svc = FakeServices(
+        repo=FakeRepo(top_level=tmp_path),
+        commands=SubprocessCommands(),  # type: ignore[arg-type]
+    ).services
+    step = ExecStep(command="./no-such-script.sh")
+
+    result = run_exec(step, svc)
+
+    assert result.abort_reason == (
+        "Command `./no-such-script.sh` could not start: No such file or directory"
+    )
 
 
 # ---------------------------------------------------------------------------
