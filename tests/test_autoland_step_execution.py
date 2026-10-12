@@ -7,15 +7,11 @@ between a step and the engine that runs it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
 
 import pytest
 
-from stack_pr import cli
-from stack_pr.autoland import engine, gh
+from stack_pr.autoland import engine
 from stack_pr.autoland.model import (
     ConfirmStep,
     LandingContext,
@@ -24,134 +20,22 @@ from stack_pr.autoland.model import (
     StackEntry,
     WorkflowStep,
 )
-from stack_pr.autoland.options import AutolandOptions
 from stack_pr.autoland.services import Services
 from stack_pr.autoland.state import AutolandCheckpointer
 from stack_pr.autoland.steps import AutolandStep, StepContext, StepResult
-from tests.helpers import common_args
-
-OPTS = AutolandOptions(
-    merge_queue=True,
-    required_checks=[],
-    poll_interval=0,
-    max_check_retries=0,
-    max_queue_retries=0,
-    merge_timeout=0,
-    workflow_timeout=0,
-    default_workflow=None,
-    count=None,
-    dry_run=False,
-    branch=None,
-    interactive=False,
-    resume=False,
-    state_file=None,
-    always_cleanup=False,
-    merge_as_stack=False,
+from tests.autoland_fakes import (
+    OPTS,
+    FakeRepo,
+    FakeServices,
+    FakeUI,
+    FakeWaits,
+    ForbiddenGitHub,
+    fails,
+    forbidden_sleep,
+    merges,
+    stack,
 )
-
-
-# ---------------------------------------------------------------------------
-# Fakes
-# ---------------------------------------------------------------------------
-
-
-class FakeUI:
-    """Records output; answers prompts from a script, then raises EOFError."""
-
-    def __init__(self, answers: list[str] | None = None) -> None:
-        self.answers = list(answers or [])
-        self.lines: list[str] = []
-
-    def print(self, *objects: object) -> None:
-        self.lines.append(" ".join(str(o) for o in objects))
-
-    def input(self, prompt: str) -> str:
-        self.lines.append(prompt)
-        if not self.answers:
-            raise EOFError
-        return self.answers.pop(0)
-
-    def escape(self, text: str) -> str:
-        return text.replace("[", r"\[")
-
-    @property
-    def output(self) -> str:
-        return "\n".join(self.lines)
-
-
-# What a fake wait does to the PR it waits on.
-Outcome = Callable[[StackEntry], bool]
-
-
-def ok(_entry: StackEntry) -> bool:
-    return True
-
-
-def fails(_entry: StackEntry) -> bool:
-    return False
-
-
-def merges(entry: StackEntry) -> bool:
-    entry.state = PRState.MERGED
-    return True
-
-
-@dataclass
-class FakeWaits:
-    approval: Outcome = ok
-    checks: Outcome = ok
-    queue: Outcome = merges
-    workflow_succeeds: bool = True
-    calls: list[str] = field(default_factory=list)
-    workflow_targets: list[str] = field(default_factory=list)
-
-    def wait_for_approval(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
-        self.calls.append("approval")
-        return self.approval(entry)
-
-    def wait_for_checks(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
-        self.calls.append("checks")
-        return self.checks(entry)
-
-    def enqueue_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
-        self.calls.append("queue")
-        return self.queue(entry)
-
-    def wait_for_workflow(
-        self,
-        step: WorkflowStep,
-        target_sha: str,
-        *,
-        opts: AutolandOptions,
-        common: cli.CommonArgs,
-        ctx: LandingContext,
-    ) -> bool:
-        self.workflow_targets.append(target_sha)
-        step.state = "succeeded" if self.workflow_succeeds else "failed"
-        return self.workflow_succeeds
-
-
-@dataclass
-class FakeRepo:
-    # PR number (None: the target branch head) -> its landed commit.
-    shas: dict[int | None, str] = field(default_factory=dict)
-    rebase_error: Exception | None = None
-    lookups: list[int | None] = field(default_factory=list)
-    rebases: int = 0
-
-    def landed_sha(self, common: cli.CommonArgs, pr_number: int | None = None) -> str:
-        self.lookups.append(pr_number)
-        return self.shas.get(pr_number, "")
-
-    def rebase_and_resubmit(self, common: cli.CommonArgs) -> None:
-        self.rebases += 1
-        if self.rebase_error is not None:
-            raise self.rebase_error
-
-
-class _NoGitHub:
-    def __getattr__(self, name: str) -> object:
-        raise AssertionError(f"a step called GitHub directly: {name}")
+from tests.helpers import common_args
 
 
 def services(
@@ -159,28 +43,15 @@ def services(
     waits: FakeWaits | None = None,
     repo: FakeRepo | None = None,
 ) -> Services:
-    def no_sleep(_seconds: int) -> float:
-        raise AssertionError("a step slept")
-
-    return Services(
-        github=cast("gh.GitHub", _NoGitHub()),
+    """Fake services for a step, which must not call GitHub or sleep itself:
+    it waits only through ``waits``."""
+    return FakeServices(
+        github=ForbiddenGitHub(),
         ui=ui or FakeUI(),
-        waits=waits or FakeWaits(),
+        sleep=forbidden_sleep,
         repo=repo or FakeRepo(),
-        sleep=no_sleep,
-    )
-
-
-def stack(*prs: int) -> list[StackEntry]:
-    return [
-        StackEntry(
-            pr_url=f"https://github.com/o/r/pull/{n}",
-            pr_number=n,
-            branch=f"b{n}",
-            title=f"Title {n}",
-        )
-        for n in prs
-    ]
+        waits=waits or FakeWaits(),
+    ).services
 
 
 def run_step(

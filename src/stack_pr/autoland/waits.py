@@ -1,113 +1,30 @@
-"""Waiting for approval, checks, the merge queue, and workflows; rebase + resubmit."""
+"""Waiting for approval, checks, the merge queue, and workflows.
+
+Every wait polls through the ``Services`` it is given: GitHub, the console,
+the clock, and the local repo. ``services.PollingWaits`` binds them as the
+production ``Waits``.
+"""
 
 from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable
-from dataclasses import dataclass, replace
-from typing import TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, TypeVar
 
-from stack_pr import cli
-from stack_pr.autoland import gh, runtime
 from stack_pr.autoland.checks import CheckStatus, evaluate_checks
 from stack_pr.autoland.display import _REVIEW_DECISION_DISPLAY
 from stack_pr.autoland.gh import MergeQueuePollResult, _sha_eq
 from stack_pr.autoland.model import LandingContext, PRState, StackEntry, WorkflowStep
 from stack_pr.autoland.options import AutolandOptions
-from stack_pr.git import GitError, is_ancestor
 
-# ---------------------------------------------------------------------------
-# Post-merge rebase + resubmit (reuses stack-pr submit)
-# ---------------------------------------------------------------------------
-
-
-def rebase_and_resubmit(common: cli.CommonArgs) -> None:
-    """After a merge, rebase the local stack on the target and re-submit."""
-    runtime.console.print(
-        f"\n[bold]Rebasing stack on {common.remote}/{common.target}...[/bold]"
-    )
-    runtime.run(["git", "fetch", common.remote, common.target], quiet=False)
-    # Rebase the current branch (don't name it) so this works even when the
-    # branch is checked out in another worktree.
-    try:
-        runtime.run(
-            ["git", "rebase", f"{common.remote}/{common.target}"],
-            quiet=False,
-            retries=0,
-        )
-    except RuntimeError:
-        # Without --branch this is the user's own working copy; don't leave it
-        # stuck mid-rebase. Best-effort: `--abort` is harmless (and fails
-        # quietly) if no rebase is actually in progress.
-        runtime.run(["git", "rebase", "--abort"], check=False, quiet=True, retries=0)
-        raise
-
-    # Re-deduce the base against the *current* origin/<target>. `common.base`
-    # was deduced once when autoland started (merge-base with the target at
-    # that time). After other PRs land in the target and we rebase onto it,
-    # that cached base is stale: the range base..HEAD would then sweep in every
-    # commit merged by others in the meantime, and submit would try to open
-    # bogus PRs for them. Clearing the base forces deduce_base to recompute
-    # merge-base(HEAD, origin/<target>) from the freshly rebased HEAD.
-    resubmit_common = cli.deduce_base(replace(common, base=""))
-
-    runtime.console.print("[bold]Re-submitting stack...[/bold]")
-    cli.command_submit(
-        resubmit_common,
-        draft=False,
-        reviewer="",
-        keep_body=True,
-        keep_title=True,
-        draft_bitmask=None,
-    )
-
+if TYPE_CHECKING:
+    from stack_pr import cli
+    from stack_pr.autoland.services import Repo, Services
 
 # ---------------------------------------------------------------------------
 # Workflow checkpoint polling
 # ---------------------------------------------------------------------------
-
-
-def _refresh_last_landed_sha(
-    ctx: LandingContext, common: cli.CommonArgs, pr_number: int | None = None
-) -> None:
-    """Record the SHA of the most recently landed code.
-
-    When ``pr_number`` is given, prefer that PR's exact merge commit so the
-    workflow checkpoint targets the code we actually landed. In a busy repo,
-    ``origin/<target>`` can advance past our merge commit (bot commits, other
-    PRs) between the merge and this call, so using its HEAD would overshoot and
-    make the checkpoint wait for a deploy of code that was never our own.
-    """
-    with contextlib.suppress(RuntimeError):  # fetch is non-critical
-        runtime.run(["git", "fetch", common.remote, common.target], quiet=True)
-
-    if pr_number is not None:
-        merge_sha = gh.github.merge_commit(pr_number)
-        if merge_sha:
-            ctx.last_landed_sha = merge_sha
-            return
-
-    try:
-        result = runtime.run(
-            ["git", "rev-parse", f"{common.remote}/{common.target}"], quiet=True
-        )
-        ctx.last_landed_sha = result.stdout.strip()
-    except RuntimeError:
-        pass  # non-critical; will retry when needed
-
-
-def _local_is_ancestor(ancestor: str, descendant: str) -> bool | None:
-    """Whether ``ancestor`` is an ancestor of ``descendant``, per this clone.
-
-    ``None`` means the local repo cannot answer, typically because either
-    commit is missing from this clone. That must not be conflated with a
-    genuine "no" — a workflow run's head commit is routinely absent here,
-    because ``origin/<target>`` advances while we poll.
-    """
-    try:
-        return is_ancestor(ancestor, descendant)
-    except GitError:
-        return None
 
 
 class _Ancestry:
@@ -123,8 +40,10 @@ class _Ancestry:
     the wait; the poll loop re-examines the same runs every interval.
     """
 
-    def __init__(self, common: cli.CommonArgs) -> None:
+    def __init__(self, common: cli.CommonArgs, services: Services) -> None:
         self._common = common
+        self._repo: Repo = services.repo
+        self._github = services.github
         self._verdicts: dict[tuple[str, str], bool] = {}
         self._fetched_for: set[str] = set()
 
@@ -139,27 +58,20 @@ class _Ancestry:
         if key in self._verdicts:
             return self._verdicts[key]
 
-        verdict = _local_is_ancestor(ancestor, descendant)
+        verdict = self._repo.is_ancestor(ancestor, descendant)
         if verdict is None and descendant not in self._fetched_for:
             # A commit is missing locally. Fetch the target branch once for
             # this commit and retry; fetching again for the same commit would
             # not tell us anything new.
             self._fetched_for.add(descendant)
-            self._fetch_target()
-            verdict = _local_is_ancestor(ancestor, descendant)
+            self._repo.fetch_target(self._common)
+            verdict = self._repo.is_ancestor(ancestor, descendant)
         if verdict is None:
-            verdict = gh.github.contains(ancestor, descendant)
+            verdict = self._github.contains(ancestor, descendant)
 
         if verdict is not None:
             self._verdicts[key] = verdict
         return verdict
-
-    def _fetch_target(self) -> None:
-        with contextlib.suppress(RuntimeError):  # fetch is non-critical
-            runtime.run(
-                ["git", "fetch", self._common.remote, self._common.target],
-                quiet=True,
-            )
 
 
 def wait_for_workflow(
@@ -169,20 +81,22 @@ def wait_for_workflow(
     common: cli.CommonArgs,
     ctx: LandingContext,
     target_sha: str | None = None,
+    services: Services,
 ) -> bool:
     """Wait for a workflow to complete with code at or after *target_sha*.
 
     *target_sha* defaults to the run's last landed SHA.
     """
+    ui, github = services.ui, services.github
     if target_sha is None:
         target_sha = ctx.last_landed_sha
     step.state = "waiting"
-    runtime.console.print(
+    ui.print(
         f"\n[bold blue]Waiting for workflow: {step.workflow}[/bold blue]"
         f"\n[dim]Target SHA: {target_sha[:12]}[/dim]"
     )
 
-    ancestry = _Ancestry(common)
+    ancestry = _Ancestry(common, services)
     awake_elapsed = 0.0
     while True:
         if awake_elapsed > opts.workflow_timeout:
@@ -193,12 +107,10 @@ def wait_for_workflow(
             return False
 
         try:
-            data = gh.github.workflow_runs(step.workflow, common.target)
+            data = github.workflow_runs(step.workflow, common.target)
         except RuntimeError as e:
-            runtime.console.print(
-                f"[yellow]Warning: could not poll workflow: {e}[/yellow]"
-            )
-            runtime.resilient_sleep(opts.poll_interval)
+            ui.print(f"[yellow]Warning: could not poll workflow: {e}[/yellow]")
+            services.sleep(opts.poll_interval)
             awake_elapsed += opts.poll_interval
             continue
 
@@ -212,7 +124,7 @@ def wait_for_workflow(
                 continue
             verdict = ancestry.contains(target_sha, run_sha)
             if verdict is None:
-                runtime.console.print(
+                ui.print(
                     f"[yellow]Warning: could not tell whether run "
                     f"{run_sha[:12]} includes {target_sha[:12]}; "
                     "will retry[/yellow]"
@@ -221,7 +133,7 @@ def wait_for_workflow(
             if verdict:
                 step.state = "succeeded"
                 step.error_message = ""
-                runtime.console.print(
+                ui.print(
                     f"\n[bold green]Workflow {step.workflow} completed "
                     f"with SHA {run_sha[:12]}[/bold green]"
                 )
@@ -229,11 +141,11 @@ def wait_for_workflow(
 
         mins = int(awake_elapsed) // 60
         step.error_message = f"Waiting for workflow ({mins}m elapsed)..."
-        runtime.console.print(
+        ui.print(
             f"[dim]Workflow {step.workflow}: waiting ({mins}m) — "
             f"polling in {opts.poll_interval}s[/dim]"
         )
-        runtime.resilient_sleep(opts.poll_interval)
+        services.sleep(opts.poll_interval)
         awake_elapsed += opts.poll_interval
 
 
@@ -245,7 +157,9 @@ def wait_for_workflow(
 _T = TypeVar("_T")
 
 
-def _poll_read(read: Callable[[int], _T], pr_number: int) -> _T | None:
+def _poll_read(
+    read: Callable[[int], _T], pr_number: int, services: Services
+) -> _T | None:
     """One poll's read of a PR from GitHub, or ``None`` if it failed.
 
     A long wait shouldn't die on one bad response from GitHub, whether the
@@ -256,27 +170,30 @@ def _poll_read(read: Callable[[int], _T], pr_number: int) -> _T | None:
     try:
         return read(pr_number)
     except RuntimeError as e:  # includes GitHubError
-        runtime.console.print(
+        services.ui.print(
             f"[yellow]Warning: could not poll PR #{pr_number}: {e}; will retry[/yellow]"
         )
         return None
 
 
-def _refresh_review(entry: StackEntry) -> bool:
+def _refresh_review(entry: StackEntry, services: Services) -> bool:
     """Update the entry's review decision, tolerating a transient gh failure.
 
     Returns whether the entry is now approved.
     """
     with contextlib.suppress(RuntimeError):
-        entry.review_decision = gh.github.review_decision(entry.pr_number)
+        entry.review_decision = services.github.review_decision(entry.pr_number)
     return entry.is_approved
 
 
-def wait_for_approval(entry: StackEntry, *, opts: AutolandOptions) -> bool:
+def wait_for_approval(
+    entry: StackEntry, *, opts: AutolandOptions, services: Services
+) -> bool:
     """Wait until the PR has required approvals (or merged). Returns False if
     the PR was closed."""
+    ui, github = services.ui, services.github
     # An unknown state (a failed read) is settled by the checks wait after this.
-    pr_state = _poll_read(gh.github.pr_state, entry.pr_number)
+    pr_state = _poll_read(github.pr_state, entry.pr_number, services)
     if pr_state == "MERGED":
         entry.state = PRState.MERGED
         return True
@@ -285,25 +202,25 @@ def wait_for_approval(entry: StackEntry, *, opts: AutolandOptions) -> bool:
         entry.error_message = "PR was closed"
         return False
 
-    if _refresh_review(entry):
+    if _refresh_review(entry, services):
         return True
 
     entry.state = PRState.WAITING_FOR_APPROVAL
     label, _ = _REVIEW_DECISION_DISPLAY.get(entry.review_decision, ("not approved", ""))
     entry.error_message = label
-    runtime.console.print(
+    ui.print(
         f"[magenta]PR #{entry.pr_number} is not yet approved "
         f"({entry.review_decision or 'REVIEW_REQUIRED'}). Waiting...[/magenta]"
     )
 
     while True:
-        runtime.console.print(
+        ui.print(
             f"[dim]PR #{entry.pr_number}: waiting for approval — "
             f"polling in {opts.poll_interval}s[/dim]"
         )
-        runtime.resilient_sleep(opts.poll_interval)
+        services.sleep(opts.poll_interval)
 
-        pr_state = _poll_read(gh.github.pr_state, entry.pr_number)
+        pr_state = _poll_read(github.pr_state, entry.pr_number, services)
         if pr_state is None:
             continue
         if pr_state == "MERGED":
@@ -314,26 +231,27 @@ def wait_for_approval(entry: StackEntry, *, opts: AutolandOptions) -> bool:
             entry.error_message = "PR was closed"
             return False
 
-        if _refresh_review(entry):
+        if _refresh_review(entry, services):
             entry.error_message = ""
-            runtime.console.print(
-                f"[green]PR #{entry.pr_number} is now approved[/green]"
-            )
+            ui.print(f"[green]PR #{entry.pr_number} is now approved[/green]")
             return True
         if entry.review_decision == "CHANGES_REQUESTED":
             entry.error_message = "Changes requested — cannot proceed"
-            runtime.console.print(
+            ui.print(
                 f"[red]PR #{entry.pr_number} has changes requested. "
                 "Resolve review comments and re-request review.[/red]"
             )
 
 
-def wait_for_checks(entry: StackEntry, *, opts: AutolandOptions) -> bool:
+def wait_for_checks(
+    entry: StackEntry, *, opts: AutolandOptions, services: Services
+) -> bool:
     """Wait for required checks to pass. Returns True on success."""
+    ui, github = services.ui, services.github
     entry.state = PRState.WAITING_FOR_CHECKS
 
     while True:
-        pr_state = _poll_read(gh.github.pr_state, entry.pr_number)
+        pr_state = _poll_read(github.pr_state, entry.pr_number, services)
         if pr_state == "MERGED":
             entry.state = PRState.MERGED
             return True
@@ -343,10 +261,12 @@ def wait_for_checks(entry: StackEntry, *, opts: AutolandOptions) -> bool:
             return False
 
         checks = (
-            None if pr_state is None else _poll_read(gh.github.checks, entry.pr_number)
+            None
+            if pr_state is None
+            else _poll_read(github.checks, entry.pr_number, services)
         )
         if checks is None:
-            runtime.resilient_sleep(opts.poll_interval)
+            services.sleep(opts.poll_interval)
             continue
         result = evaluate_checks(checks, opts.required_checks)
         entry.error_message = result.summary
@@ -364,18 +284,18 @@ def wait_for_checks(entry: StackEntry, *, opts: AutolandOptions) -> bool:
                 )
                 return False
             entry.check_retries += 1
-            runtime.console.print(
+            ui.print(
                 f"[yellow]Rerunning failed checks "
                 f"(attempt {entry.check_retries}/{opts.max_check_retries}): "
                 f"{', '.join(result.failed_names)}[/yellow]"
             )
-            gh.github.rerun_failed(result.failed_runs)
+            github.rerun_failed(result.failed_runs)
 
-        runtime.console.print(
+        ui.print(
             f"[dim]PR #{entry.pr_number}: {result.summary} — "
             f"polling in {opts.poll_interval}s[/dim]"
         )
-        runtime.resilient_sleep(opts.poll_interval)
+        services.sleep(opts.poll_interval)
 
 
 _MERGEABLE_STATES = {"CLEAN", "UNSTABLE", "HAS_HOOKS"}
@@ -388,21 +308,22 @@ class MergeableResult:
     error: str = ""
 
 
-def wait_for_mergeable(entry: StackEntry, *, opts: AutolandOptions) -> MergeableResult:
+def wait_for_mergeable(
+    entry: StackEntry, *, opts: AutolandOptions, services: Services
+) -> MergeableResult:
     """Wait until GitHub reports the PR as mergeable."""
+    ui, github = services.ui, services.github
     while True:
-        data = _poll_read(gh.github.merge_state, entry.pr_number)
+        data = _poll_read(github.merge_state, entry.pr_number, services)
         if data is None:
-            runtime.resilient_sleep(opts.poll_interval)
+            services.sleep(opts.poll_interval)
             continue
         pr_state = data.get("state", "")
         merge_state = data.get("mergeStateStatus", "UNKNOWN")
         mergeable = data.get("mergeable", "UNKNOWN")
 
         if pr_state == "MERGED":
-            runtime.console.print(
-                f"[green]PR #{entry.pr_number} is already merged[/green]"
-            )
+            ui.print(f"[green]PR #{entry.pr_number} is already merged[/green]")
             return MergeableResult(ready=True, already_merged=True)
         if pr_state == "CLOSED":
             entry.state = PRState.FAILED
@@ -410,7 +331,7 @@ def wait_for_mergeable(entry: StackEntry, *, opts: AutolandOptions) -> Mergeable
             return MergeableResult(error="PR was closed")
 
         if merge_state in _MERGEABLE_STATES:
-            runtime.console.print(
+            ui.print(
                 f"[green]PR #{entry.pr_number} is mergeable "
                 f"(mergeStateStatus={merge_state})[/green]"
             )
@@ -418,66 +339,68 @@ def wait_for_mergeable(entry: StackEntry, *, opts: AutolandOptions) -> Mergeable
 
         if mergeable == "CONFLICTING":
             entry.error_message = "PR has merge conflicts — waiting for resolution"
-            runtime.console.print(
+            ui.print(
                 f"\n[bold red]PR #{entry.pr_number} has merge conflicts! "
                 "Resolve them on the PR branch and push; autoland will "
                 "resume automatically.[/bold red]"
             )
-            runtime.resilient_sleep(opts.poll_interval)
+            services.sleep(opts.poll_interval)
             continue
 
         # UNKNOWN can also mean "already in the merge queue".
-        if (
-            merge_state == "UNKNOWN"
-            and gh.github.in_merge_queue(entry.pr_number) is True
-        ):
-            runtime.console.print(
+        if merge_state == "UNKNOWN" and github.in_merge_queue(entry.pr_number) is True:
+            ui.print(
                 f"[cyan]PR #{entry.pr_number} is already in the merge queue — "
                 "skipping enqueue[/cyan]"
             )
             return MergeableResult(ready=True, already_merged=False)
 
         entry.error_message = f"Waiting for mergeable state (currently {merge_state})"
-        runtime.console.print(
+        ui.print(
             f"[dim]PR #{entry.pr_number}: mergeStateStatus={merge_state} — "
             f"polling in {opts.poll_interval}s[/dim]"
         )
-        runtime.resilient_sleep(opts.poll_interval)
+        services.sleep(opts.poll_interval)
 
 
-def _rewait_after_retry(entry: StackEntry, *, opts: AutolandOptions) -> bool:
+def _rewait_after_retry(
+    entry: StackEntry, *, opts: AutolandOptions, services: Services
+) -> bool:
     """Re-verify approval and checks before a queue retry."""
-    if not wait_for_approval(entry, opts=opts):
+    if not wait_for_approval(entry, opts=opts, services=services):
         return False
     entry.check_retries = 0
-    return wait_for_checks(entry, opts=opts)
+    return wait_for_checks(entry, opts=opts, services=services)
 
 
-def enqueue_and_wait(entry: StackEntry, *, opts: AutolandOptions) -> bool:
+def enqueue_and_wait(
+    entry: StackEntry, *, opts: AutolandOptions, services: Services
+) -> bool:
     """Add the PR to the merge queue and wait for it to merge."""
+    ui, github = services.ui, services.github
     while True:
-        mergeable_result = wait_for_mergeable(entry, opts=opts)
+        mergeable_result = wait_for_mergeable(entry, opts=opts, services=services)
         if not mergeable_result.ready:
             return False
         if mergeable_result.already_merged:
             entry.state = PRState.MERGED
             entry.error_message = ""
-            runtime.console.print(
+            ui.print(
                 f"\n[bold green]PR #{entry.pr_number} already merged![/bold green]"
             )
             return True
 
         entry.state = PRState.IN_MERGE_QUEUE
         entry.error_message = "Adding to merge queue..."
-        runtime.console.print(
+        ui.print(
             f"\n[bold cyan]Adding PR #{entry.pr_number} to merge queue[/bold cyan]"
         )
 
         try:
-            gh.github.enqueue(entry.pr_number)
+            github.enqueue(entry.pr_number)
         except RuntimeError as e:
             entry.error_message = f"Failed to enqueue: {e}"
-            runtime.console.print(f"[red]Failed to add to merge queue: {e}[/red]")
+            ui.print(f"[red]Failed to add to merge queue: {e}[/red]")
             if entry.queue_retries >= opts.max_queue_retries:
                 entry.state = PRState.FAILED
                 entry.error_message = (
@@ -485,7 +408,7 @@ def enqueue_and_wait(entry: StackEntry, *, opts: AutolandOptions) -> bool:
                 )
                 return False
             entry.queue_retries += 1
-            if not _rewait_after_retry(entry, opts=opts):
+            if not _rewait_after_retry(entry, opts=opts, services=services):
                 return False
             continue
 
@@ -499,22 +422,20 @@ def enqueue_and_wait(entry: StackEntry, *, opts: AutolandOptions) -> bool:
 
             # A failed read leaves the merge undecided; poll again.
             poll = (
-                _poll_read(gh.github.poll_merge, entry.pr_number)
+                _poll_read(github.poll_merge, entry.pr_number, services)
                 or MergeQueuePollResult()
             )
             if poll.merged:
                 entry.state = PRState.MERGED
                 entry.error_message = ""
-                runtime.console.print(
-                    f"\n[bold green]PR #{entry.pr_number} merged![/bold green]"
-                )
+                ui.print(f"\n[bold green]PR #{entry.pr_number} merged![/bold green]")
                 return True
             if poll.error:
                 entry.state = PRState.FAILED
                 entry.error_message = poll.error
                 return False
             if poll.booted:
-                runtime.console.print(
+                ui.print(
                     f"\n[yellow]PR #{entry.pr_number} was booted from the "
                     "merge queue[/yellow]"
                 )
@@ -525,15 +446,15 @@ def enqueue_and_wait(entry: StackEntry, *, opts: AutolandOptions) -> bool:
                     )
                     return False
                 entry.queue_retries += 1
-                if not _rewait_after_retry(entry, opts=opts):
+                if not _rewait_after_retry(entry, opts=opts, services=services):
                     return False
                 break  # re-enqueue in outer loop
 
             mins = int(awake_elapsed) // 60
             entry.error_message = f"In merge queue ({mins}m elapsed)..."
-            runtime.console.print(
+            ui.print(
                 f"[dim]PR #{entry.pr_number}: in merge queue ({mins}m) — "
                 f"polling in {opts.poll_interval}s[/dim]"
             )
-            runtime.resilient_sleep(opts.poll_interval)
+            services.sleep(opts.poll_interval)
             awake_elapsed += opts.poll_interval

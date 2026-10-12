@@ -243,6 +243,8 @@ def _land(
     opts: AutolandOptions,
     checkpointer: AutolandCheckpointer,
     worktree: Worktree | None,
+    *,
+    services: Services,
 ) -> None:
     """Execute the plan, report how the run ended, and exit if it didn't succeed.
 
@@ -263,7 +265,7 @@ def _land(
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         success = engine.execute_plan(
-            ctx, common, opts, checkpointer, services=Services.production()
+            ctx, common, opts, checkpointer, services=services
         )
     except KeyboardInterrupt:
         ctx.abort_reason = "User interrupted (Ctrl+C)"
@@ -349,7 +351,16 @@ def _ask_replan_or_overwrite(state_path: Path) -> str | None:
     return None
 
 
-def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
+def _run_fresh(
+    common: cli.CommonArgs,
+    opts: AutolandOptions,
+    *,
+    services: Services | None = None,
+) -> None:
+    """Land a new plan. *services* (default: production) is what it is
+    executed with."""
+    if services is None:
+        services = Services.production()
     branch = opts.branch or git.get_current_branch_name()
     state_path = opts.state_file or AutolandCheckpointer.default_path(branch)
 
@@ -386,7 +397,7 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
                 return
             replan = choice == "replan"
         if replan:
-            _replan(common, opts, state_path)
+            _replan(common, opts, state_path, services=services)
             return
 
         if opts.branch:
@@ -433,13 +444,13 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         )
 
         print_status(ctx)
-        engine.print_execution_preview(ctx, opts)
+        engine.print_execution_preview(ctx, opts, ui=services.ui)
         if opts.dry_run:
             runtime.console.print("\n[yellow]Dry run — exiting.[/yellow]")
             return
 
         runtime.console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
-        _land(ctx, common, opts, checkpointer, worktree)
+        _land(ctx, common, opts, checkpointer, worktree, services=services)
     finally:
         if worktree is not None:
             worktree.remove_unless_landing()
@@ -447,7 +458,16 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             lock.release()
 
 
-def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
+def _run_resume(
+    common: cli.CommonArgs,
+    opts: AutolandOptions,
+    *,
+    services: Services | None = None,
+) -> None:
+    """Resume the run checkpointed in the state file. *services* (default:
+    production) is what it is executed with."""
+    if services is None:
+        services = Services.production()
     sf_path = _state_path(opts)
 
     if not sf_path.exists():
@@ -502,9 +522,9 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             return
 
         print_status(ctx)
-        engine.print_execution_preview(ctx, opts)
+        engine.print_execution_preview(ctx, opts, ui=services.ui)
         runtime.console.print(f"[dim]State file: {sf_path}[/dim]\n")
-        _land(ctx, common, opts, checkpointer, worktree)
+        _land(ctx, common, opts, checkpointer, worktree, services=services)
     finally:
         if worktree is not None:
             worktree.remove_unless_landing()
@@ -634,12 +654,20 @@ def _replacement_plan(
         sys.exit(1)
 
 
-def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> None:
+def _replan(
+    common: cli.CommonArgs,
+    opts: AutolandOptions,
+    state_path: Path,
+    *,
+    services: Services | None = None,
+) -> None:
     """Replace the plan of the run checkpointed at *state_path*, keep its
-    progress, and continue.
+    progress, and continue, executing with *services* (default: production).
 
     The caller holds the lock, except on a dry run, which only previews.
     """
+    if services is None:
+        services = Services.production()
     try:
         old_checkpointer, old = AutolandCheckpointer.load(state_path)
     except (OSError, ValueError, KeyError) as e:
@@ -678,7 +706,7 @@ def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> 
         ctx = LandingContext(stack=stack, plan=plan)
 
         print_status(ctx)
-        engine.print_execution_preview(ctx, opts)
+        engine.print_execution_preview(ctx, opts, ui=services.ui)
         if lost:
             runtime.console.print(
                 "\n[yellow]Done in the previous run, but not carried over (changed, "
@@ -719,7 +747,7 @@ def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> 
             path=state_path, branch=branch, base=common.target, plan_file=plan_file
         )
         runtime.console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
-        _land(ctx, common, opts, checkpointer, worktree)
+        _land(ctx, common, opts, checkpointer, worktree, services=services)
     finally:
         if worktree is not None:
             worktree.remove_unless_landing()

@@ -28,15 +28,9 @@ from stack_pr.autoland.services import Services
 from stack_pr.autoland.state import AutolandCheckpointer, AutolandLock
 from stack_pr.autoland.steps import AutolandStep
 from stack_pr.autoland.worktree import Worktree
+from tests.autoland_fakes import OPTS, FakeRepo, FakeUI, FakeWaits, stack
 from tests.helpers import common_args
-from tests.test_autoland_step_execution import (
-    OPTS,
-    FakeRepo,
-    FakeUI,
-    FakeWaits,
-    services,
-    stack,
-)
+from tests.test_autoland_step_execution import services
 
 INTERRUPTED = "User interrupted (Ctrl+C)"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -76,12 +70,11 @@ class InterruptedUI(FakeUI):
 
 
 @pytest.fixture
-def resume_io(mocker: MockerFixture) -> Mock:
-    """Stub the git side of a resume; return the Services.production mock."""
+def resume_io(mocker: MockerFixture) -> None:
+    """Stub the git side of a resume, and the refresh of its PRs."""
     mocker.patch("stack_pr.git.get_current_branch_name", return_value="feat")
     mocker.patch("stack_pr.cli.deduce_base", side_effect=lambda c: c)
     mocker.patch("stack_pr.autoland.discovery.enrich_stack")
-    return mocker.patch.object(Services, "production")
 
 
 @pytest.fixture
@@ -103,8 +96,12 @@ def worktree_events(mocker: MockerFixture) -> list[str]:
     return events
 
 
-def _resume(sf: Path, **overrides: object) -> None:
-    _run_resume(common_args(), replace(OPTS, resume=True, state_file=sf, **overrides))
+def _resume(sf: Path, svc: Services, **overrides: object) -> None:
+    _run_resume(
+        common_args(),
+        replace(OPTS, resume=True, state_file=sf, **overrides),
+        services=svc,
+    )
 
 
 def _printed(console: Mock) -> str:
@@ -128,10 +125,10 @@ def _assert_interrupted(sf: Path, console: Mock, *, at_step: int) -> LandingCont
     [(False, ["preserved"]), (True, ["removed"])],
     ids=["keeps-worktree", "always-cleanup"],
 )
+@pytest.mark.usefixtures("resume_io")
 def test_ctrl_c_during_a_wait_checkpoints_and_exits_130(
     tmp_path: Path,
     autoland_console: Mock,
-    resume_io: Mock,
     *,
     worktree_events: list[str],
     always_cleanup: bool,
@@ -139,12 +136,10 @@ def test_ctrl_c_during_a_wait_checkpoints_and_exits_130(
 ) -> None:
     sf = tmp_path / "state.json"
     _save(sf, _land_both())
-    resume_io.return_value = services(
-        waits=_waits([], interrupt_at=102), repo=FakeRepo()
-    )
+    svc = services(waits=_waits([], interrupt_at=102), repo=FakeRepo())
 
     with pytest.raises(SystemExit) as exc:
-        _resume(sf, branch="feat", always_cleanup=always_cleanup)
+        _resume(sf, svc, branch="feat", always_cleanup=always_cleanup)
 
     assert exc.value.code == 130
     saved = _assert_interrupted(sf, autoland_console, at_step=1)
@@ -153,15 +148,15 @@ def test_ctrl_c_during_a_wait_checkpoints_and_exits_130(
     assert worktree_events == worktree
 
 
+@pytest.mark.usefixtures("resume_io")
 def test_ctrl_c_at_a_confirm_prompt_checkpoints_and_exits_130(
-    tmp_path: Path, autoland_console: Mock, resume_io: Mock
+    tmp_path: Path, autoland_console: Mock
 ) -> None:
     sf = tmp_path / "state.json"
     _save(sf, [LandStep(entry_index=0, pr_number=101), ConfirmStep()])
-    resume_io.return_value = services(InterruptedUI(), repo=FakeRepo())
 
     with pytest.raises(SystemExit) as exc:
-        _resume(sf)
+        _resume(sf, services(InterruptedUI(), repo=FakeRepo()))
 
     assert exc.value.code == 130
     saved = _assert_interrupted(sf, autoland_console, at_step=1)
@@ -170,22 +165,18 @@ def test_ctrl_c_at_a_confirm_prompt_checkpoints_and_exits_130(
     assert not confirm.confirmed
 
 
-@pytest.mark.usefixtures("autoland_console")
+@pytest.mark.usefixtures("autoland_console", "resume_io")
 def test_resume_after_ctrl_c_continues_from_the_interrupted_step(
-    tmp_path: Path, resume_io: Mock
+    tmp_path: Path,
 ) -> None:
     sf = tmp_path / "state.json"
     _save(sf, _land_both())
     approved: list[int] = []
-    resume_io.return_value = services(
-        waits=_waits(approved, interrupt_at=102), repo=FakeRepo()
-    )
     with pytest.raises(SystemExit):
-        _resume(sf)
+        _resume(sf, services(waits=_waits(approved, interrupt_at=102), repo=FakeRepo()))
     assert approved == [101]
 
-    resume_io.return_value = services(waits=_waits(approved), repo=FakeRepo())
-    _resume(sf)
+    _resume(sf, services(waits=_waits(approved), repo=FakeRepo()))
 
     # #101 isn't landed again; #102 is landed from the start of its step.
     assert approved == [101, 102]
@@ -203,9 +194,9 @@ from unittest import mock
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 from stack_pr.autoland import commands
-from stack_pr.autoland.services import Services
+from tests.autoland_fakes import OPTS, FakeRepo, FakeWaits
 from tests.helpers import common_args
-from tests.test_autoland_step_execution import OPTS, FakeRepo, FakeWaits, services
+from tests.test_autoland_step_execution import services
 
 def block(entry):
     print("waiting", flush=True)
@@ -215,11 +206,12 @@ def block(entry):
 sf = Path({path!r})
 with mock.patch("stack_pr.git.get_current_branch_name", return_value="feat"), \\
         mock.patch("stack_pr.cli.deduce_base", side_effect=lambda c: c), \\
-        mock.patch("stack_pr.autoland.discovery.enrich_stack"), \\
-        mock.patch.object(Services, "production",
-                          return_value=services(waits=FakeWaits(approval=block),
-                                                repo=FakeRepo())):
-    commands._run_resume(common_args(), replace(OPTS, resume=True, state_file=sf))
+        mock.patch("stack_pr.autoland.discovery.enrich_stack"):
+    commands._run_resume(
+        common_args(),
+        replace(OPTS, resume=True, state_file=sf),
+        services=services(waits=FakeWaits(approval=block), repo=FakeRepo()),
+    )
 """
 
 

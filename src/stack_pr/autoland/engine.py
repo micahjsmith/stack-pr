@@ -14,13 +14,12 @@ from __future__ import annotations
 import functools
 
 from stack_pr import cli
-from stack_pr.autoland import runtime
 from stack_pr.autoland.display import _describe_step
 from stack_pr.autoland.model import LandingContext
 from stack_pr.autoland.optimize import PolicyRegistry, UnitContext, optimize_plan
 from stack_pr.autoland.options import AutolandOptions
 from stack_pr.autoland.plan import landed_prefix_end
-from stack_pr.autoland.services import Services
+from stack_pr.autoland.services import UI, Services
 from stack_pr.autoland.state import AutolandCheckpointer
 from stack_pr.autoland.steps import StepContext, StepResult
 
@@ -98,13 +97,14 @@ def print_execution_preview(
     ctx: LandingContext,
     opts: AutolandOptions,
     *,
+    ui: UI,
     policies: PolicyRegistry | None = None,
 ) -> None:
     """Announce what the optimized plan does beyond executing its steps one by
     one. Derived from the same units ``execute_plan`` executes."""
     for unit in optimize_plan(ctx, opts, policies):
         for line in unit.preview():
-            runtime.console.print(line)
+            ui.print(line)
 
 
 def _record_landed_sha(ctx: LandingContext, sha: str) -> None:

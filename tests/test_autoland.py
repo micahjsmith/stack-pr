@@ -8,7 +8,9 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -60,8 +62,20 @@ from stack_pr.autoland.plan import (
     parse_plan,
     plan_from_file,
 )
+from stack_pr.autoland.repo import GitRepo
 from stack_pr.autoland.runtime import _RE_MARKUP, _PlainConsole
+from stack_pr.autoland.services import Services
 from stack_pr.autoland.state import AutolandCheckpointer, AutolandLock
+from tests.autoland_fakes import (
+    FakeGitHub,
+    FakeRepo,
+    FakeServices,
+    FakeSleep,
+    FakeUI,
+    FakeWaits,
+    StopPolling,
+    ok,
+)
 from tests.helpers import common_args, git, init_repo
 
 
@@ -206,26 +220,38 @@ def test_evaluate_checks_empty_required_no_checks() -> None:
 # --- merge status polling (GitHub.poll_merge) ----------------------------
 
 
-def test_poll_merge_merged(mocker) -> None:  # noqa: ANN001
-    mocker.patch.object(gh.github, "pr_state", return_value="MERGED")
-    assert gh.github.poll_merge(1).merged is True
+class _GitHubWith(gh.GitHub):
+    """The real client, over a canned PR state and, unless it is to be looked
+    up, a canned merge-queue entry."""
+
+    def __init__(self, state: str, *, queued: object = "lookup") -> None:
+        super().__init__()
+        self._owner_repo = ("o", "r")
+        self._state, self._queued = state, queued
+
+    def pr_state(self, pr_number: int) -> str:
+        return self._state
+
+    def in_merge_queue(self, pr_number: int) -> bool | None:
+        if self._queued == "lookup":
+            return super().in_merge_queue(pr_number)
+        return cast("bool | None", self._queued)
 
 
-def test_poll_merge_closed(mocker) -> None:  # noqa: ANN001
-    mocker.patch.object(gh.github, "pr_state", return_value="CLOSED")
-    assert gh.github.poll_merge(1).error == "PR was closed"
+def test_poll_merge_merged() -> None:
+    assert _GitHubWith("MERGED").poll_merge(1).merged is True
 
 
-def test_poll_merge_booted(mocker) -> None:  # noqa: ANN001
-    mocker.patch.object(gh.github, "pr_state", return_value="OPEN")
-    mocker.patch.object(gh.github, "in_merge_queue", return_value=False)
-    assert gh.github.poll_merge(1).booted is True
+def test_poll_merge_closed() -> None:
+    assert _GitHubWith("CLOSED").poll_merge(1).error == "PR was closed"
 
 
-def test_poll_merge_still_queued(mocker) -> None:  # noqa: ANN001
-    mocker.patch.object(gh.github, "pr_state", return_value="OPEN")
-    mocker.patch.object(gh.github, "in_merge_queue", return_value=True)
-    res = gh.github.poll_merge(1)
+def test_poll_merge_booted() -> None:
+    assert _GitHubWith("OPEN", queued=False).poll_merge(1).booted is True
+
+
+def test_poll_merge_still_queued() -> None:
+    res = _GitHubWith("OPEN", queued=True).poll_merge(1)
     assert not res.merged
     assert not res.booted
     assert not res.error
@@ -234,10 +260,8 @@ def test_poll_merge_still_queued(mocker) -> None:  # noqa: ANN001
 def test_poll_merge_lookup_failure_is_not_booted(mocker) -> None:  # noqa: ANN001
     # A transient failure looking up the merge-queue entry says nothing about
     # whether the PR is still queued, so it must not count as being booted.
-    mocker.patch.object(gh.github, "pr_state", return_value="OPEN")
-    mocker.patch.object(gh.github, "owner_repo", return_value=("o", "r"))
-    mocker.patch.object(runtime, "run", side_effect=RuntimeError("HTTP 502"))
-    res = gh.github.poll_merge(1)
+    _shell(mocker, lambda _cmd: RuntimeError("HTTP 502"))
+    res = _GitHubWith("OPEN").poll_merge(1)
     assert not res.merged
     assert not res.booted
     assert not res.error
@@ -247,145 +271,104 @@ def test_poll_merge_lookup_failure_is_not_booted(mocker) -> None:  # noqa: ANN00
 
 
 def test_merge_commit_parses_oid(mocker) -> None:  # noqa: ANN001
-    mocker.patch.object(
-        gh, "gh_json", return_value={"mergeCommit": {"oid": "deadbeef"}}
-    )
-    assert gh.github.merge_commit(1) == "deadbeef"
+    _gh_replies(mocker, view=[json.dumps({"mergeCommit": {"oid": "deadbeef"}})])
+    assert gh.GitHub().merge_commit(1) == "deadbeef"
 
 
 def test_merge_commit_none_when_unmerged(mocker) -> None:  # noqa: ANN001
-    mocker.patch.object(gh, "gh_json", return_value={"mergeCommit": None})
-    assert gh.github.merge_commit(1) is None
+    _gh_replies(mocker, view=[json.dumps({"mergeCommit": None})])
+    assert gh.GitHub().merge_commit(1) is None
 
 
-def test_refresh_last_landed_sha_prefers_merge_commit(mocker) -> None:  # noqa: ANN001
+def _git_repo(github: FakeGitHub | None = None) -> GitRepo:
+    return GitRepo(cast("gh.GitHub", github or FakeGitHub()), FakeUI())
+
+
+def test_landed_sha_prefers_merge_commit(mocker) -> None:  # noqa: ANN001
     # origin/<target> HEAD has advanced past our merge commit (bot commits,
     # other PRs). We must record OUR merge commit, not the moving HEAD.
-    mocker.patch.object(runtime, "run")  # git fetch is a no-op
-    mocker.patch.object(gh.github, "merge_commit", return_value="mergesha")
-    ctx = LandingContext(last_landed_sha="")
-    waits._refresh_last_landed_sha(ctx, common_args(), pr_number=42)  # noqa: SLF001
-    assert ctx.last_landed_sha == "mergesha"
+    _shell(mocker, lambda _cmd: "")  # git fetch is a no-op
+    github = FakeGitHub()
+    github.merge_commits[42] = "mergesha"
+    assert _git_repo(github).landed_sha(common_args(), pr_number=42) == "mergesha"
 
 
-def test_refresh_last_landed_sha_falls_back_to_head(mocker) -> None:  # noqa: ANN001
+def test_landed_sha_falls_back_to_head(mocker) -> None:  # noqa: ANN001
     # No PR context (e.g. resume) or the merge commit is unknown: fall back to
     # origin/<target> HEAD.
-    mocker.patch.object(
-        runtime,
-        "run",
-        return_value=argparse.Namespace(stdout="headsha\n", returncode=0),
+    _shell(mocker, lambda _cmd: "headsha\n")
+    assert _git_repo().landed_sha(common_args(), pr_number=42) == "headsha"
+
+
+def _wait_for_workflow(fakes: FakeServices, step: WorkflowStep) -> bool:
+    ctx = LandingContext(last_landed_sha="mergesha")
+    return waits.wait_for_workflow(
+        step, opts=_opts(), common=common_args(), ctx=ctx, services=fakes.services
     )
-    mocker.patch.object(gh.github, "merge_commit", return_value=None)
-    ctx = LandingContext(last_landed_sha="")
-    waits._refresh_last_landed_sha(ctx, common_args(), pr_number=42)  # noqa: SLF001
-    assert ctx.last_landed_sha == "headsha"
 
 
-def test_wait_for_workflow_accepts_run_on_merge_commit(mocker) -> None:  # noqa: ANN001
+def _success(sha: str) -> dict:
+    return {"headSha": sha, "status": "completed", "conclusion": "success"}
+
+
+def test_wait_for_workflow_accepts_run_on_merge_commit() -> None:
     # Regression: a green deploy run on our exact merge commit must satisfy the
     # checkpoint even though origin/<target> has since moved on.
-    mocker.patch.object(
-        gh.github,
-        "workflow_runs",
-        return_value=[
-            {"headSha": "mergesha", "status": "completed", "conclusion": "success"}
-        ],
-    )
+    fakes = FakeServices.polling()
+    fakes.github.runs = [_success("mergesha")]
     step = WorkflowStep(workflow="deploy.yaml")
-    ctx = LandingContext(last_landed_sha="mergesha")
-    assert waits.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
+    assert _wait_for_workflow(fakes, step)
     assert step.state == "succeeded"
 
 
-def test_wait_for_workflow_fetches_when_run_sha_is_unknown_locally(mocker) -> None:  # noqa: ANN001
+def test_wait_for_workflow_fetches_when_run_sha_is_unknown_locally() -> None:
     # Regression: origin/<target> had advanced past our last fetch, so the
     # completed run's head commit was not in this clone. `git merge-base
     # --is-ancestor` then exits 128 ("Not a valid commit name"), which used to
     # read as "not an ancestor" and made the checkpoint poll forever. A fetch
     # must resolve it.
-    mocker.patch.object(
-        gh.github,
-        "workflow_runs",
-        return_value=[
-            {"headSha": "newersha", "status": "completed", "conclusion": "success"}
-        ],
-    )
-    calls: list[list] = []
-
-    def _run(cmd, **_kwargs):  # noqa: ANN001, ANN003, ANN202
-        calls.append(cmd)
-        if cmd[:3] == ["git", "merge-base", "--is-ancestor"]:
-            # Unknown commit before the fetch, a genuine answer after it.
-            fetched = ["git", "fetch", "origin", "main"] in calls
-            return argparse.Namespace(
-                stdout="", stderr=b"", returncode=0 if fetched else 128
-            )
-        return argparse.Namespace(stdout="", stderr=b"", returncode=0)
-
-    mocker.patch.object(runtime, "run", side_effect=_run)  # the fetch
-    mocker.patch("stack_pr.git.run_shell_command", side_effect=_run)  # merge-base
-    contains = mocker.patch.object(gh.github, "contains")
+    repo = FakeRepo(after_fetch={("mergesha", "newersha"): True})
+    fakes = FakeServices.polling(repo=repo)
+    fakes.github.runs = [_success("newersha")]
     step = WorkflowStep(workflow="deploy.yaml")
-    ctx = LandingContext(last_landed_sha="mergesha")
-    assert waits.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
+    assert _wait_for_workflow(fakes, step)
     assert step.state == "succeeded"
-    assert ["git", "fetch", "origin", "main"] in calls
-    contains.assert_not_called()  # the fetch answered it; no API call needed
+    assert repo.fetches == 1
+    # the fetch answered it; no API call needed
+    assert fakes.github.called("contains") == []
 
 
-def test_wait_for_workflow_falls_back_to_github_compare(mocker) -> None:  # noqa: ANN001
+def test_wait_for_workflow_falls_back_to_github_compare() -> None:
     # The run's head commit is still missing after the fetch (e.g. a
     # merge-queue commit that never landed on the target branch): ask GitHub.
-    mocker.patch.object(
-        gh.github,
-        "workflow_runs",
-        return_value=[
-            {"headSha": "queuesha", "status": "completed", "conclusion": "success"}
-        ],
-    )
-    unknown = argparse.Namespace(stdout="", stderr=b"", returncode=128)
-    mocker.patch.object(runtime, "run", return_value=unknown)  # the fetch
-    mocker.patch("stack_pr.git.run_shell_command", return_value=unknown)
-    contains = mocker.patch.object(gh.github, "contains", return_value=True)
-    step = WorkflowStep(workflow="deploy.yaml")
-    ctx = LandingContext(last_landed_sha="mergesha")
-    assert waits.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
-    contains.assert_called_once_with("mergesha", "queuesha")
+    fakes = FakeServices.polling()
+    fakes.github.runs = [_success("queuesha")]
+    fakes.github.compare[("mergesha", "queuesha")] = True
+    assert _wait_for_workflow(fakes, WorkflowStep(workflow="deploy.yaml"))
+    assert fakes.github.called("contains") == [("mergesha", "queuesha")]
 
 
-class _StopPollingError(Exception):
-    """Raised from a wait's sleep to end the wait after one poll."""
-
-
-def test_wait_for_workflow_keeps_waiting_when_ancestry_unknown(mocker) -> None:  # noqa: ANN001
+def test_wait_for_workflow_keeps_waiting_when_ancestry_unknown() -> None:
     # Neither git nor GitHub can answer: warn and keep waiting rather than
     # treating "unknown" as "the deploy included our code".
-    def _runs(*_a, **_k) -> list:  # noqa: ANN002, ANN003
-        return [{"headSha": "mystery", "status": "completed", "conclusion": "success"}]
-
-    mocker.patch.object(gh.github, "workflow_runs", side_effect=_runs)
-    unknown = argparse.Namespace(stdout="", stderr=b"", returncode=128)
-    mocker.patch.object(runtime, "run", return_value=unknown)  # the fetch
-    mocker.patch("stack_pr.git.run_shell_command", return_value=unknown)
-    mocker.patch.object(gh.github, "contains", return_value=None)
-    mocker.patch.object(runtime, "resilient_sleep", side_effect=_StopPollingError)
+    fakes = FakeServices.polling(sleep=FakeSleep(limit=0))
+    fakes.github.runs = [_success("mystery")]
     step = WorkflowStep(workflow="deploy.yaml")
-    ctx = LandingContext(last_landed_sha="mergesha")
     # Still waiting when the first poll's sleep comes around.
-    with pytest.raises(_StopPollingError):
-        waits.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
+    with pytest.raises(StopPolling):
+        _wait_for_workflow(fakes, step)
     assert step.state != "succeeded"
 
 
-def test_local_is_ancestor_distinguishes_no_from_unknown(mocker) -> None:  # noqa: ANN001
+def test_repo_is_ancestor_distinguishes_no_from_unknown(mocker) -> None:  # noqa: ANN001
     run_mock = mocker.patch("stack_pr.git.run_shell_command")
+    repo = _git_repo()
     run_mock.return_value = argparse.Namespace(stderr=b"", returncode=0)
-    assert waits._local_is_ancestor("a", "b") is True  # noqa: SLF001
+    assert repo.is_ancestor("a", "b") is True
     run_mock.return_value = argparse.Namespace(stderr=b"", returncode=1)
-    assert waits._local_is_ancestor("a", "b") is False  # noqa: SLF001
+    assert repo.is_ancestor("a", "b") is False
     run_mock.return_value = argparse.Namespace(stderr=b"", returncode=128)
-    assert waits._local_is_ancestor("a", "b") is None  # noqa: SLF001
+    assert repo.is_ancestor("a", "b") is None
 
 
 def test_sha_eq_requires_a_long_enough_prefix() -> None:
@@ -398,52 +381,50 @@ def test_sha_eq_requires_a_long_enough_prefix() -> None:
 
 
 def test_github_contains_uses_merge_base(mocker) -> None:  # noqa: ANN001
-    mocker.patch.object(gh.github, "_owner_repo", ("o", "r"))
-    run_mock = mocker.patch.object(runtime, "run")
-    run_mock.return_value = argparse.Namespace(stdout="basesha\n", returncode=0)
-    assert gh.github.contains("basesha", "headsha") is True
-    run_mock.return_value = argparse.Namespace(stdout="othersha\n", returncode=0)
-    assert gh.github.contains("basesha", "headsha") is False
-    run_mock.return_value = argparse.Namespace(stdout="null\n", returncode=0)
-    assert gh.github.contains("basesha", "headsha") is None
-    run_mock.side_effect = RuntimeError("HTTP 404")
-    assert gh.github.contains("basesha", "headsha") is None
+    github = gh.GitHub()
+    github._owner_repo = ("o", "r")  # noqa: SLF001
+    replies: list[object] = [
+        "basesha\n",
+        "othersha\n",
+        "null\n",
+        RuntimeError("HTTP 404"),
+    ]
+    _shell(mocker, lambda _cmd: replies.pop(0))
+    assert github.contains("basesha", "headsha") is True
+    assert github.contains("basesha", "headsha") is False
+    assert github.contains("basesha", "headsha") is None
+    assert github.contains("basesha", "headsha") is None
 
 
-def test_ancestry_caches_verdicts(mocker) -> None:  # noqa: ANN001
+def test_ancestry_caches_verdicts() -> None:
     # The poll loop re-examines the same runs every interval; commits are
     # immutable, so each pair is decided at most once.
-    contains = mocker.patch.object(gh.github, "contains", return_value=False)
-    unknown = argparse.Namespace(stdout="", stderr=b"", returncode=128)
-    mocker.patch.object(runtime, "run", return_value=unknown)  # the fetch
-    mocker.patch("stack_pr.git.run_shell_command", return_value=unknown)
-    ancestry = waits._Ancestry(common_args())  # noqa: SLF001
+    fakes = FakeServices.polling()
+    fakes.github.compare.update(
+        {("landedsha", "runsha1"): False, ("landedsha", "runsha2"): False}
+    )
+    ancestry = waits._Ancestry(common_args(), fakes.services)  # noqa: SLF001
     assert ancestry.contains("landedsha", "runsha1") is False
     assert ancestry.contains("landedsha", "runsha1") is False
     assert ancestry.contains("landedsha", "runsha2") is False
     # One GitHub request per distinct pair, however often it is asked about.
-    assert [c.args for c in contains.call_args_list] == [
+    assert fakes.github.called("contains") == [
         ("landedsha", "runsha1"),
         ("landedsha", "runsha2"),
     ]
 
 
-def test_wait_for_workflow_ignores_failed_and_incomplete(mocker) -> None:  # noqa: ANN001
+def test_wait_for_workflow_ignores_failed_and_incomplete() -> None:
     # A failed run and a still-running run on our SHA must not satisfy the
     # checkpoint: the wait is still going when its first poll's sleep comes.
-    mocker.patch.object(
-        gh.github,
-        "workflow_runs",
-        return_value=[
-            {"headSha": "mergesha", "status": "completed", "conclusion": "failure"},
-            {"headSha": "mergesha", "status": "in_progress", "conclusion": None},
-        ],
-    )
-    mocker.patch.object(runtime, "resilient_sleep", side_effect=_StopPollingError)
+    fakes = FakeServices.polling(sleep=FakeSleep(limit=0))
+    fakes.github.runs = [
+        {"headSha": "mergesha", "status": "completed", "conclusion": "failure"},
+        {"headSha": "mergesha", "status": "in_progress", "conclusion": None},
+    ]
     step = WorkflowStep(workflow="deploy.yaml")
-    ctx = LandingContext(last_landed_sha="mergesha")
-    with pytest.raises(_StopPollingError):
-        waits.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
+    with pytest.raises(StopPolling):
+        _wait_for_workflow(fakes, step)
     assert step.state != "succeeded"
 
 
@@ -1072,12 +1053,18 @@ def test_rich_status_truncates_titles_but_never_the_failure_reason() -> None:
 # --- executing a partially-landed plan -----------------------------------
 
 
-@pytest.mark.usefixtures("autoland_console")
-def test_execute_plan_skips_landed_prefix_and_targets_last_landed_sha(mocker) -> None:  # noqa: ANN001
-    refresh = mocker.patch("stack_pr.autoland.waits._refresh_last_landed_sha")
-    wait_for_workflow = mocker.patch(
-        "stack_pr.autoland.waits.wait_for_workflow", return_value=True
-    )
+class _NoCheckpoints(AutolandCheckpointer):
+    """A checkpointer that saves nothing."""
+
+    def __init__(self) -> None:
+        super().__init__(path=Path("/dev/null"), branch="feat", base="main")
+
+    def save(self, ctx: LandingContext) -> None:
+        pass
+
+
+def test_execute_plan_skips_landed_prefix_and_targets_last_landed_sha() -> None:
+    fakes = FakeServices()
 
     stack = _pinned_stack([103])
     plan = parse_plan(
@@ -1086,66 +1073,50 @@ def test_execute_plan_skips_landed_prefix_and_targets_last_landed_sha(mocker) ->
         pr_is_merged=lambda pr: pr in (101, 102),
     )
     ctx = LandingContext(stack=stack, plan=plan)
-    checkpointer = AutolandCheckpointer(
-        path=Path("/dev/null"), branch="feat", base="main"
-    )
-    mocker.patch.object(checkpointer, "save")
 
-    assert engine.execute_plan(ctx, common_args(), _opts(), checkpointer) is True
+    assert engine.execute_plan(
+        ctx, common_args(), _opts(), _NoCheckpoints(), services=fakes.services
+    )
 
     # Only the trailing workflow runs; the skipped one and the confirmation
     # (which would otherwise block on stdin) are passed over.
-    (waited_on,) = [c.args[0] for c in wait_for_workflow.call_args_list]
+    assert fakes.waits is not None
+    (waited_on,) = fakes.waits.workflow_steps
     assert waited_on is plan[-1]
     # The trailing workflow waits for #102's code: only the last PR of the
     # landed prefix is looked up, not every PR in it.
-    pinned = [c.args[2] for c in refresh.call_args_list if len(c.args) > 2]
+    pinned = [pr for pr in fakes.repo.lookups if pr is not None]
     assert pinned == [102]
 
 
-def test_confirm_step_banner_is_a_single_line(mocker, autoland_console) -> None:  # noqa: ANN001
+def test_confirm_step_banner_is_a_single_line() -> None:
     # Regression: the banner was once built as two list elements, so the join
     # split "Step 1/1: Manual confirmation required" across two lines.
-    autoland_console.input.return_value = "y"
-    mocker.patch("stack_pr.autoland.waits._refresh_last_landed_sha")
+    fakes = FakeServices(ui=FakeUI(answers=["y"]))
 
     ctx = LandingContext(stack=_pinned_stack([101]), plan=[ConfirmStep(condition="QA")])
-    checkpointer = AutolandCheckpointer(
-        path=Path("/dev/null"), branch="feat", base="main"
-    )
-    mocker.patch.object(checkpointer, "save")
 
-    assert engine.execute_plan(ctx, common_args(), _opts(), checkpointer) is True
-
-    printed = "\n".join(
-        str(c.args[0]) for c in autoland_console.print.call_args_list if c.args
+    assert engine.execute_plan(
+        ctx, common_args(), _opts(), _NoCheckpoints(), services=fakes.services
     )
-    assert "Step 1/1: Manual confirmation required" in printed
+
+    assert "Step 1/1: Manual confirmation required" in fakes.ui.output
 
 
-@pytest.mark.usefixtures("autoland_console")
-def test_execute_plan_lands_a_pinned_step_that_is_still_open(mocker) -> None:  # noqa: ANN001
-    mocker.patch("stack_pr.autoland.waits._refresh_last_landed_sha")
-    approval = mocker.patch(
-        "stack_pr.autoland.waits.wait_for_approval", return_value=True
-    )
-    checks = mocker.patch("stack_pr.autoland.waits.wait_for_checks", return_value=True)
-    enqueue = mocker.patch(
-        "stack_pr.autoland.waits.enqueue_and_wait", return_value=True
-    )
+def test_execute_plan_lands_a_pinned_step_that_is_still_open() -> None:
+    fakes = FakeServices(waits=FakeWaits(queue=ok))
 
     stack = _pinned_stack([103])
     plan = parse_plan("l 102\nl 103\n", stack, pr_is_merged=lambda pr: pr == 102)
     ctx = LandingContext(stack=stack, plan=plan)
-    checkpointer = AutolandCheckpointer(
-        path=Path("/dev/null"), branch="feat", base="main"
+
+    assert engine.execute_plan(
+        ctx, common_args(), _opts(), _NoCheckpoints(), services=fakes.services
     )
-    mocker.patch.object(checkpointer, "save")
 
-    assert engine.execute_plan(ctx, common_args(), _opts(), checkpointer) is True
-
-    for mock in (approval, checks, enqueue):
-        assert mock.call_args.args[0] is stack[0]
+    assert fakes.waits is not None
+    assert fakes.waits.calls == ["approval", "checks", "queue"]
+    assert all(entry is stack[0] for entry in fakes.waits.entries)
 
 
 # --- state round-trip ----------------------------------------------------
@@ -1208,7 +1179,6 @@ def test_load_state_version_mismatch(tmp_path) -> None:  # noqa: ANN001
 # --- rebase + resubmit ---------------------------------------------------
 
 
-@pytest.mark.usefixtures("autoland_console")
 def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     # After rebasing onto an advanced target, the base cached at autoland start
     # is stale; resubmit must re-deduce it (else it sweeps others' commits into
@@ -1217,11 +1187,11 @@ def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     stale = dataclasses.replace(common_args(), base="STALE_MERGE_BASE")
     fresh = dataclasses.replace(stale, base="FRESH_ORIGIN_MASTER")
 
-    mocker.patch("stack_pr.autoland.runtime.run")  # git fetch / rebase
+    _shell(mocker, lambda _cmd: "")  # git fetch / rebase
     deduce = mocker.patch("stack_pr.cli.deduce_base", return_value=fresh)
     submit = mocker.patch("stack_pr.cli.command_submit")
 
-    waits.rebase_and_resubmit(stale)
+    _git_repo().rebase_and_resubmit(stale)
 
     # deduce_base is called with the cached base cleared...
     assert deduce.call_args.args[0].base == ""
@@ -1229,7 +1199,6 @@ def test_rebase_and_resubmit_rededuces_base(mocker) -> None:  # noqa: ANN001
     assert submit.call_args.args[0].base == "FRESH_ORIGIN_MASTER"
 
 
-@pytest.mark.usefixtures("autoland_console")
 def test_rebase_and_resubmit_aborts_conflicted_rebase(
     tmp_path,  # noqa: ANN001
     monkeypatch,  # noqa: ANN001
@@ -1260,7 +1229,7 @@ def test_rebase_and_resubmit_aborts_conflicted_rebase(
     submit = mocker.patch("stack_pr.cli.command_submit")
 
     with pytest.raises(RuntimeError, match="rebase"):
-        waits.rebase_and_resubmit(common_args())
+        _git_repo().rebase_and_resubmit(common_args())
 
     submit.assert_not_called()
     for state_dir in ("rebase-merge", "rebase-apply"):
@@ -1947,25 +1916,30 @@ def test_stop_running_autoland_declined_leaves_it_running(
         ("CHANGES_REQUESTED", False),
     ],
 )
-@pytest.mark.usefixtures("autoland_console")
-def test_wait_for_approval_by_review_decision(
-    mocker,  # noqa: ANN001
-    decision: str,
-    approved: bool,
-) -> None:
-    mocker.patch.object(gh.github, "pr_state", return_value="OPEN")
-    mocker.patch.object(gh.github, "review_decision", return_value=decision)
-    mocker.patch(
-        "stack_pr.autoland.runtime.resilient_sleep", side_effect=_StopPollingError
-    )
+def test_wait_for_approval_by_review_decision(decision: str, approved: bool) -> None:
+    fakes = FakeServices.polling(sleep=FakeSleep(limit=0))
+    fakes.github.reviews[101] = decision
+    svc = fakes.services
 
     entry = _pinned_stack([101])[0]
     if approved:
-        assert waits.wait_for_approval(entry, opts=_opts())
+        assert svc.waits.wait_for_approval(entry, opts=_opts())
     else:
         # A PR that isn't approved is still waited on at the first poll's sleep.
-        with pytest.raises(_StopPollingError):
-            waits.wait_for_approval(entry, opts=_opts())
+        with pytest.raises(StopPolling):
+            svc.waits.wait_for_approval(entry, opts=_opts())
+
+
+def test_replaced_services_wait_through_their_own_github() -> None:
+    old, new = FakeGitHub(), FakeGitHub()
+    new.merged.add(101)
+    svc = dataclasses.replace(FakeServices.polling(github=old).services, github=new)
+
+    entry = _pinned_stack([101])[0]
+    assert svc.waits.wait_for_approval(entry, opts=_opts())
+
+    assert entry.state == PRState.MERGED
+    assert old.calls == []
 
 
 # --- merging a run of land steps as a GitHub stack -------------------------
@@ -1982,141 +1956,68 @@ def test_merge_as_stack_defaults_on_and_flag_overrides_config() -> None:
     assert flagged.merge_as_stack is True
 
 
-class _FakeNativeStackGitHub:
-    """The slice of GitHub a stack merge talks to, holding the stacks in memory."""
-
-    def __init__(self) -> None:
-        self.stacks: dict[int, list[int]] = {}
-        self.merged: set[int] = set()
-        self.created: list[list[int]] = []
-        self.unstacked: list[int] = []
-        self.merge_requests: list[int] = []
-        # (PR, new base) for each base change, and the open PRs' bases at the
-        # time of each merge request.
-        self.base_changes: list[tuple[int, str]] = []
-        self.bases_at_merge: list[list[tuple[int, str]]] = []
-        self.create_error = ""
-        self.merge_error = ""
-        self.set_base_error = ""
-        # The PRs a merge request lands (default: the whole stack up to the PR
-        # it was made on), and the status GitHub then reports for it.
-        self.lands: list[int] | None = None
-        self.status = "merged"
-
-    def find_native_stack(self, pr: int) -> dict | None:
-        for number, prs in self.stacks.items():
-            if pr in prs:
-                return {
-                    "number": number,
-                    "pull_requests": [
-                        {"number": n, "state": "closed" if n in self.merged else "open"}
-                        for n in prs
-                    ],
-                }
-        return None
-
-    def create_native_stack(self, prs: list[int]) -> dict:
-        if self.create_error:
-            raise RuntimeError(self.create_error)
-        self.created.append(prs)
-        self.stacks[7] = prs
-        return {"number": 7}
-
-    def unstack_native_stack(self, number: int) -> None:
-        self.unstacked.append(number)
-        self.stacks.pop(number)
-
-    def set_base(self, pr: int, base: str) -> None:
-        if self.set_base_error:
-            raise RuntimeError(self.set_base_error)
-        self.base_changes.append((pr, base))
-
-    def merge_async(self, pr: int, *, merge_queue: bool) -> str:
-        self.merge_requests.append(pr)
-        self.bases_at_merge.append(list(self.base_changes))
-        if self.merge_error:
-            raise RuntimeError(self.merge_error)
-        prs = next(p for p in self.stacks.values() if pr in p)
-        self.merged.update(self.lands if self.lands is not None else prs)
-        return "uuid-1"
-
-    def merge_async_status(self, _pr: int, _uuid: str) -> tuple[str, str]:
-        return self.status, "conflict in PR #102" if self.status == "failed" else ""
-
-    def pr_state(self, pr: int) -> str:
-        return "MERGED" if pr in self.merged else "OPEN"
-
-    def in_merge_queue(self, _pr: int) -> bool:
-        return True
-
-    def has_merge_queue(self, _branch: str) -> bool:
-        return True
-
-
-def _land_with_fake_github(mocker, plan_text: str, prs: list[int], **opts):  # noqa: ANN001, ANN003, ANN202
-    """Set up running *plan_text* over a stack of *prs* against a fake GitHub.
+class _StackLanding:
+    """Running a plan over a stack of PRs against a fake GitHub.
 
     Approval, checks and mergeability are taken as given, and a PR landed one
-    at a time merges straight away. Returns the fake, a function that runs the
-    plan, the rebase mock, and a function listing the PRs landed one at a time.
+    at a time merges straight away.
     """
-    fake = _FakeNativeStackGitHub()
-    mocker.patch.object(gh, "github", fake)
-    mocker.patch("stack_pr.autoland.runtime.console")
-    mocker.patch("stack_pr.autoland.runtime.resilient_sleep")
-    mocker.patch("stack_pr.autoland.waits._refresh_last_landed_sha")
-    mocker.patch("stack_pr.autoland.waits.wait_for_approval", return_value=True)
-    mocker.patch("stack_pr.autoland.waits.wait_for_checks", return_value=True)
-    mocker.patch(
-        "stack_pr.autoland.waits.wait_for_mergeable",
-        return_value=waits.MergeableResult(ready=True),
-    )
-    rebase = mocker.patch("stack_pr.autoland.waits.rebase_and_resubmit")
 
-    def land_one(entry, **_kw) -> bool:  # noqa: ANN001, ANN003
-        fake.merged.add(entry.pr_number)
+    def __init__(self, plan_text: str, prs: list[int], **opts: object) -> None:
+        self.github = FakeGitHub()
+        self.waits = FakeWaits(queue=self._land_one)
+        self.fakes = FakeServices(github=self.github, waits=self.waits)
+        stack = _pinned_stack(prs)
+        self._ctx = LandingContext(stack=stack, plan=parse_plan(plan_text, stack))
+        self._opts = _opts(**opts)
+
+    def _land_one(self, entry: StackEntry) -> bool:
+        self.github.merged.add(entry.pr_number)
         entry.state = PRState.MERGED
         return True
 
-    one_at_a_time = mocker.patch(
-        "stack_pr.autoland.waits.enqueue_and_wait", side_effect=land_one
-    )
+    def execute(self) -> bool:
+        return engine.execute_plan(
+            self._ctx,
+            common_args(),
+            self._opts,
+            _NoCheckpoints(),
+            services=self.fakes.services,
+        )
 
-    stack = _pinned_stack(prs)
-    ctx = LandingContext(stack=stack, plan=parse_plan(plan_text, stack))
-    checkpointer = AutolandCheckpointer(
-        path=Path("/dev/null"), branch="feat", base="main"
-    )
-    mocker.patch.object(checkpointer, "save")
+    @property
+    def rebases(self) -> int:
+        return self.fakes.repo.rebases
 
-    def execute() -> bool:
-        return engine.execute_plan(ctx, common_args(), _opts(**opts), checkpointer)
-
-    def landed_one_by_one() -> list[int]:
-        return [c.args[0].pr_number for c in one_at_a_time.call_args_list]
-
-    return fake, execute, rebase, landed_one_by_one
+    def landed_one_by_one(self) -> list[int]:
+        return self.waits.waited("queue")
 
 
-def test_consecutive_land_steps_merge_as_one_stack(mocker) -> None:  # noqa: ANN001
-    fake, execute, rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\nl\n", [101, 102, 103, 104]
-    )
+def _land_with_fake_github(plan_text: str, prs: list[int], **opts: object):  # noqa: ANN202
+    """A ``_StackLanding``'s fake GitHub, its execute, the landing (for its
+    rebases), and its landed_one_by_one."""
+    landing = _StackLanding(plan_text, prs, **opts)
+    return landing.github, landing.execute, landing, landing.landed_one_by_one
 
-    assert execute() is True
+
+def test_consecutive_land_steps_merge_as_one_stack() -> None:
+    landing = _StackLanding("l\nl\nl\n", [101, 102, 103, 104])
+    fake = landing.github
+
+    assert landing.execute() is True
 
     assert fake.created == [[101, 102, 103]]
     assert fake.merge_requests == [103]  # one request, on the top of the run
     assert fake.merged == {101, 102, 103}
-    assert landed_one_by_one() == []
+    assert landing.landed_one_by_one() == []
     # #104 stays open, so the stack is rebased onto the landed code — once.
-    rebase.assert_called_once()
+    assert landing.rebases == 1
 
 
-def test_stack_merge_first_bases_the_pr_above_the_run_on_the_target(mocker) -> None:  # noqa: ANN001
+def test_stack_merge_first_bases_the_pr_above_the_run_on_the_target() -> None:
     # Otherwise GitHub closes #104 once the run's branches are deleted.
     fake, execute, _rebase, _landed = _land_with_fake_github(
-        mocker, "l\nl\nl\n", [101, 102, 103, 104]
+        "l\nl\nl\n", [101, 102, 103, 104]
     )
 
     assert execute() is True
@@ -2124,9 +2025,9 @@ def test_stack_merge_first_bases_the_pr_above_the_run_on_the_target(mocker) -> N
     assert fake.bases_at_merge == [[(104, "main")]]
 
 
-def test_stack_merge_falls_back_when_the_pr_above_cannot_be_rebased(mocker) -> None:  # noqa: ANN001
+def test_stack_merge_falls_back_when_the_pr_above_cannot_be_rebased() -> None:
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\n", [101, 102, 103]
+        "l\nl\n", [101, 102, 103]
     )
     fake.set_base_error = "HTTP 502"
 
@@ -2137,9 +2038,9 @@ def test_stack_merge_falls_back_when_the_pr_above_cannot_be_rebased(mocker) -> N
     assert landed_one_by_one() == [101, 102]
 
 
-def test_merge_as_stack_off_lands_one_at_a_time(mocker) -> None:  # noqa: ANN001
+def test_merge_as_stack_off_lands_one_at_a_time() -> None:
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\n", [101, 102], merge_as_stack=False
+        "l\nl\n", [101, 102], merge_as_stack=False
     )
 
     assert execute() is True
@@ -2148,9 +2049,9 @@ def test_merge_as_stack_off_lands_one_at_a_time(mocker) -> None:  # noqa: ANN001
     assert landed_one_by_one() == [101, 102]
 
 
-def test_native_stack_merge_falls_back_when_the_stack_cannot_be_created(mocker) -> None:  # noqa: ANN001
+def test_native_stack_merge_falls_back_when_the_stack_cannot_be_created() -> None:
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\nl\n", [101, 102, 103]
+        "l\nl\nl\n", [101, 102, 103]
     )
     fake.create_error = "HTTP 422: base ref does not match"
 
@@ -2160,9 +2061,9 @@ def test_native_stack_merge_falls_back_when_the_stack_cannot_be_created(mocker) 
     assert landed_one_by_one() == [101, 102, 103]
 
 
-def test_partly_failed_stack_merge_lands_the_rest_one_at_a_time(mocker) -> None:  # noqa: ANN001
+def test_partly_failed_stack_merge_lands_the_rest_one_at_a_time() -> None:
     fake, execute, rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\nl\n", [101, 102, 103]
+        "l\nl\nl\n", [101, 102, 103]
     )
     fake.lands = [101]
     fake.status = "failed"
@@ -2174,17 +2075,16 @@ def test_partly_failed_stack_merge_lands_the_rest_one_at_a_time(mocker) -> None:
     assert fake.unstacked == [7]
     assert fake.merge_requests == [103]
     assert landed_one_by_one() == [102, 103]
-    assert rebase.call_count == 2  # after the stack merge, and after #102
+    assert rebase.rebases == 2  # after the stack merge, and after #102
 
 
-def test_native_stack_merge_waits_for_a_request_already_in_flight(mocker) -> None:  # noqa: ANN001
+def test_native_stack_merge_waits_for_a_request_already_in_flight() -> None:
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\n", [101, 102]
+        "l\nl\n", [101, 102]
     )
     fake.merge_error = "gh: existing merge request already enqueued (HTTP 409)"
     # The earlier request merges the PRs while we wait for it.
-    states = iter(["OPEN", "OPEN", "MERGED", "MERGED"])
-    mocker.patch.object(fake, "pr_state", side_effect=lambda _pr: next(states))
+    fake.script("pr_state", "OPEN", "OPEN", "MERGED", "MERGED")
 
     assert execute() is True
 
@@ -2192,9 +2092,9 @@ def test_native_stack_merge_waits_for_a_request_already_in_flight(mocker) -> Non
     assert fake.unstacked == []
 
 
-def test_stack_merge_keeps_waiting_when_the_queue_lookup_fails(mocker) -> None:  # noqa: ANN001
+def test_stack_merge_keeps_waiting_when_the_queue_lookup_fails() -> None:
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\n", [101, 102]
+        "l\nl\n", [101, 102]
     )
     fake.lands = []  # queued, not merged yet
     fake.status = "enqueued"
@@ -2203,7 +2103,7 @@ def test_stack_merge_keeps_waiting_when_the_queue_lookup_fails(mocker) -> None: 
         # The lookup fails while the stack is still queued; it merges meanwhile.
         fake.merged.update({101, 102})
 
-    mocker.patch.object(fake, "in_merge_queue", side_effect=lookup_fails)
+    fake.script("in_merge_queue", lookup_fails)
 
     assert execute() is True
 
@@ -2212,10 +2112,8 @@ def test_stack_merge_keeps_waiting_when_the_queue_lookup_fails(mocker) -> None: 
     assert landed_one_by_one() == []
 
 
-def test_native_stack_merge_reuses_a_stack_the_run_is_at_the_bottom_of(mocker) -> None:  # noqa: ANN001
-    fake, execute, _rebase, _landed = _land_with_fake_github(
-        mocker, "l\nl\n", [101, 102, 103]
-    )
+def test_native_stack_merge_reuses_a_stack_the_run_is_at_the_bottom_of() -> None:
+    fake, execute, _rebase, _landed = _land_with_fake_github("l\nl\n", [101, 102, 103])
     fake.stacks[3] = [101, 102, 103]
     fake.lands = [101, 102]
 
@@ -2225,9 +2123,9 @@ def test_native_stack_merge_reuses_a_stack_the_run_is_at_the_bottom_of(mocker) -
     assert fake.merge_requests == [102]
 
 
-def test_native_stack_merge_leaves_a_mismatched_stack_alone(mocker) -> None:  # noqa: ANN001
+def test_native_stack_merge_leaves_a_mismatched_stack_alone() -> None:
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\n", [101, 102]
+        "l\nl\n", [101, 102]
     )
     fake.stacks[3] = [100, 101, 102]  # #100 isn't part of this plan
 
@@ -2243,6 +2141,20 @@ def test_native_stack_merge_leaves_a_mismatched_stack_alone(mocker) -> None:  # 
 # ---------------------------------------------------------------------------
 
 
+def _shell(mocker, answer: Callable[[list[str]], object]) -> None:  # noqa: ANN001
+    """Answer each command run with ``answer(cmd)``: its stdout, or an
+    exception for the run to raise."""
+
+    def _run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+        reply = answer(cmd)
+        if isinstance(reply, Exception):
+            raise reply
+        return subprocess.CompletedProcess(cmd, 0, stdout=reply, stderr="")
+
+    # Both runtime.run and the shared gh JSON helpers run commands through it.
+    mocker.patch.object(shell_commands, "run_with_retry", side_effect=_run)
+
+
 def _gh_replies(mocker, **replies: list) -> None:  # noqa: ANN001
     """Answer each ``gh <cmd> <subcommand>`` with the next of *replies[subcommand]*.
 
@@ -2250,23 +2162,22 @@ def _gh_replies(mocker, **replies: list) -> None:  # noqa: ANN001
     last reply repeats once the others are used up.
     """
 
-    def _run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+    def _answer(cmd: list[str]) -> object:
         queue = replies[cmd[2]]
-        reply = queue.pop(0) if len(queue) > 1 else queue[0]
-        if isinstance(reply, Exception):
-            raise reply
-        return subprocess.CompletedProcess(cmd, 0, stdout=reply, stderr="")
+        return queue.pop(0) if len(queue) > 1 else queue[0]
 
-    # Both runtime.run and the shared gh JSON helpers run commands through it.
-    mocker.patch.object(shell_commands, "run_with_retry", side_effect=_run)
-    mocker.patch.object(runtime, "resilient_sleep", return_value=0.0)
+    _shell(mocker, _answer)
+
+
+def _real_github() -> Services:
+    """The real wait loops and GitHub client, over whatever ``gh`` answers."""
+    return FakeServices.polling(github=gh.GitHub()).services
 
 
 _OPEN = json.dumps({"state": "OPEN"})
 _PASSING = json.dumps([{"name": "ci", "bucket": "pass"}])
 
 
-@pytest.mark.usefixtures("autoland_console")
 @pytest.mark.parametrize(
     "bad_reply",
     [
@@ -2282,18 +2193,16 @@ def test_wait_for_checks_polls_again_after_a_failed_state_read(
     _gh_replies(mocker, view=[bad_reply, _OPEN], checks=[_PASSING])
     entry = _pinned_stack([101])[0]
 
-    assert waits.wait_for_checks(entry, opts=_opts())
+    assert _real_github().waits.wait_for_checks(entry, opts=_opts())
 
 
-@pytest.mark.usefixtures("autoland_console")
 def test_wait_for_checks_polls_again_after_a_malformed_checks_read(mocker) -> None:  # noqa: ANN001
     _gh_replies(mocker, view=[_OPEN], checks=['{"oops": 1}', "[1]", _PASSING])
     entry = _pinned_stack([101])[0]
 
-    assert waits.wait_for_checks(entry, opts=_opts())
+    assert _real_github().waits.wait_for_checks(entry, opts=_opts())
 
 
-@pytest.mark.usefixtures("autoland_console")
 def test_wait_for_approval_polls_again_after_a_failed_state_read(mocker) -> None:  # noqa: ANN001
     _gh_replies(
         mocker,
@@ -2307,66 +2216,51 @@ def test_wait_for_approval_polls_again_after_a_failed_state_read(mocker) -> None
     )
     entry = _pinned_stack([101])[0]
 
-    assert waits.wait_for_approval(entry, opts=_opts())
+    assert _real_github().waits.wait_for_approval(entry, opts=_opts())
     assert entry.state == PRState.MERGED
 
 
-@pytest.mark.usefixtures("autoland_console")
+_CLEAN = json.dumps({"state": "OPEN", "mergeStateStatus": "CLEAN"})
+
+
 def test_wait_for_mergeable_polls_again_after_a_malformed_read(mocker) -> None:  # noqa: ANN001
-    clean = json.dumps({"state": "OPEN", "mergeStateStatus": "CLEAN"})
-    _gh_replies(mocker, view=["", RuntimeError("timed out"), clean])
+    _gh_replies(mocker, view=["", RuntimeError("timed out"), _CLEAN])
     entry = _pinned_stack([101])[0]
 
-    result = waits.wait_for_mergeable(entry, opts=_opts())
+    result = _real_github().waits.wait_for_mergeable(entry, opts=_opts())
 
     assert result.ready
 
 
-def _enqueued(mocker) -> None:  # noqa: ANN001
-    """Skip straight to waiting in the merge queue."""
-    mocker.patch("stack_pr.autoland.runtime.console")
-    mocker.patch.object(
-        waits,
-        "wait_for_mergeable",
-        return_value=waits.MergeableResult(ready=True),
-    )
-    mocker.patch.object(gh.github, "enqueue")
-
-
+@pytest.mark.usefixtures("autoland_console")  # the enqueue echoes its command
 def test_merge_queue_wait_polls_again_after_a_failed_read(mocker) -> None:  # noqa: ANN001
-    _enqueued(mocker)
+    # Mergeable, enqueued, then the reads of whether it merged.
     _gh_replies(
-        mocker, view=["{truncated", RuntimeError("HTTP 502"), '{"state": "MERGED"}']
+        mocker,
+        view=[_CLEAN, "{truncated", RuntimeError("HTTP 502"), '{"state": "MERGED"}'],
+        merge=[""],
     )
     entry = _pinned_stack([101])[0]
 
-    assert waits.enqueue_and_wait(entry, opts=_opts())
+    assert _real_github().waits.enqueue_and_wait(entry, opts=_opts())
     assert entry.state == PRState.MERGED
 
 
+@pytest.mark.usefixtures("autoland_console")  # the enqueue echoes its command
 def test_merge_queue_wait_still_times_out_while_reads_fail(mocker) -> None:  # noqa: ANN001
-    _enqueued(mocker)
-    _gh_replies(mocker, view=[RuntimeError("HTTP 502")])
+    _gh_replies(mocker, view=[_CLEAN, RuntimeError("HTTP 502")], merge=[""])
     entry = _pinned_stack([101])[0]
 
     opts = _opts(poll_interval=60, merge_timeout=300)
-    assert not waits.enqueue_and_wait(entry, opts=opts)
+    assert not _real_github().waits.enqueue_and_wait(entry, opts=opts)
     assert entry.error_message == "Timed out waiting for merge queue"
 
 
-def test_stack_merge_wait_polls_again_after_a_failed_read(mocker) -> None:  # noqa: ANN001
+def test_stack_merge_wait_polls_again_after_a_failed_read() -> None:
     fake, execute, _rebase, landed_one_by_one = _land_with_fake_github(
-        mocker, "l\nl\n", [101, 102]
+        "l\nl\n", [101, 102]
     )
-    real_pr_state = fake.pr_state
-    failures = [RuntimeError("HTTP 502: Bad Gateway")]
-
-    def flaky_pr_state(pr: int) -> str:
-        if failures:
-            raise failures.pop()
-        return real_pr_state(pr)
-
-    mocker.patch.object(fake, "pr_state", side_effect=flaky_pr_state)
+    fake.script("pr_state", RuntimeError("HTTP 502: Bad Gateway"))
 
     assert execute() is True
 
@@ -2401,10 +2295,11 @@ def test_enqueue_is_not_resent_after_a_transient_looking_failure(mocker) -> None
 
 
 def test_merge_async_is_not_resent_after_a_transient_looking_failure(mocker) -> None:  # noqa: ANN001
-    mocker.patch.object(gh.github, "_owner_repo", ("o", "r"))
+    github = gh.GitHub()
+    github._owner_repo = ("o", "r")  # noqa: SLF001
     fake = _fake_subprocess(mocker, stderr="HTTP 502: Bad Gateway")
     with pytest.raises(RuntimeError):
-        gh.github.merge_async(12, merge_queue=True)
+        github.merge_async(12, merge_queue=True)
     assert fake.call_count == 1
 
 
