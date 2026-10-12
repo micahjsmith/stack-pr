@@ -1,5 +1,14 @@
 # Top of tree
 
+* `autoland` plans have a new step, `x <command>`, which runs a command once
+  the PRs before it have landed and stops the land unless it exits 0 — for
+  automating what would otherwise be a manual `c` step, such as provisioning.
+  The command runs without a shell (use `x bash -c '...'` for pipes), from
+  the top of the checkout, with the landed SHA, the landed PRs, the branch,
+  the remote, and the target in `AUTOLAND_*` environment variables.
+  `--resume` runs a failed or interrupted command again, so commands should
+  be idempotent. The VS Code extension (0.3.0) highlights and formats `x`
+  steps.
 * `autoland` now merges each run of consecutive `l` steps (with no `w` or `c`
   step between them) as a GitHub stack, using GitHub's native [stacked
   PRs](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs):

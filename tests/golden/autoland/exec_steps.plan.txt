@@ -1,0 +1,18 @@
+# Autoland plan — edit steps below.
+# l [<pr>]        = land that PR (a number, or its URL); a bare 'l'
+#                   lands the next PR in the stack instead
+# w <workflow>    = wait for a workflow to complete
+# c [<condition>] = pause for manual confirmation; the optional
+#                   condition names what to verify before proceeding
+#                   (e.g. 'c QA sign-off complete')
+# x <command>     = run a command, and stop unless it exits 0; it runs
+#                   without a shell (use 'x bash -c ...' for pipes)
+#
+# Lines starting with # are comments and are ignored.
+# Blank lines are ignored.
+#
+l 101                         # Add the widget model
+x ./scripts/provision.sh --env 'staging east'
+l 102                         # Expose widgets over the API
+x ./scripts/smoke-test.sh
+l 103                         # Show widgets in the dashboard

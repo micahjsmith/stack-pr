@@ -1,0 +1,21 @@
+Autoland status
+
+  Status:     Stopped — not running, can be resumed
+  Branch:     feat
+  Base:       main
+  State file: <TMP>/home/.stack-pr/autoland/feat.json
+  Last saved: <SAVED>
+
+
+Autoland plan · 5 steps · 3 done · 2 remaining
+
+  ✅ 1. Merged    | Land    | #101 - Add the widget model
+  ✅ 2. Succeeded | Execute | ./scripts/provision.sh --env 'staging east'
+  ✅ 3. Merged    | Land    | #102 - Expose widgets over the API
+→ ❌ 4. Failed    | Execute | ./scripts/smoke-test.sh
+        ↳ Command exited with status 3
+  ⬜ 5. Pending   | Land    | #103 - Show widgets in the dashboard
+
+ABORTED: Command `./scripts/smoke-test.sh` exited with status 3
+
+Resume with: stack-pr autoland --resume

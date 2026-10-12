@@ -43,6 +43,7 @@ class StepTone(Enum):
     AWAITING_USER = "awaiting_user"
     IN_QUEUE = "in_queue"
     AWAITING_WORKFLOW = "awaiting_workflow"
+    RUNNING = "running"  # running a command of its own
 
 
 @dataclass(frozen=True)

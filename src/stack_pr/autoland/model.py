@@ -8,6 +8,7 @@ from stack_pr.autoland.pr_state import PRState
 from stack_pr.autoland.steps import (
     AutolandStep,
     ConfirmStep,
+    ExecStep,
     LandStep,
     WorkflowStep,
     step_from_dict,
@@ -16,6 +17,7 @@ from stack_pr.autoland.steps import (
 __all__ = [
     "AutolandStep",
     "ConfirmStep",
+    "ExecStep",
     "LandStep",
     "LandingContext",
     "PRState",

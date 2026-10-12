@@ -73,6 +73,9 @@ class StepContext:
     # Whether this step is the last of the plan's already-landed prefix (see
     # ``plan.landed_prefix_end``), the one whose landed code later steps follow.
     ends_landed_prefix: bool = False
+    # The local branch whose stack is being landed (the run's state file is
+    # this branch's), or "" if unknown.
+    branch: str = ""
 
     def banner(self, title: str, style: str = "bold") -> str:
         """The markup heading this step's output: "Step i/n: <title>"."""

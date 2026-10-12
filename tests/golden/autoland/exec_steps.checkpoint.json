@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "branch": "feat",
+  "base": "main",
+  "plan_file": "<TMP>/plan.autoland-plan",
+  "current_step": 3,
+  "last_landed_sha": "9cc0a8c62f2d99c85284a96fe68191bd3843f14b",
+  "abort_reason": "Command `./scripts/smoke-test.sh` exited with status 3",
+  "stack": [
+    {
+      "pr_url": "https://github.com/o/r/pull/101",
+      "pr_number": 101,
+      "branch": "TestBot/stack/101",
+      "title": "Add the widget model",
+      "review_decision": "APPROVED",
+      "state": "merged",
+      "check_retries": 0,
+      "queue_retries": 0,
+      "error_message": ""
+    },
+    {
+      "pr_url": "https://github.com/o/r/pull/102",
+      "pr_number": 102,
+      "branch": "TestBot/stack/102",
+      "title": "Expose widgets over the API",
+      "review_decision": "APPROVED",
+      "state": "merged",
+      "check_retries": 0,
+      "queue_retries": 0,
+      "error_message": ""
+    },
+    {
+      "pr_url": "https://github.com/o/r/pull/103",
+      "pr_number": 103,
+      "branch": "TestBot/stack/103",
+      "title": "Show widgets in the dashboard",
+      "review_decision": "APPROVED",
+      "state": "pending",
+      "check_retries": 0,
+      "queue_retries": 0,
+      "error_message": ""
+    }
+  ],
+  "plan": [
+    {
+      "type": "land",
+      "entry_index": 0,
+      "pr_number": 101
+    },
+    {
+      "type": "exec",
+      "command": "./scripts/provision.sh --env 'staging east'",
+      "state": "succeeded",
+      "error_message": ""
+    },
+    {
+      "type": "land",
+      "entry_index": 1,
+      "pr_number": 102
+    },
+    {
+      "type": "exec",
+      "command": "./scripts/smoke-test.sh",
+      "state": "failed",
+      "error_message": "Command exited with status 3"
+    },
+    {
+      "type": "land",
+      "entry_index": 2,
+      "pr_number": 103
+    }
+  ]
+}

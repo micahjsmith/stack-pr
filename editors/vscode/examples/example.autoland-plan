@@ -5,6 +5,8 @@
 # c [condition] = pause for manual confirmation; the optional
 #                 condition names what to verify before proceeding
 #                 (e.g. 'c QA sign-off complete')
+# x <command>   = run a command, and stop unless it exits 0; it runs
+#                 without a shell (use 'x bash -c ...' for pipes)
 #
 # Lines starting with # are comments and are ignored.
 # Blank lines are ignored.
@@ -12,6 +14,7 @@
 l 101                         # Add /widgets API endpoint
 w deploy.yaml                 # wait for the deploy of PR #101 to finish
 c QA sign-off complete        # pause until QA has signed off
+x ./scripts/provision.sh staging # stop unless it succeeds
 l 102                         # Wire up the widgets UI
 
 # A bare 'l' lands whatever PR is next in the stack, and a PR can also be

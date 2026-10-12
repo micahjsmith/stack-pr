@@ -16,9 +16,10 @@ The patched seams:
 - the console (``runtime.console``) is the plain-text console, with rich off,
   the Unicode glyphs pinned, and ``input()`` scripted;
 - ``runtime.resilient_sleep`` doesn't sleep, but advances ``FakeWorld``'s clock;
-- subprocesses: ``shell_commands.run_shell_command`` (under ``runtime.run``
-  and the ``gh`` JSON helpers) and ``cli.get_command_output`` are answered by
-  ``FakeWorld``, which plays both GitHub (``gh``) and the local clone (``git``);
+- subprocesses: ``shell_commands.run_shell_command`` (under ``runtime.run``,
+  the ``gh`` JSON helpers, and an ``x`` step's command) and
+  ``cli.get_command_output`` are answered by ``FakeWorld``, which plays GitHub
+  (``gh``), the local clone (``git``), and the scenario's own commands;
 - stack-pr itself: ``cli.get_stack`` returns the scenario's stack,
   ``cli.command_submit`` (the resubmit after a merge) does nothing, and
   ``git.get_current_branch_name`` is pinned;
@@ -33,6 +34,7 @@ import copy
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -52,6 +54,7 @@ from stack_pr.autoland.state import AutolandCheckpointer
 from tests.helpers import PR_URL, common_args, mock_entry
 
 BRANCH = "feat"
+REPO_ROOT = "/work/repo"  # the top of the clone, as git reports it
 OWNER, REPO = "o", "r"
 WORKFLOW_RUN_ID = 9000  # + the PR number: the CI run a PR's checks belong to
 
@@ -122,6 +125,8 @@ class FakeWorld:
     stack_merge: str = "merge"
     stack_merge_lands: list[int] = field(default_factory=list)
     stack_merge_message: str = ""
+    # An ``x`` step's command line -> the status it exits with.
+    commands: dict[str, int] = field(default_factory=dict)
 
     main_head: str = field(default_factory=lambda: sha("main-0"))
     stacks: dict[int, list[int]] = field(default_factory=dict)
@@ -167,6 +172,8 @@ class FakeWorld:
             return ""
         if args == ["rev-parse", "origin/main"]:
             return self.main_head + "\n"
+        if args == ["rev-parse", "--show-toplevel"]:
+            return REPO_ROOT + "\n"
         if args[:3] == ["rev-parse", "--verify", "--quiet"]:
             number = int(args[3].rsplit("/", 1)[-1])
             return commit_sha(number) + "\n"
@@ -200,6 +207,18 @@ class FakeWorld:
             out = self._rest(args[2], path, body)
             return "" if out is None else json.dumps(out)
         raise AssertionError(f"unexpected gh command: {args}")
+
+    def run_command(self, cmd: list[str], cwd: str, env: dict[str, str]) -> int:
+        """Run one of the scenario's commands: show what it was run with, as its
+        output would show on the terminal, and exit with its status."""
+        line = shlex.join(cmd)
+        if line not in self.commands:
+            raise AssertionError(f"unexpected command: {cmd}")
+        print(f"({line} in {cwd})")
+        for name in sorted(env):
+            if name.startswith("AUTOLAND_"):
+                print(f"  {name}={env[name]}")
+        return self.commands[line]
 
     def _checks(self, pr: FakePR) -> list[dict[str, str]]:
         bucket = pr.checks.pop(0) if len(pr.checks) > 1 else pr.checks[0]
@@ -312,6 +331,8 @@ class Scenario:
     stack_merge: str = "merge"
     stack_merge_lands: list[int] = field(default_factory=list)
     stack_merge_message: str = ""
+    # An ``x`` step's command line -> the status it exits with.
+    commands: dict[str, int] = field(default_factory=dict)
     # PRs that landed before this run (and so are no longer in the stack).
     landed: list[int] = field(default_factory=list)
     # Builds the checkpoint of an earlier run, which this run resumes or
@@ -401,9 +422,13 @@ def _install_seams(
 
     mocker.patch.object(runtime, "resilient_sleep", side_effect=sleep)
 
-    # Subprocesses: git and gh go to the world; anything else is a test bug.
+    # Subprocesses: git, gh, and the scenario's commands go to the world;
+    # anything else is a test bug.
     def run_shell_command(cmd: Any, **kwargs: Any) -> subprocess.CompletedProcess:
         args = [str(c) for c in cmd]
+        if args[0] not in ("git", "gh"):
+            status = world.run_command(args, str(kwargs["cwd"]), kwargs["env"])
+            return subprocess.CompletedProcess(args, status)
         try:
             out = world(args, kwargs.get("input"))
         except subprocess.CalledProcessError as e:
@@ -462,6 +487,7 @@ def run_scenario(
         stack_merge=scenario.stack_merge,
         stack_merge_lands=scenario.stack_merge_lands,
         stack_merge_message=scenario.stack_merge_message,
+        commands=dict(scenario.commands),
     )
     for number in scenario.landed:
         world.merge(world.prs[number])

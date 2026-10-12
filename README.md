@@ -575,10 +575,12 @@ Options:
   autoland reaches that step (`Confirm "QA sign-off complete" is complete —
   ready to proceed?`). A bare `c` just prompts `Ready to proceed?`. When
   `autoland.default_workflow` is configured, the pre-filled plan already ends
-  with a `w <default_workflow>` step, which you can edit or delete.
+  with a `w <default_workflow>` step, which you can edit or delete. Command
+  steps (`x <command>` — run a command, and stop unless it succeeds) can go
+  there too; see [Running commands](#running-commands).
 - `--plan-file PATH`: Load the landing plan from a file instead of editing it
   interactively. The file uses the exact same format as the `-i` editor (`l` /
-  `w <workflow>` / `c [condition]` lines, with `#` comments and blank lines
+  `w <workflow>` / `c [condition]` / `x <command>` lines, with `#` comments and blank lines
   ignored — see [Example plan](#example-plan) below), so you can save a plan
   from `-i`, or write one by hand, and reuse it for repeatable/scripted runs.
   Plans conventionally use the `.autoland-plan` suffix.
@@ -605,10 +607,10 @@ Options:
   `state_file`, `state_file_exists`, `lock_file`, `pid`, `last_saved` (ISO
   8601), `abort_reason`, `resume_command`, `plan` (`total` / `done` /
   `remaining` counts and a `steps` list), and `other_runs`. Each step has
-  `number`, `type` (`land` / `workflow` / `confirm`), `outcome` (`done` /
-  `active` / `pending` / `failed`), `status`, `is_next` and `detail`, plus
-  `pr_number` / `pr_url` / `title`, `workflow`, or `condition` depending on
-  its type. If the state file can't be read, stdout stays empty and the error
+  `number`, `type` (`land` / `workflow` / `confirm` / `exec`), `outcome`
+  (`done` / `active` / `pending` / `failed`), `status`, `is_next` and
+  `detail`, plus `pr_number` / `pr_url` / `title`, `workflow`, `condition`, or
+  `command` depending on its type. If the state file can't be read, stdout stays empty and the error
   goes to stderr with a nonzero exit.
 - `--state-file PATH`: Override the checkpoint path (default:
   `~/.stack-pr/autoland/<branch>.json`).
@@ -655,7 +657,7 @@ default_workflow = deploy.yaml
 ##### Merging as a stack
 
 By default, `autoland` lands each run of two or more consecutive `l` steps (no
-`w` or `c` step between them) with GitHub's native [stacked
+`w`, `c`, or `x` step between them) with GitHub's native [stacked
 PRs](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs)
 instead of one PR at a time:
 
@@ -673,8 +675,8 @@ instead of one PR at a time:
    every PR.
 
 So a plan of four bare `l` steps waits on the merge queue once instead of four
-times. A `w` or `c` step ends a run, since it has to see the PRs below it land
-first; `--dry-run` lists the runs a plan would merge as stacks.
+times. A `w`, `c`, or `x` step ends a run, since it has to see the PRs below it
+land first; `--dry-run` lists the runs a plan would merge as stacks.
 
 To keep PRs from merging together, put a `c` step between them in the plan,
 which splits the run there (`autoland` asks you to confirm before continuing).
@@ -707,8 +709,9 @@ installed (`pipx install 'stack-pr[rich]'` or add the `rich` extra); otherwise
 
 With `-i`, `autoland` opens a plan in `$EDITOR`. Each non-comment line is one
 step, run top to bottom: `l <pr>` lands that PR, `w <workflow>` waits for a
-named GitHub Actions workflow to finish with the landed code, and
-`c [condition]` pauses for manual confirmation (the condition is optional). For
+named GitHub Actions workflow to finish with the landed code,
+`c [condition]` pauses for manual confirmation (the condition is optional), and
+`x <command>` runs a command (see [Running commands](#running-commands)). For
 a three-PR stack, a plan that lands the bottom PR, waits for a deploy, gets
 manual sign-off, then lands the rest looks like:
 
@@ -720,6 +723,8 @@ manual sign-off, then lands the rest looks like:
 # c [condition] = pause for manual confirmation; the optional
 #                 condition names what to verify before proceeding
 #                 (e.g. 'c QA sign-off complete')
+# x <command>   = run a command, and stop unless it exits 0; it runs
+#                 without a shell (use 'x bash -c ...' for pipes)
 #
 # Lines starting with # are comments and are ignored.
 # Blank lines are ignored.
@@ -750,12 +755,53 @@ repeatable or scripted landings. Any path works, but `.autoland-plan` is the
 conventional suffix: it is what `-i` writes, and what editors key off to
 highlight the plan syntax (see [Editor support](#editor-support)).
 
+##### Running commands
+
+An `x <command>` step runs a command once the PRs before it have landed, and
+stops the land unless it exits 0 — so a manual step that would otherwise be a
+`c` ("provision the new tables, then confirm") can be automated:
+
+```
+l 101                         # Add the widgets table
+x ./scripts/provision.sh --env staging
+l 102                         # Start writing widgets
+x bash -c 'curl -fsS "$HEALTH_URL" | grep -q ok'
+l 103
+```
+
+- The command is split into words the way a POSIX shell would (quotes and
+  backslashes work), but it runs **without a shell**: no pipes, redirection,
+  globs, or `$VARIABLE` expansion. For those, run a shell yourself, as in
+  `x bash -c '...'`.
+- As with every step, ` #` (a space, then `#`) starts a comment, even inside
+  quotes, so a command can't contain one.
+- It runs from the top of the checkout being landed (the temporary worktree,
+  with `--branch`), with its output going straight to the terminal, and with
+  `autoland`'s own environment plus:
+  - `AUTOLAND_LANDED_SHA`: the commit of the code landed so far — the merge
+    commit of the last PR this run landed, or else the head of the target
+    branch (empty if it can't be found);
+  - `AUTOLAND_LANDED_PRS`: the PRs the plan has landed before this step,
+    space-separated in plan order, including any that landed in an earlier
+    run;
+  - `AUTOLAND_BRANCH`, `AUTOLAND_REMOTE`, `AUTOLAND_TARGET`: the branch whose
+    stack is landing, and the remote and branch it lands into.
+- A nonzero exit status, a command killed by a signal, or a command that can't
+  be started (no such program, not executable) stops the land; `--status`
+  shows why. There is no timeout.
+- `--resume` skips a command that succeeded and **runs a failed or interrupted
+  one again**, so commands should be safe to re-run (idempotent). Ctrl+C
+  while one runs stops it along with `autoland`. As with `w` and `c` steps, an
+  `x` step before an already-landed PR is assumed done, and `--replan` keeps a
+  finished one when the new plan has the same command after the same landed
+  PRs.
+
 ##### Re-using a plan across a partially-landed stack
 
 Because each `l` step names the PR it lands, one plan file stays valid as the
 stack lands piece by piece. A PR that has already merged is no longer part of
-the stack, so `autoland` skips its `l` step — along with any `w` and `c` steps
-that come before it, since those must have run before that PR could merge:
+the stack, so `autoland` skips its `l` step — along with any `w`, `c`, and `x`
+steps that come before it, since those must have run before that PR could merge:
 
 ```
 l 1                           # PR #1, already landed upstream
@@ -796,9 +842,9 @@ need when only the code changed. Either way it:
    the run continues in your terminal.
 2. Rediscovers the stack, since the code may have changed, and parses the new
    plan against it. Landed PRs are skipped as usual.
-3. Carries over each `w` and `c` step the previous run completed, provided the
-   new plan has the same step (same workflow, or same condition text) after the
-   same set of landed PRs. A step means "once these PRs have landed, this
+3. Carries over each `w`, `c`, and `x` step the previous run completed,
+   provided the new plan has the same step (same workflow, condition text, or
+   command) after the same set of landed PRs. A step means "once these PRs have landed, this
    holds", so its result still stands. Adding, removing, or reordering steps
    keeps that credit; editing a step's text, or landing a different set of PRs
    before it, makes it run again.
@@ -812,8 +858,8 @@ autoland, so you can check what a replan would do before committing to it.
 ##### Editor support
 
 [`editors/vscode`](editors/vscode) is a VS Code extension that highlights plan
-files: the `l` / `w` / `c` keywords, PR numbers and URLs, workflow names,
-confirmation conditions, and `#` comments — plus an error scope for steps
+files: the `l` / `w` / `c` / `x` keywords, PR numbers and URLs, workflow
+names, confirmation conditions, commands, and `#` comments — plus an error scope for steps
 `autoland` would reject, so a typo shows up before you run the plan. It also
 formats them: **Format Document** aligns trailing comments at column 30 (or
 past the longest `l`/`w` step in the block, when one runs that far) and tidies

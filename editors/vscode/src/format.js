@@ -14,9 +14,10 @@ const COMMENT_COLUMN = 30;
 // comments move this far past the longest one.
 const COMMENT_GAP = 4;
 
-// 'l', 'w' or 'c', optionally followed by an argument. The argument keeps its
-// own spacing: a condition is free text and a workflow name may contain spaces.
-const STEP = /^([lwc])[ \t]+(.*)$/;
+// 'l', 'w', 'c' or 'x', optionally followed by an argument. The argument keeps
+// its own spacing: a condition is free text, a workflow name may contain
+// spaces, and a command's spacing may sit inside its quotes.
+const STEP = /^([lwcx])[ \t]+(.*)$/;
 // A step with no argument at all: a bare 'l' or 'c'.
 const BARE_STEP = /^[lwc]$/;
 
@@ -58,9 +59,9 @@ function parseLine(raw) {
 /**
  * Comment column for one block.
  *
- * Only 'l' and 'w' steps are measured. A 'c' condition is free text that
- * routinely runs past any sensible column, and letting it set one would drag
- * every comment in the block off to the right.
+ * Only 'l' and 'w' steps are measured. A 'c' condition is free text, and an
+ * 'x' command line, that routinely runs past any sensible column, and letting
+ * either set one would drag every comment in the block off to the right.
  */
 function commentColumn(block) {
   const widths = block

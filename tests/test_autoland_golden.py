@@ -205,6 +205,22 @@ SCENARIOS = [
         ),
         workflows={"deploy.yaml": "success"},
     ),
+    # Commands between the land steps: the first succeeds, and the second
+    # fails, which stops the run before the last PR.
+    Scenario(
+        name="exec_steps",
+        prs=_prs(101, 102, 103),
+        stack=[101, 102, 103],
+        plan=(
+            "l\nx ./scripts/provision.sh --env 'staging east'\nl\n"
+            "x ./scripts/smoke-test.sh   # must pass before #103\nl\n"
+        ),
+        commands={
+            "./scripts/provision.sh --env 'staging east'": 0,
+            "./scripts/smoke-test.sh": 3,
+        },
+        expect_exit=1,
+    ),
     # --replan with an edited plan file: finished checkpoints after the same
     # PRs carry over, a new one runs, and a removed one is reported.
     Scenario(

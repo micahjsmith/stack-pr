@@ -1,4 +1,5 @@
-"""The local clone: fetching, ancestry, landed SHAs, and rebase + resubmit.
+"""The local clone: fetching, ancestry, landed SHAs, rebase + resubmit, and
+where it is.
 
 ``GitRepo`` is the production ``services.Repo``. It runs git in the current
 working directory (autoland chdirs into a temporary worktree when ``--branch``
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stack_pr import cli
@@ -112,3 +114,8 @@ class GitRepo:
             keep_title=True,
             draft_bitmask=None,
         )
+
+    def root(self) -> Path:
+        """The top-level directory of the checkout autoland runs in."""
+        result = runtime.run(["git", "rev-parse", "--show-toplevel"], quiet=True)
+        return Path(result.stdout.strip())
