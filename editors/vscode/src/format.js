@@ -3,11 +3,12 @@
 // Formatter for autoland plan files. Pure string -> string so it can be tested
 // without VS Code; src/extension.js is the thin wrapper that registers it.
 //
-// The rules mirror parse_plan in stack_pr/autoland.py, and none of them change
-// what a plan does: a formatted plan parses into exactly the same steps.
+// The rules mirror parse_plan in stack_pr/autoland/plan.py, and none of them
+// change what a plan does: a formatted plan parses into exactly the same steps.
 
 // Trailing comments start here, so plans line up with each other and not just
-// within one block. Kept in sync with format_plan_for_editor in autoland.py.
+// within one block. Kept in sync with format_plan_for_editor in
+// autoland/plan.py.
 const COMMENT_COLUMN = 30;
 // ...unless a step reaches into that column, in which case the block's
 // comments move this far past the longest one.

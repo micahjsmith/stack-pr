@@ -16,7 +16,7 @@ from tests.helpers import FakeGitHub, FakeShell
 @pytest.fixture
 def autoland_console(mocker) -> Mock:  # noqa: ANN001
     """Silence autoland's console; the mock scripts input and records output."""
-    return mocker.patch("stack_pr.autoland.console")
+    return mocker.patch("stack_pr.autoland.runtime.console")
 
 
 @pytest.fixture

@@ -2,14 +2,11 @@ import json
 import re
 from pathlib import Path
 
-from stack_pr import autoland
-from stack_pr.autoland import (
+from stack_pr.autoland import gh
+from stack_pr.autoland.model import ConfirmStep, LandStep, StackEntry, WorkflowStep
+from stack_pr.autoland.plan import (
     PLAN_COMMENT_COLUMN,
     PLAN_COMMENT_GAP,
-    ConfirmStep,
-    LandStep,
-    StackEntry,
-    WorkflowStep,
     format_plan_for_editor,
     parse_plan,
 )
@@ -24,7 +21,7 @@ def test_example_plan_is_accepted_by_the_parser(mocker) -> None:  # noqa: ANN001
     # to be a plan autoland would actually run. Its PR-URL step is checked
     # against the current repository, which would otherwise ask GitHub.
     mocker.patch.object(
-        autoland.github, "owner_repo", return_value=("micahjsmith", "stack-pr")
+        gh.github, "owner_repo", return_value=("micahjsmith", "stack-pr")
     )
     stack = [
         StackEntry(

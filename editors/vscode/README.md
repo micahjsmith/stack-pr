@@ -19,10 +19,10 @@ plan exercising every step type.
 | `#` comments, whole-line and trailing | `comment.line.number-sign.autoland-plan` |
 | a step the parser would reject | `invalid.illegal.*.autoland-plan` |
 
-The `invalid` scopes mirror `parse_plan` in `stack_pr/autoland.py`, so a plan
-that highlights as an error is a plan `autoland` will refuse to run: an `l` with
-something that is neither a PR number nor a PR URL, a `w` with no workflow, or
-a line that is not a step at all.
+The `invalid` scopes mirror `parse_plan` in `stack_pr/autoland/plan.py`, so a
+plan that highlights as an error is a plan `autoland` will refuse to run: an `l`
+with something that is neither a PR number nor a PR URL, a `w` with no
+workflow, or a line that is not a step at all.
 
 Two details worth knowing, both inherited from the parser:
 
