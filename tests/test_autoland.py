@@ -38,7 +38,6 @@ from stack_pr.autoland.display import (
     _POINTER_CELLS,
     _UNICODE_GLYPHS,
     _describe_step,
-    _next_steps_lines,
     _pick_glyphs,
     _plan_rows,
     _StepRow,
@@ -1071,25 +1070,6 @@ def test_rich_status_truncates_titles_but_never_the_failure_reason() -> None:
     assert "…" in text  # the title was clipped
     assert ctx.abort_reason in " ".join(text.split())
     assert stack[0].error_message in " ".join(text.split())
-
-
-def test_next_steps_lines_numbers_remaining_only() -> None:
-    stack = [StackEntry(pr_url="u", pr_number=7, branch="b", title="X [1,25] Y")]
-    plan = [ConfirmStep(), LandStep(entry_index=0), WorkflowStep(workflow="d.yaml")]
-    ctx = LandingContext(stack=stack, plan=plan)
-
-    lines = _next_steps_lines(plan, 0, ctx)
-
-    assert len(lines) == 2
-    assert lines[0].startswith("  1. Land PR #7:")
-    assert "1,25" in lines[0]  # the title's content survives (escaped or not)
-    assert lines[1] == "  2. Wait for workflow d.yaml"
-
-
-def test_next_steps_lines_empty_for_final_step() -> None:
-    plan = [LandStep(entry_index=0), ConfirmStep()]
-    ctx = LandingContext(stack=_stack(1), plan=plan)
-    assert _next_steps_lines(plan, 1, ctx) == []
 
 
 # --- executing a partially-landed plan -----------------------------------

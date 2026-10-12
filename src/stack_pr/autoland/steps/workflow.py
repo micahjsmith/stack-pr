@@ -11,6 +11,7 @@ from stack_pr.autoland.steps.base import (
     ReplanKey,
     register_step,
 )
+from stack_pr.autoland.steps.execution import StepContext, StepResult
 from stack_pr.autoland.steps.view import StepOutcome, StepTone, StepView
 
 if TYPE_CHECKING:
@@ -83,3 +84,17 @@ class WorkflowStep(AutolandStep):
             detail=(self.error_message,) if self.error_message else (),
             data={"workflow": self.workflow},
         )
+
+    def execute(self, sc: StepContext) -> StepResult:
+        """Wait for a successful run of the workflow that includes the code
+        landed so far."""
+        # "succeeded" before the run reaches it means --replan carried the
+        # result over from the run this one replaced.
+        if self.state in ("skipped", "succeeded"):
+            return StepResult.done()
+        sc.services.ui.print(sc.banner(f"Workflow checkpoint — {self.workflow}"))
+        if not sc.services.waits.wait_for_workflow(
+            self, sc.landed_sha(), opts=sc.opts, common=sc.common, ctx=sc.run
+        ):
+            return StepResult.abort(f"Workflow {self.workflow} failed or timed out")
+        return StepResult.done()

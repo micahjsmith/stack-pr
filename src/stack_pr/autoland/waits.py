@@ -168,9 +168,14 @@ def wait_for_workflow(
     opts: AutolandOptions,
     common: cli.CommonArgs,
     ctx: LandingContext,
+    target_sha: str | None = None,
 ) -> bool:
-    """Wait for a workflow to complete with code at or after the landed SHA."""
-    target_sha = ctx.last_landed_sha
+    """Wait for a workflow to complete with code at or after *target_sha*.
+
+    *target_sha* defaults to the run's last landed SHA.
+    """
+    if target_sha is None:
+        target_sha = ctx.last_landed_sha
     step.state = "waiting"
     runtime.console.print(
         f"\n[bold blue]Waiting for workflow: {step.workflow}[/bold blue]"

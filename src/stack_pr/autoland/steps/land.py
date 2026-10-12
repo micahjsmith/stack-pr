@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from stack_pr.autoland import gh
 from stack_pr.autoland.pr_state import PRState
 from stack_pr.autoland.steps.base import AutolandStep, PlanParser, register_step
+from stack_pr.autoland.steps.execution import StepContext, StepResult
 from stack_pr.autoland.steps.view import StepOutcome, StepTone, StepView
 
 if TYPE_CHECKING:
@@ -143,6 +144,60 @@ class LandStep(AutolandStep):
                 "title": entry.title,
             },
         )
+
+    def execute(self, sc: StepContext) -> StepResult:
+        """Wait for approval and checks, merge through the queue, then rebase
+        and re-submit whatever is left of the stack above."""
+        ui, repo = sc.services.ui, sc.services.repo
+        if self.already_landed:
+            ui.print(f"\n[green]PR #{self.pr_number} already landed, skipping[/green]")
+            # Later steps follow the code of the prefix's last PR; looking up
+            # the others would only cost a fetch each.
+            if sc.ends_landed_prefix:
+                return StepResult.done(
+                    landed_sha=repo.landed_sha(sc.common, self.pr_number)
+                )
+            return StepResult.done()
+
+        entry = sc.run.stack[self.entry_index]
+        sc.run.current_index = self.entry_index
+        if entry.is_merged():
+            ui.print(f"\n[green]PR #{entry.pr_number} already merged, skipping[/green]")
+            return StepResult.done(
+                landed_sha=repo.landed_sha(sc.common, entry.pr_number)
+            )
+
+        ui.print(sc.banner(f"Landing PR #{entry.pr_number} — {entry.title}"))
+        waits, opts, run = sc.services.waits, sc.opts, sc.run
+        # Each wait may find the PR merged by then (e.g. by hand), which ends
+        # the landing early.
+        if not waits.wait_for_approval(entry, opts=opts, ctx=run):
+            return StepResult.abort(f"PR #{entry.pr_number} approval wait was aborted")
+        if not entry.is_merged() and not waits.wait_for_checks(
+            entry, opts=opts, ctx=run
+        ):
+            return StepResult.abort(
+                f"PR #{entry.pr_number} checks failed after retries"
+            )
+        if not entry.is_merged() and not waits.enqueue_and_wait(
+            entry, opts=opts, ctx=run
+        ):
+            return StepResult.abort(f"PR #{entry.pr_number} failed to merge")
+        landed_sha = repo.landed_sha(sc.common, entry.pr_number)
+
+        # Rebase + resubmit whenever commits remain above the one we just
+        # landed — not only when more *land steps* follow. On a partial land,
+        # the PRs we're leaving open still need their bases rebased onto the
+        # newly-landed commit.
+        if self.entry_index < len(sc.run.stack) - 1:
+            try:
+                repo.rebase_and_resubmit(sc.common)
+            except Exception as e:  # noqa: BLE001 - report any resubmit failure
+                return StepResult.abort(
+                    f"Rebase failed after merging #{entry.pr_number}: {e}",
+                    landed_sha=landed_sha,
+                )
+        return StepResult.done(landed_sha=landed_sha)
 
 
 def _current_owner_repo() -> tuple[str, str]:
