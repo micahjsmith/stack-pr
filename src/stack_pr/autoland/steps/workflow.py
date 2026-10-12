@@ -11,9 +11,23 @@ from stack_pr.autoland.steps.base import (
     ReplanKey,
     register_step,
 )
+from stack_pr.autoland.steps.view import StepOutcome, StepTone, StepView
 
 if TYPE_CHECKING:
     from stack_pr.autoland.model import StackEntry
+
+
+# "skipped" is set only by WorkflowStep.assume_completed, i.e. for a workflow
+# that sits inside a plan's already-landed prefix — it must have run before
+# those PRs could merge, so the plan assumes it did rather than claiming it was
+# deliberately skipped.
+_STATE_STATUS = {
+    "pending": (StepOutcome.PENDING, "Pending", StepTone.MUTED),
+    "waiting": (StepOutcome.ACTIVE, "Waiting for workflow", StepTone.AWAITING_WORKFLOW),
+    "succeeded": (StepOutcome.DONE, "Workflow complete", StepTone.SUCCESS),
+    "failed": (StepOutcome.FAILED, "Failed", StepTone.FAILURE),
+    "skipped": (StepOutcome.DONE, "Assumed completed", StepTone.SUCCESS),
+}
 
 
 @register_step
@@ -53,3 +67,19 @@ class WorkflowStep(AutolandStep):
         if isinstance(old, WorkflowStep):
             self.state = old.state
             self.error_message = ""
+
+    def view(
+        self, stack: list[StackEntry], *, is_next: bool, assumed_completed: bool
+    ) -> StepView:
+        outcome, status, tone = _STATE_STATUS.get(
+            self.state, (StepOutcome.PENDING, "Pending", StepTone.MUTED)
+        )
+        return StepView(
+            outcome=outcome,
+            status=status,
+            tone=tone,
+            key=self.workflow,
+            description=f"Wait for workflow {self.workflow}",
+            detail=(self.error_message,) if self.error_message else (),
+            data={"workflow": self.workflow},
+        )

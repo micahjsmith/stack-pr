@@ -14,18 +14,11 @@ from stack_pr import git
 from stack_pr.autoland import runtime
 from stack_pr.autoland.display import (
     _escape_markup,
-    _land_entry,
     _plan_rows,
     _StepRow,
     print_status,
 )
-from stack_pr.autoland.model import (
-    ConfirmStep,
-    LandingContext,
-    LandStep,
-    PlanStep,
-    WorkflowStep,
-)
+from stack_pr.autoland.model import LandingContext, PlanStep
 from stack_pr.autoland.options import AutolandOptions
 from stack_pr.autoland.state import AutolandCheckpointer, AutolandLock, _state_path
 
@@ -207,25 +200,16 @@ def _print_status_text(report: _StatusReport) -> None:
         )
 
 
-def _step_json(step: PlanStep, row: _StepRow, ctx: LandingContext) -> dict:
+def _step_json(step: PlanStep, row: _StepRow) -> dict:
     data: dict[str, Any] = {
         "number": int(row.number.rstrip(".")),
         "type": step.kind,
         "outcome": row.outcome.value,
         "status": row.status,
         "is_next": row.is_next,
+        **row.view.data,
+        "detail": row.detail or None,
     }
-    if isinstance(step, LandStep):
-        entry = _land_entry(ctx, step)
-        data["pr_number"] = entry.pr_number if entry else step.pr_number
-        data["pr_url"] = entry.pr_url if entry else None
-        data["title"] = entry.title if entry else None
-    elif isinstance(step, WorkflowStep):
-        data["workflow"] = step.workflow
-    else:
-        assert isinstance(step, ConfirmStep)  # the only step type left
-        data["condition"] = step.condition
-    data["detail"] = row.detail or None
     return data
 
 
@@ -240,7 +224,7 @@ def _status_json(report: _StatusReport) -> dict:
             "total": len(rows),
             "done": done,
             "remaining": len(rows) - done,
-            "steps": [_step_json(s, r, ctx) for s, r in zip(ctx.plan, rows)],
+            "steps": [_step_json(s, r) for s, r in zip(ctx.plan, rows)],
         }
     return {
         "status": report.status,
