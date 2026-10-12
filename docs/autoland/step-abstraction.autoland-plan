@@ -1,0 +1,21 @@
+# Autoland plan for the autoland step-abstraction stack (branch micah/autoland-steps).
+#
+# Run from the top of the stack once every PR is approved:
+#   stack-pr autoland --plan-file docs/autoland/step-abstraction.autoland-plan
+#
+# Each bare 'l' lands the next PR in the stack, bottom first. The 'c' steps are
+# the manual checks from the PRs' test plans; do them before confirming.
+# Progress is kept in autoland's own state file, not in this plan.
+
+l                             # test(autoland): pin step execution behavior with golden scenarios
+l                             # refactor(autoland): give each plan step type its own class
+l                             # refactor(autoland): have steps describe themselves with a StepView
+l                             # refactor(autoland): execute each step through a StepContext with injected services
+l                             # refactor(autoland): merge land runs as a stack through a plan optimization policy
+c Ctrl+C during a real autoland wait and at a confirm prompt, then --resume, works with the cancellation PR checked out
+l                             # refactor(autoland): handle Ctrl+C once at the run boundary
+l                             # refactor(autoland): inject services everywhere and test with fakes instead of patches
+c An x step works in a real autoland, including Ctrl+C during a long-running command and then --resume
+c VS Code extension 0.3.0 packaged and installed locally (npx --yes @vscode/vsce package); x lines highlight and format
+l                             # feat(autoland): add an x step that runs a command and stops the land if it fails
+l                             # docs(autoland): add the autoland plan for landing the step-abstraction stack
