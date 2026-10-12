@@ -145,9 +145,10 @@ _PR_STATE_OUTCOMES = {
     PRState.FAILED: _Outcome.FAILED,
 }
 
-# "skipped" is set only by _mark_skipped, i.e. for a workflow that sits inside a
-# plan's already-landed prefix — it must have run before those PRs could merge,
-# so the plan assumes it did rather than claiming it was deliberately skipped.
+# "skipped" is set only by WorkflowStep.assume_completed, i.e. for a workflow
+# that sits inside a plan's already-landed prefix — it must have run before
+# those PRs could merge, so the plan assumes it did rather than claiming it was
+# deliberately skipped.
 _WORKFLOW_STEP_STATUS = {
     "pending": (_Outcome.PENDING, "Pending", "dim"),
     "waiting": (_Outcome.ACTIVE, "Waiting for workflow", "blue"),
@@ -222,6 +223,7 @@ def _step_status(
     # ConfirmStep. A confirmation inside the landed prefix was never actually
     # given in this run — it is inferred from the fact that later PRs merged —
     # so say so rather than claiming the user confirmed it.
+    assert isinstance(step, ConfirmStep)  # the only step type left
     if step.confirmed:
         if is_assumed_completed(plan, index):
             return _Outcome.DONE, "Assumed completed", "green"
@@ -240,6 +242,7 @@ def _step_target(step: PlanStep, ctx: LandingContext) -> tuple[str, str]:
         return f"#{entry.pr_number}", entry.title or "(untitled)"
     if isinstance(step, WorkflowStep):
         return step.workflow, ""
+    assert isinstance(step, ConfirmStep)  # the only step type left
     return step.condition or "(no condition)", ""
 
 
@@ -422,6 +425,7 @@ def _describe_step(step: PlanStep, ctx: LandingContext) -> str:
     if isinstance(step, WorkflowStep):
         return f"Wait for workflow {key}"
     # ConfirmStep
+    assert isinstance(step, ConfirmStep)  # the only step type left
     if step.condition:
         return f"Manual confirmation: {key}"
     return "Manual confirmation"

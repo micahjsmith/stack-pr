@@ -170,6 +170,13 @@ multiline-quotes = "double"
     "PLR0915",
     "TRY300",
 ]
+# Step types implement one interface: an override may ignore arguments that
+# others need, and the base class's optional hooks default to doing nothing.
+"src/stack_pr/autoland/steps/*.py" = [
+    "ARG002",
+    "ARG003",
+    "B027",
+]
 # Allow certain useful patterns in tests
 "tests/**/*.py" = [
     "S101", # allow assert statements within if statements
