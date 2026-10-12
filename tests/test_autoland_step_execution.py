@@ -105,21 +105,15 @@ class FakeWaits:
     calls: list[str] = field(default_factory=list)
     workflow_targets: list[str] = field(default_factory=list)
 
-    def wait_for_approval(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-    ) -> bool:
+    def wait_for_approval(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
         self.calls.append("approval")
         return self.approval(entry)
 
-    def wait_for_checks(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-    ) -> bool:
+    def wait_for_checks(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
         self.calls.append("checks")
         return self.checks(entry)
 
-    def enqueue_and_wait(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-    ) -> bool:
+    def enqueue_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
         self.calls.append("queue")
         return self.queue(entry)
 
@@ -294,7 +288,7 @@ def test_already_landed_step_reports_its_sha_only_at_the_end_of_the_prefix(
 @pytest.mark.parametrize(
     ("waits", "reason"),
     [
-        (FakeWaits(approval=fails), "PR #101 approval wait was aborted"),
+        (FakeWaits(approval=fails), "PR #101 was closed while waiting for approval"),
         (FakeWaits(checks=fails), "PR #101 checks failed after retries"),
         (FakeWaits(queue=fails), "PR #101 failed to merge"),
     ],
@@ -454,7 +448,6 @@ def test_engine_records_the_reason_a_step_aborted(tmp_path: Path) -> None:
         ctx, common_args(), OPTS, checkpointer, services=services(FakeUI())
     )
 
-    assert ctx.aborted
     assert ctx.abort_reason.startswith("Confirm step received EOF")
     _, saved = AutolandCheckpointer.load(checkpointer.path)
     assert saved.abort_reason == ctx.abort_reason

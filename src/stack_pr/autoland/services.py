@@ -43,21 +43,18 @@ class UI(Protocol):
 class Waits(Protocol):
     """The long-running waits of landing a PR or checking a workflow.
 
-    Each returns whether it succeeded; False also when the run was aborted.
-    The waits record their progress on the entry or step they are given.
+    Each returns whether it succeeded, and records its progress on the entry
+    or step it is given. Ctrl+C while one is waiting raises KeyboardInterrupt
+    out of it, which the run handles at its boundary (``commands._land``).
     """
 
     def wait_for_approval(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
+        self, entry: StackEntry, *, opts: AutolandOptions
     ) -> bool: ...
 
-    def wait_for_checks(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-    ) -> bool: ...
+    def wait_for_checks(self, entry: StackEntry, *, opts: AutolandOptions) -> bool: ...
 
-    def enqueue_and_wait(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-    ) -> bool: ...
+    def enqueue_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool: ...
 
     def wait_for_workflow(
         self,
@@ -136,20 +133,14 @@ class _ConsoleUI:
 
 
 class _ModuleWaits:
-    def wait_for_approval(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-    ) -> bool:
-        return waits.wait_for_approval(entry, opts=opts, ctx=ctx)
+    def wait_for_approval(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
+        return waits.wait_for_approval(entry, opts=opts)
 
-    def wait_for_checks(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-    ) -> bool:
-        return waits.wait_for_checks(entry, opts=opts, ctx=ctx)
+    def wait_for_checks(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
+        return waits.wait_for_checks(entry, opts=opts)
 
-    def enqueue_and_wait(
-        self, entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-    ) -> bool:
-        return waits.enqueue_and_wait(entry, opts=opts, ctx=ctx)
+    def enqueue_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
+        return waits.enqueue_and_wait(entry, opts=opts)
 
     def wait_for_workflow(
         self,

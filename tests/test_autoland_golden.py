@@ -64,7 +64,6 @@ def _resume_checkpoint(
         stack=stack,
         plan=plan,
         current_step=4,
-        aborted=True,
         abort_reason="Workflow deploy.yaml failed or timed out",
         last_landed_sha=sha("merge-102"),
     )
@@ -104,7 +103,6 @@ def _replan_checkpoint(
         plan=plan,
         current_step=7,
         current_index=2,
-        aborted=True,
         abort_reason="User interrupted (Ctrl+C)",
         last_landed_sha=sha("merge-102"),
     )

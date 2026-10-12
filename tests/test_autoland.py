@@ -354,11 +354,14 @@ def test_wait_for_workflow_falls_back_to_github_compare(mocker) -> None:  # noqa
     contains.assert_called_once_with("mergesha", "queuesha")
 
 
+class _StopPollingError(Exception):
+    """Raised from a wait's sleep to end the wait after one poll."""
+
+
 def test_wait_for_workflow_keeps_waiting_when_ancestry_unknown(mocker) -> None:  # noqa: ANN001
     # Neither git nor GitHub can answer: warn and keep waiting rather than
     # treating "unknown" as "the deploy included our code".
     def _runs(*_a, **_k) -> list:  # noqa: ANN002, ANN003
-        ctx.aborted = True  # stop after one poll
         return [{"headSha": "mystery", "status": "completed", "conclusion": "success"}]
 
     mocker.patch.object(gh.github, "workflow_runs", side_effect=_runs)
@@ -366,12 +369,12 @@ def test_wait_for_workflow_keeps_waiting_when_ancestry_unknown(mocker) -> None: 
     mocker.patch.object(runtime, "run", return_value=unknown)  # the fetch
     mocker.patch("stack_pr.git.run_shell_command", return_value=unknown)
     mocker.patch.object(gh.github, "contains", return_value=None)
-    mocker.patch.object(runtime, "resilient_sleep", return_value=0.0)
+    mocker.patch.object(runtime, "resilient_sleep", side_effect=_StopPollingError)
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert not waits.wait_for_workflow(
-        step, opts=_opts(), common=common_args(), ctx=ctx
-    )
+    # Still waiting when the first poll's sleep comes around.
+    with pytest.raises(_StopPollingError):
+        waits.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
     assert step.state != "succeeded"
 
 
@@ -427,24 +430,21 @@ def test_ancestry_caches_verdicts(mocker) -> None:  # noqa: ANN001
 
 def test_wait_for_workflow_ignores_failed_and_incomplete(mocker) -> None:  # noqa: ANN001
     # A failed run and a still-running run on our SHA must not satisfy the
-    # checkpoint; abort so the poll loop terminates for the test.
-    calls = {"n": 0}
-
-    def _runs(*_a, **_k) -> list:  # noqa: ANN002, ANN003
-        calls["n"] += 1
-        ctx.aborted = True  # stop after one poll
-        return [
+    # checkpoint: the wait is still going when its first poll's sleep comes.
+    mocker.patch.object(
+        gh.github,
+        "workflow_runs",
+        return_value=[
             {"headSha": "mergesha", "status": "completed", "conclusion": "failure"},
             {"headSha": "mergesha", "status": "in_progress", "conclusion": None},
-        ]
-
-    mocker.patch.object(gh.github, "workflow_runs", side_effect=_runs)
-    mocker.patch.object(runtime, "resilient_sleep", return_value=0.0)
+        ],
+    )
+    mocker.patch.object(runtime, "resilient_sleep", side_effect=_StopPollingError)
     step = WorkflowStep(workflow="deploy.yaml")
     ctx = LandingContext(last_landed_sha="mergesha")
-    assert not waits.wait_for_workflow(
-        step, opts=_opts(), common=common_args(), ctx=ctx
-    )
+    with pytest.raises(_StopPollingError):
+        waits.wait_for_workflow(step, opts=_opts(), common=common_args(), ctx=ctx)
+    assert step.state != "succeeded"
 
 
 # --- plan parsing --------------------------------------------------------
@@ -940,7 +940,6 @@ def test_render_status_plain_headline_counts_completed_steps() -> None:
 
 def test_render_status_plain_reports_an_abort() -> None:
     ctx = _partly_landed_ctx()
-    ctx.aborted = True
     ctx.abort_reason = "PR #103 checks failed"
     assert "ABORTED: PR #103 checks failed" in display.render_status_plain(ctx)
 
@@ -997,7 +996,7 @@ def test_unicode_glyphs_are_used_on_a_utf8_stdout(mocker) -> None:  # noqa: ANN0
 
 def test_plain_status_is_encodable_on_a_legacy_code_page(mocker) -> None:  # noqa: ANN001
     # Printing an un-encodable glyph raises UnicodeEncodeError, and print_status
-    # runs from the SIGINT handler and from _finish — so even a successful run
+    # runs when a run is interrupted and from _finish — so even a successful run
     # would die on the way out, stranding its checkpoint and worktree.
     mocker.patch.object(display, "GLYPHS", _ASCII_GLYPHS)
     display.render_status_plain(_partly_landed_ctx()).encode("cp1252")
@@ -1055,7 +1054,6 @@ def test_rich_status_truncates_titles_but_never_the_failure_reason() -> None:
         "integration-tests, docs, and a few more besides"
     )
     ctx = LandingContext(stack=stack, plan=[LandStep(entry_index=0, pr_number=101)])
-    ctx.aborted = True
     ctx.abort_reason = (
         "Rebase failed after merging #101: Command failed: git rebase --onto "
         "origin/main abc123 def456 -- error: could not apply def456"
@@ -1189,14 +1187,12 @@ def test_state_round_trip_keeps_plan_file(tmp_path) -> None:  # noqa: ANN001
 
 def test_state_round_trip_keeps_abort_reason(tmp_path) -> None:  # noqa: ANN001
     ctx = LandingContext(stack=_stack(1), plan=generate_default_plan(_stack(1)))
-    ctx.aborted = True
     ctx.abort_reason = "CI failed on #0"
 
     sf = tmp_path / "state.json"
     AutolandCheckpointer(path=sf, branch="feat", base="main").save(ctx)
 
     _, loaded = AutolandCheckpointer.load(sf)
-    assert loaded.aborted is True
     assert loaded.abort_reason == "CI failed on #0"
 
 
@@ -1731,7 +1727,6 @@ def _patch_replan_io(mocker, answer: str):  # noqa: ANN001, ANN202
         "stack_pr.autoland.gh.github.pr_state",
         side_effect=lambda pr: "MERGED" if pr in (101, 102) else "OPEN",
     )
-    mocker.patch("stack_pr.autoland.commands.signal.signal")
     return mocker.patch("stack_pr.autoland.engine.execute_plan", return_value=True)
 
 
@@ -1797,7 +1792,6 @@ def _patch_resume_io(mocker, *, success: bool = True):  # noqa: ANN001, ANN202
     mocker.patch("stack_pr.git.get_current_branch_name", return_value="feat")
     mocker.patch("stack_pr.cli.deduce_base", side_effect=lambda c: c)
     mocker.patch("stack_pr.autoland.discovery.enrich_stack")
-    mocker.patch("stack_pr.autoland.commands.signal.signal")
     return mocker.patch("stack_pr.autoland.engine.execute_plan", return_value=success)
 
 
@@ -1816,7 +1810,6 @@ def test_resume_continues_from_the_checkpointed_step(tmp_path, mocker) -> None: 
     assert ctx.current_step == 1
     assert [e.pr_number for e in ctx.stack] == [0, 1]
     # The earlier failure no longer stands: this run gets a fresh attempt.
-    assert not ctx.aborted
     assert ctx.abort_reason == ""
     # A run that finishes leaves no checkpoint behind.
     assert not sf.exists()
@@ -1962,15 +1955,17 @@ def test_wait_for_approval_by_review_decision(
 ) -> None:
     mocker.patch.object(gh.github, "pr_state", return_value="OPEN")
     mocker.patch.object(gh.github, "review_decision", return_value=decision)
-    ctx = LandingContext()
-    # Abort the wait on its first poll, so a PR that isn't approved returns.
     mocker.patch(
-        "stack_pr.autoland.runtime.resilient_sleep",
-        side_effect=lambda _s: setattr(ctx, "aborted", True),
+        "stack_pr.autoland.runtime.resilient_sleep", side_effect=_StopPollingError
     )
 
     entry = _pinned_stack([101])[0]
-    assert waits.wait_for_approval(entry, opts=_opts(), ctx=ctx) is approved
+    if approved:
+        assert waits.wait_for_approval(entry, opts=_opts())
+    else:
+        # A PR that isn't approved is still waited on at the first poll's sleep.
+        with pytest.raises(_StopPollingError):
+            waits.wait_for_approval(entry, opts=_opts())
 
 
 # --- merging a run of land steps as a GitHub stack -------------------------
@@ -2287,7 +2282,7 @@ def test_wait_for_checks_polls_again_after_a_failed_state_read(
     _gh_replies(mocker, view=[bad_reply, _OPEN], checks=[_PASSING])
     entry = _pinned_stack([101])[0]
 
-    assert waits.wait_for_checks(entry, opts=_opts(), ctx=LandingContext())
+    assert waits.wait_for_checks(entry, opts=_opts())
 
 
 @pytest.mark.usefixtures("autoland_console")
@@ -2295,7 +2290,7 @@ def test_wait_for_checks_polls_again_after_a_malformed_checks_read(mocker) -> No
     _gh_replies(mocker, view=[_OPEN], checks=['{"oops": 1}', "[1]", _PASSING])
     entry = _pinned_stack([101])[0]
 
-    assert waits.wait_for_checks(entry, opts=_opts(), ctx=LandingContext())
+    assert waits.wait_for_checks(entry, opts=_opts())
 
 
 @pytest.mark.usefixtures("autoland_console")
@@ -2312,7 +2307,7 @@ def test_wait_for_approval_polls_again_after_a_failed_state_read(mocker) -> None
     )
     entry = _pinned_stack([101])[0]
 
-    assert waits.wait_for_approval(entry, opts=_opts(), ctx=LandingContext())
+    assert waits.wait_for_approval(entry, opts=_opts())
     assert entry.state == PRState.MERGED
 
 
@@ -2322,7 +2317,7 @@ def test_wait_for_mergeable_polls_again_after_a_malformed_read(mocker) -> None: 
     _gh_replies(mocker, view=["", RuntimeError("timed out"), clean])
     entry = _pinned_stack([101])[0]
 
-    result = waits.wait_for_mergeable(entry, opts=_opts(), ctx=LandingContext())
+    result = waits.wait_for_mergeable(entry, opts=_opts())
 
     assert result.ready
 
@@ -2345,7 +2340,7 @@ def test_merge_queue_wait_polls_again_after_a_failed_read(mocker) -> None:  # no
     )
     entry = _pinned_stack([101])[0]
 
-    assert waits.enqueue_and_wait(entry, opts=_opts(), ctx=LandingContext())
+    assert waits.enqueue_and_wait(entry, opts=_opts())
     assert entry.state == PRState.MERGED
 
 
@@ -2355,7 +2350,7 @@ def test_merge_queue_wait_still_times_out_while_reads_fail(mocker) -> None:  # n
     entry = _pinned_stack([101])[0]
 
     opts = _opts(poll_interval=60, merge_timeout=300)
-    assert not waits.enqueue_and_wait(entry, opts=opts, ctx=LandingContext())
+    assert not waits.enqueue_and_wait(entry, opts=opts)
     assert entry.error_message == "Timed out waiting for merge queue"
 
 

@@ -83,7 +83,6 @@ def _await_native_stack_merge(
     uuid: str | None,
     *,
     opts: AutolandOptions,
-    ctx: LandingContext,
 ) -> str:
     """Wait for a requested stack merge to finish.
 
@@ -94,8 +93,6 @@ def _await_native_stack_merge(
     top = entries[-1]
     awake_elapsed = 0.0
     while True:
-        if ctx.aborted:
-            return "aborted"
         if awake_elapsed > opts.merge_timeout:
             return "timed out waiting for the stack to merge"
 
@@ -184,14 +181,16 @@ def land_as_native_stack(
     failure = ""
     abort_reason = ""
     for entry in entries:
-        if not waits.wait_for_approval(entry, opts=opts, ctx=ctx):
-            abort_reason = f"PR #{entry.pr_number} approval wait was aborted"
+        if not waits.wait_for_approval(entry, opts=opts):
+            abort_reason = (
+                f"PR #{entry.pr_number} was closed while waiting for approval"
+            )
             break
     else:
         for entry in entries:
             if entry.state == PRState.MERGED:
                 continue
-            if not waits.wait_for_checks(entry, opts=opts, ctx=ctx):
+            if not waits.wait_for_checks(entry, opts=opts):
                 abort_reason = f"PR #{entry.pr_number} checks failed after retries"
                 break
 
@@ -202,7 +201,7 @@ def land_as_native_stack(
     if (
         not abort_reason
         and bottom is not None
-        and not waits.wait_for_mergeable(bottom, opts=opts, ctx=ctx).ready
+        and not waits.wait_for_mergeable(bottom, opts=opts).ready
     ):
         abort_reason = f"PR #{bottom.pr_number} failed to merge"
 
@@ -246,9 +245,7 @@ def land_as_native_stack(
                 if "HTTP 409" not in str(e):
                     failure = f"stack merge request failed: {e}"
         if not failure:
-            failure = _await_native_stack_merge(entries, uuid, opts=opts, ctx=ctx)
-            if failure == "aborted":
-                abort_reason = "Stack merge was aborted"
+            failure = _await_native_stack_merge(entries, uuid, opts=opts)
 
     landed = all(e.state == PRState.MERGED for e in entries)
     if not landed and dissolvable:

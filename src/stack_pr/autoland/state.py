@@ -72,7 +72,6 @@ class AutolandCheckpointer:
             stack=[_deserialize_entry(e) for e in data["stack"]],
             plan=[_deserialize_step(s) for s in data["plan"]],
             current_step=data.get("current_step", 0),
-            aborted=bool(data.get("abort_reason")),
             abort_reason=data.get("abort_reason", ""),
             last_landed_sha=data.get("last_landed_sha", ""),
         )
