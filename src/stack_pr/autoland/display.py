@@ -74,8 +74,8 @@ def _pick_glyphs() -> _Glyphs:
     """The richest glyph set stdout can actually encode.
 
     Writing an un-encodable character raises UnicodeEncodeError, which would
-    take down the whole landing run — print_status is called from the SIGINT
-    handler and from _finish, so even a successful autoland would die on the
+    take down the whole landing run — print_status is called when a run is
+    interrupted and from _finish, so even a successful autoland would die on the
     way out, leaving its checkpoint and worktree behind.
     """
     encoding = getattr(sys.stdout, "encoding", None) or "ascii"
@@ -265,7 +265,7 @@ def render_status_rich(ctx: LandingContext) -> Group:  # pragma: no cover
             # expand=False so the pad doesn't fill the rest of the line with
             # blanks; a wrapped detail still stays under the indent.
             parts.append(Padding(detail, (0, 0, 0, indent), expand=False))
-    if ctx.aborted:
+    if ctx.abort_reason:
         parts += [Text(), Text(f"ABORTED: {ctx.abort_reason}", style="red bold")]
     return Group(*parts)
 
@@ -281,7 +281,7 @@ def render_status_plain(ctx: LandingContext) -> str:
         lines.append("".join(text for text, _ in _header_segments(row, widths)))
         if row.detail:
             lines.append(f"{indent}{GLYPHS.detail} {row.detail}")
-    if ctx.aborted:
+    if ctx.abort_reason:
         lines += ["", f"ABORTED: {ctx.abort_reason}"]
     return "\n".join(lines)
 

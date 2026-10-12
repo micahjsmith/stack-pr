@@ -168,20 +168,18 @@ class LandStep(AutolandStep):
             )
 
         ui.print(sc.banner(f"Landing PR #{entry.pr_number} — {entry.title}"))
-        waits, opts, run = sc.services.waits, sc.opts, sc.run
+        waits, opts = sc.services.waits, sc.opts
         # Each wait may find the PR merged by then (e.g. by hand), which ends
         # the landing early.
-        if not waits.wait_for_approval(entry, opts=opts, ctx=run):
-            return StepResult.abort(f"PR #{entry.pr_number} approval wait was aborted")
-        if not entry.is_merged() and not waits.wait_for_checks(
-            entry, opts=opts, ctx=run
-        ):
+        if not waits.wait_for_approval(entry, opts=opts):
+            return StepResult.abort(
+                f"PR #{entry.pr_number} was closed while waiting for approval"
+            )
+        if not entry.is_merged() and not waits.wait_for_checks(entry, opts=opts):
             return StepResult.abort(
                 f"PR #{entry.pr_number} checks failed after retries"
             )
-        if not entry.is_merged() and not waits.enqueue_and_wait(
-            entry, opts=opts, ctx=run
-        ):
+        if not entry.is_merged() and not waits.enqueue_and_wait(entry, opts=opts):
             return StepResult.abort(f"PR #{entry.pr_number} failed to merge")
         landed_sha = repo.landed_sha(sc.common, entry.pr_number)
 

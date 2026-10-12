@@ -22,7 +22,7 @@ The patched seams:
 - stack-pr itself: ``cli.get_stack`` returns the scenario's stack,
   ``cli.command_submit`` (the resubmit after a merge) does nothing, and
   ``git.get_current_branch_name`` is pinned;
-- the SIGINT handler isn't installed, and any real subprocess fails the test.
+- any real subprocess fails the test.
 """
 
 from __future__ import annotations
@@ -435,7 +435,6 @@ def _install_seams(
     mocker.patch.object(cli, "get_stack", return_value=raw_stack)
     mocker.patch.object(cli, "command_submit")
     mocker.patch("stack_pr.git.get_current_branch_name", return_value=BRANCH)
-    mocker.patch.object(commands.signal, "signal")
 
 
 def _autoland(argv: list[str], config: configparser.ConfigParser) -> int | None:

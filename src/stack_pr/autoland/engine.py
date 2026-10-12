@@ -117,6 +117,5 @@ def _abort(
     ctx: LandingContext, checkpointer: AutolandCheckpointer, reason: str
 ) -> bool:
     ctx.abort_reason = reason
-    ctx.aborted = True
     checkpointer.save(ctx)
     return False

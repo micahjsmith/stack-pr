@@ -185,8 +185,6 @@ def wait_for_workflow(
     ancestry = _Ancestry(common)
     awake_elapsed = 0.0
     while True:
-        if ctx.aborted:
-            return False
         if awake_elapsed > opts.workflow_timeout:
             step.state = "failed"
             step.error_message = (
@@ -274,10 +272,9 @@ def _refresh_review(entry: StackEntry) -> bool:
     return entry.is_approved
 
 
-def wait_for_approval(
-    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-) -> bool:
-    """Wait until the PR has required approvals. Returns False if aborted."""
+def wait_for_approval(entry: StackEntry, *, opts: AutolandOptions) -> bool:
+    """Wait until the PR has required approvals (or merged). Returns False if
+    the PR was closed."""
     # An unknown state (a failed read) is settled by the checks wait after this.
     pr_state = _poll_read(gh.github.pr_state, entry.pr_number)
     if pr_state == "MERGED":
@@ -300,8 +297,6 @@ def wait_for_approval(
     )
 
     while True:
-        if ctx.aborted:
-            return False
         runtime.console.print(
             f"[dim]PR #{entry.pr_number}: waiting for approval — "
             f"polling in {opts.poll_interval}s[/dim]"
@@ -333,16 +328,11 @@ def wait_for_approval(
             )
 
 
-def wait_for_checks(
-    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-) -> bool:
+def wait_for_checks(entry: StackEntry, *, opts: AutolandOptions) -> bool:
     """Wait for required checks to pass. Returns True on success."""
     entry.state = PRState.WAITING_FOR_CHECKS
 
     while True:
-        if ctx.aborted:
-            return False
-
         pr_state = _poll_read(gh.github.pr_state, entry.pr_number)
         if pr_state == "MERGED":
             entry.state = PRState.MERGED
@@ -398,14 +388,9 @@ class MergeableResult:
     error: str = ""
 
 
-def wait_for_mergeable(
-    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-) -> MergeableResult:
+def wait_for_mergeable(entry: StackEntry, *, opts: AutolandOptions) -> MergeableResult:
     """Wait until GitHub reports the PR as mergeable."""
     while True:
-        if ctx.aborted:
-            return MergeableResult(error="aborted")
-
         data = _poll_read(gh.github.merge_state, entry.pr_number)
         if data is None:
             runtime.resilient_sleep(opts.poll_interval)
@@ -460,25 +445,18 @@ def wait_for_mergeable(
         runtime.resilient_sleep(opts.poll_interval)
 
 
-def _rewait_after_retry(
-    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-) -> bool:
+def _rewait_after_retry(entry: StackEntry, *, opts: AutolandOptions) -> bool:
     """Re-verify approval and checks before a queue retry."""
-    if not wait_for_approval(entry, opts=opts, ctx=ctx):
+    if not wait_for_approval(entry, opts=opts):
         return False
     entry.check_retries = 0
-    return wait_for_checks(entry, opts=opts, ctx=ctx)
+    return wait_for_checks(entry, opts=opts)
 
 
-def enqueue_and_wait(
-    entry: StackEntry, *, opts: AutolandOptions, ctx: LandingContext
-) -> bool:
+def enqueue_and_wait(entry: StackEntry, *, opts: AutolandOptions) -> bool:
     """Add the PR to the merge queue and wait for it to merge."""
     while True:
-        if ctx.aborted:
-            return False
-
-        mergeable_result = wait_for_mergeable(entry, opts=opts, ctx=ctx)
+        mergeable_result = wait_for_mergeable(entry, opts=opts)
         if not mergeable_result.ready:
             return False
         if mergeable_result.already_merged:
@@ -507,15 +485,13 @@ def enqueue_and_wait(
                 )
                 return False
             entry.queue_retries += 1
-            if not _rewait_after_retry(entry, opts=opts, ctx=ctx):
+            if not _rewait_after_retry(entry, opts=opts):
                 return False
             continue
 
         entry.error_message = "Waiting in merge queue..."
         awake_elapsed = 0.0
         while True:
-            if ctx.abort_requested():
-                return False
             if awake_elapsed > opts.merge_timeout:
                 entry.state = PRState.FAILED
                 entry.error_message = "Timed out waiting for merge queue"
@@ -549,7 +525,7 @@ def enqueue_and_wait(
                     )
                     return False
                 entry.queue_retries += 1
-                if not _rewait_after_retry(entry, opts=opts, ctx=ctx):
+                if not _rewait_after_retry(entry, opts=opts):
                     return False
                 break  # re-enqueue in outer loop
 

@@ -237,20 +237,38 @@ def _dispose_worktree(
         worktree.announce_preserved()
 
 
-def _install_signal_handler(
+def _land(
     ctx: LandingContext,
+    common: cli.CommonArgs,
+    opts: AutolandOptions,
     checkpointer: AutolandCheckpointer,
     worktree: Worktree | None,
-    opts: AutolandOptions,
 ) -> None:
-    # Installed as landing starts: from here on, the handler and _finish
-    # decide whether the worktree is kept.
+    """Execute the plan, report how the run ended, and exit if it didn't succeed.
+
+    This is the one place a run is interrupted. Ctrl+C anywhere in the plan's
+    execution (a wait's sleep, a gh call, a confirm prompt) raises
+    KeyboardInterrupt out of it, and so does a takeover by another autoland of
+    the branch, which sends this process SIGINT (``_stop_running_autoland``).
+    The run is then checkpointed at the step it was in, so ``--resume`` picks
+    that step up again, and exits 130; the callers' ``finally`` blocks release
+    the lock on the way out.
+    """
+    # From here on, the run's outcome decides whether the worktree is kept.
     if worktree is not None:
         worktree.landing = True
-
-    def handler(_sig: int, _frame: object) -> None:
-        ctx.aborted = True
+    # A process started with SIGINT ignored (a background job of a
+    # non-interactive shell) keeps ignoring it; restore Python's default so
+    # that a takeover's SIGINT still stops this run.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        success = engine.execute_plan(
+            ctx, common, opts, checkpointer, services=Services.production()
+        )
+    except KeyboardInterrupt:
         ctx.abort_reason = "User interrupted (Ctrl+C)"
+        # Atomic (a temporary file, then a rename): a second Ctrl+C here leaves
+        # the checkpoint taken as the step started, which resumes the same way.
         checkpointer.save(ctx)
         runtime.console.print(
             "\n[red bold]Interrupted! State saved. Resume with --resume.[/red bold]\n"
@@ -258,8 +276,7 @@ def _install_signal_handler(
         print_status(ctx)
         _dispose_worktree(worktree, opts, succeeded=False)
         sys.exit(130)
-
-    signal.signal(signal.SIGINT, handler)
+    _finish(ctx, checkpointer, worktree, opts, success=success)
 
 
 def _finish(
@@ -422,16 +439,7 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             return
 
         runtime.console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
-        _install_signal_handler(ctx, checkpointer, worktree, opts)
-        _finish(
-            ctx,
-            checkpointer,
-            worktree,
-            opts,
-            success=engine.execute_plan(
-                ctx, common, opts, checkpointer, services=Services.production()
-            ),
-        )
+        _land(ctx, common, opts, checkpointer, worktree)
     finally:
         if worktree is not None:
             worktree.remove_unless_landing()
@@ -483,7 +491,6 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
 
         runtime.console.print("[dim]Refreshing PR state from GitHub...[/dim]")
         discovery.enrich_stack(ctx.stack)
-        ctx.aborted = False
         ctx.abort_reason = ""
 
         if ctx.current_step >= len(ctx.plan):
@@ -497,16 +504,7 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         print_status(ctx)
         engine.print_execution_preview(ctx, opts)
         runtime.console.print(f"[dim]State file: {sf_path}[/dim]\n")
-        _install_signal_handler(ctx, checkpointer, worktree, opts)
-        _finish(
-            ctx,
-            checkpointer,
-            worktree,
-            opts,
-            success=engine.execute_plan(
-                ctx, common, opts, checkpointer, services=Services.production()
-            ),
-        )
+        _land(ctx, common, opts, checkpointer, worktree)
     finally:
         if worktree is not None:
             worktree.remove_unless_landing()
@@ -721,16 +719,7 @@ def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> 
             path=state_path, branch=branch, base=common.target, plan_file=plan_file
         )
         runtime.console.print(f"[dim]State file: {checkpointer.path}[/dim]\n")
-        _install_signal_handler(ctx, checkpointer, worktree, opts)
-        _finish(
-            ctx,
-            checkpointer,
-            worktree,
-            opts,
-            success=engine.execute_plan(
-                ctx, common, opts, checkpointer, services=Services.production()
-            ),
-        )
+        _land(ctx, common, opts, checkpointer, worktree)
     finally:
         if worktree is not None:
             worktree.remove_unless_landing()

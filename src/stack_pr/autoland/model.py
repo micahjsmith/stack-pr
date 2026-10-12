@@ -68,14 +68,9 @@ class LandingContext:
     plan: list[PlanStep] = field(default_factory=list)
     current_step: int = 0
     current_index: int = 0  # index into stack for the active land step
-    aborted: bool = False
+    # Why the run stopped, or "" while it hasn't. Saved with the checkpoint.
     abort_reason: str = ""
     last_landed_sha: str = ""  # merge commit of the last landed PR
-
-    def abort_requested(self) -> bool:
-        # A method, not a plain attribute read, so that mypy does not carry
-        # narrowing of `aborted` across calls (or the SIGINT handler) that set it.
-        return self.aborted
 
 
 def _deserialize_entry(data: dict) -> StackEntry:

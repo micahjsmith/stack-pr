@@ -282,11 +282,15 @@ def test_a_stack_merge_that_falls_through_lands_the_rest_one_at_a_time(
 def test_a_stack_merge_abort_stops_before_the_step(mocker) -> None:  # noqa: ANN001
     run = LandingContext(stack=stack(101, 102), plan=land(0, 1))
     _stack_merge(
-        mocker, [NativeStackMergeResult(abort_reason="Stack merge was aborted")]
+        mocker,
+        [NativeStackMergeResult(abort_reason="Rebase failed after merging #102: boom")],
     )
     recorder = _Recorder(run)
 
-    assert _unit(run).execute(recorder.context()) == "Stack merge was aborted"
+    assert (
+        _unit(run).execute(recorder.context())
+        == "Rebase failed after merging #102: boom"
+    )
     assert recorder.events == [("enter", 0)]
 
 
