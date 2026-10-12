@@ -1,4 +1,8 @@
-"""Merging a run of consecutive land steps as one GitHub stack."""
+"""Merging a run of consecutive land steps as one GitHub stack.
+
+This is GitHub's side of a stack merge. Which steps one covers is decided by
+the ``optimize.stack_merge`` policy.
+"""
 
 from __future__ import annotations
 
@@ -7,55 +11,13 @@ from dataclasses import dataclass
 
 from stack_pr import cli
 from stack_pr.autoland import gh, runtime, waits
-from stack_pr.autoland.model import LandingContext, LandStep, PRState, StackEntry
+from stack_pr.autoland.model import LandingContext, PRState, StackEntry
 from stack_pr.autoland.options import AutolandOptions
 from stack_pr.autoland.waits import _poll_read
 
 # ---------------------------------------------------------------------------
 # Merging a run of land steps as one GitHub stack
 # ---------------------------------------------------------------------------
-
-
-def native_stack_run(ctx: LandingContext, start: int) -> list[StackEntry]:
-    """The PRs a stack merge starting at plan step *start* would land.
-
-    That is the run of consecutive ``l`` steps from *start* whose PRs are still
-    open. A ``w`` or ``c`` step ends the run: it has to see the PRs above it
-    land separately from the ones below it. A run of fewer than two PRs gains
-    nothing from a stack merge, so it comes back empty.
-    """
-    entries: list[StackEntry] = []
-    for step in ctx.plan[start:]:
-        if not isinstance(step, LandStep) or step.already_landed:
-            break
-        entry = ctx.stack[step.entry_index]
-        if entry.state == PRState.MERGED:
-            break
-        entries.append(entry)
-    return entries if len(entries) > 1 else []
-
-
-def native_stack_runs(ctx: LandingContext) -> list[tuple[int, list[StackEntry]]]:
-    """Every ``(first step, PRs)`` run the rest of the plan would stack-merge."""
-    runs = []
-    index = ctx.current_step
-    while index < len(ctx.plan):
-        entries = native_stack_run(ctx, index)
-        if entries:
-            runs.append((index, entries))
-        index += max(len(entries), 1)
-    return runs
-
-
-def print_native_stack_runs(ctx: LandingContext, opts: AutolandOptions) -> None:
-    if not opts.merge_as_stack:
-        return
-    for first, entries in native_stack_runs(ctx):
-        prs = ", ".join(f"#{e.pr_number}" for e in entries)
-        runtime.console.print(
-            f"[dim]Steps {first + 1}-{first + len(entries)} ({prs}) will merge "
-            "together as a GitHub stack.[/dim]"
-        )
 
 
 def _open_native_stack_prs(native_stack: dict) -> list[int]:

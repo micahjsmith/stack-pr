@@ -1,9 +1,12 @@
-"""Executing a landing plan step by step.
+"""Executing a landing plan.
 
-The engine owns the run: it walks the plan from ``ctx.current_step``,
-checkpoints before each step, hands each step a ``StepContext``, records the
-run-level facts a step reports in its ``StepResult``, and stops on an abort.
-What a step does is up to the step (``AutolandStep.execute``).
+The engine owns the run. It optimizes the rest of the plan into execution
+units (``optimize.optimize_plan``), then executes them in order. Through the
+unit's ``UnitContext``, each step the unit runs is made the current step and
+checkpointed before it starts, is handed a ``StepContext``, and has the
+run-level facts it reports in its ``StepResult`` recorded. The run stops on
+the first abort. What a step does is up to the step (``AutolandStep.execute``),
+and what a unit does across its steps is up to the policy that built it.
 """
 
 from __future__ import annotations
@@ -11,14 +14,15 @@ from __future__ import annotations
 import functools
 
 from stack_pr import cli
+from stack_pr.autoland import runtime
 from stack_pr.autoland.display import _describe_step
 from stack_pr.autoland.model import LandingContext
-from stack_pr.autoland.native_stack import land_as_native_stack, native_stack_run
+from stack_pr.autoland.optimize import PolicyRegistry, UnitContext, optimize_plan
 from stack_pr.autoland.options import AutolandOptions
 from stack_pr.autoland.plan import landed_prefix_end
 from stack_pr.autoland.services import Services
 from stack_pr.autoland.state import AutolandCheckpointer
-from stack_pr.autoland.steps import StepContext
+from stack_pr.autoland.steps import StepContext, StepResult
 
 
 def execute_plan(
@@ -28,12 +32,15 @@ def execute_plan(
     checkpointer: AutolandCheckpointer,
     *,
     services: Services | None = None,
+    policies: PolicyRegistry | None = None,
 ) -> bool:
-    """Execute the landing plan from ctx.current_step. Returns True on success."""
+    """Execute the landing plan from ctx.current_step. Returns True on success.
+
+    *policies* defaults to every registered optimization policy.
+    """
     if services is None:
         services = Services.production()
     prefix_end = landed_prefix_end(ctx.plan)
-    native_stack = _NativeStackMerge(ctx, common, opts, checkpointer)
 
     def upcoming(index: int) -> list[str]:
         return [_describe_step(s, ctx) for s in ctx.plan[index + 1 :]]
@@ -43,36 +50,61 @@ def execute_plan(
             _record_landed_sha(ctx, services.repo.landed_sha(common))
         return ctx.last_landed_sha
 
-    for step_idx in range(ctx.current_step, len(ctx.plan)):
-        step = ctx.plan[step_idx]
-        ctx.current_step = step_idx
+    def checkpoint() -> None:
         checkpointer.save(ctx)
 
-        abort_reason = native_stack.before_step(step_idx)
-        if abort_reason:
-            return _abort(ctx, checkpointer, abort_reason)
+    def enter(index: int) -> None:
+        ctx.current_step = index
+        checkpoint()
 
-        result = step.execute(
+    def execute_step(index: int) -> StepResult:
+        result = ctx.plan[index].execute(
             StepContext(
-                index=step_idx,
+                index=index,
                 total=len(ctx.plan),
                 run=ctx,
                 opts=opts,
                 common=common,
                 services=services,
-                checkpoint=lambda: checkpointer.save(ctx),
-                upcoming=functools.partial(upcoming, step_idx),
+                checkpoint=checkpoint,
+                upcoming=functools.partial(upcoming, index),
                 landed_sha=landed_sha,
-                ends_landed_prefix=step_idx == prefix_end,
+                ends_landed_prefix=index == prefix_end,
             )
         )
         _record_landed_sha(ctx, result.landed_sha)
-        if result.aborted:
-            return _abort(ctx, checkpointer, result.abort_reason)
+        return result
+
+    uc = UnitContext(
+        run=ctx,
+        opts=opts,
+        common=common,
+        services=services,
+        enter=enter,
+        execute_step=execute_step,
+        checkpoint=checkpoint,
+    )
+    for unit in optimize_plan(ctx, opts, policies):
+        abort_reason = unit.execute(uc)
+        if abort_reason:
+            return _abort(ctx, checkpointer, abort_reason)
 
     ctx.current_step = len(ctx.plan)
     checkpointer.save(ctx)
     return True
+
+
+def print_execution_preview(
+    ctx: LandingContext,
+    opts: AutolandOptions,
+    *,
+    policies: PolicyRegistry | None = None,
+) -> None:
+    """Announce what the optimized plan does beyond executing its steps one by
+    one. Derived from the same units ``execute_plan`` executes."""
+    for unit in optimize_plan(ctx, opts, policies):
+        for line in unit.preview():
+            runtime.console.print(line)
 
 
 def _record_landed_sha(ctx: LandingContext, sha: str) -> None:
@@ -88,50 +120,3 @@ def _abort(
     ctx.aborted = True
     checkpointer.save(ctx)
     return False
-
-
-class _NativeStackMerge:
-    """TEMPORARY: merge a run of consecutive land steps as one GitHub stack.
-
-    With ``--merge-as-stack``, before each step the engine asks whether a run
-    of two or more open land steps starts there, and if so lands the run with
-    one stack merge (``native_stack.land_as_native_stack``). The land steps
-    then find their PRs merged and only skip. A run whose stack merge fell
-    through is landed one step at a time instead, without retrying the merge.
-
-    This lives in the engine, not in ``LandStep``, because steps are
-    independent of each other. It is a stopgap: a plan-optimization pass that
-    groups land steps into one execution unit replaces it.
-    """
-
-    def __init__(
-        self,
-        ctx: LandingContext,
-        common: cli.CommonArgs,
-        opts: AutolandOptions,
-        checkpointer: AutolandCheckpointer,
-    ) -> None:
-        self._ctx = ctx
-        self._common = common
-        self._opts = opts
-        self._checkpointer = checkpointer
-        # The last step of a run whose stack merge fell through.
-        self._unstacked_through = -1
-
-    def before_step(self, step_idx: int) -> str:
-        """Stack-merge the run starting at *step_idx*, if any. Returns the
-        reason the plan must stop, or ""."""
-        if not self._opts.merge_as_stack or step_idx <= self._unstacked_through:
-            return ""
-        run_entries = native_stack_run(self._ctx, step_idx)
-        if not run_entries:
-            return ""
-        result = land_as_native_stack(
-            run_entries, ctx=self._ctx, common=self._common, opts=self._opts
-        )
-        if result.abort_reason:
-            return result.abort_reason
-        if not result.landed:
-            self._unstacked_through = step_idx + len(run_entries) - 1
-        self._checkpointer.save(self._ctx)
-        return ""

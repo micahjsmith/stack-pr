@@ -15,7 +15,6 @@ from stack_pr import cli, git
 from stack_pr.autoland import discovery, engine, runtime
 from stack_pr.autoland.display import _describe_step, _escape_markup, print_status
 from stack_pr.autoland.model import LandingContext, LandStep, PlanStep, StackEntry
-from stack_pr.autoland.native_stack import print_native_stack_runs
 from stack_pr.autoland.options import AutolandOptions
 from stack_pr.autoland.plan import (
     PLAN_SUFFIX,
@@ -417,7 +416,7 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
         )
 
         print_status(ctx)
-        print_native_stack_runs(ctx, opts)
+        engine.print_execution_preview(ctx, opts)
         if opts.dry_run:
             runtime.console.print("\n[yellow]Dry run — exiting.[/yellow]")
             return
@@ -496,7 +495,7 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             return
 
         print_status(ctx)
-        print_native_stack_runs(ctx, opts)
+        engine.print_execution_preview(ctx, opts)
         runtime.console.print(f"[dim]State file: {sf_path}[/dim]\n")
         _install_signal_handler(ctx, checkpointer, worktree, opts)
         _finish(
@@ -681,7 +680,7 @@ def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> 
         ctx = LandingContext(stack=stack, plan=plan)
 
         print_status(ctx)
-        print_native_stack_runs(ctx, opts)
+        engine.print_execution_preview(ctx, opts)
         if lost:
             runtime.console.print(
                 "\n[yellow]Done in the previous run, but not carried over (changed, "

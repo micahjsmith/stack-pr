@@ -19,7 +19,6 @@ from stack_pr.autoland import (
     display,
     engine,
     gh,
-    native_stack,
     options,
     runtime,
     waits,
@@ -1986,29 +1985,6 @@ def test_merge_as_stack_defaults_on_and_flag_overrides_config() -> None:
     assert AutolandOptions.from_config_and_args(cfg, _args()).merge_as_stack is False
     flagged = AutolandOptions.from_config_and_args(cfg, _args(merge_as_stack=True))
     assert flagged.merge_as_stack is True
-
-
-def test_native_stack_merge_runs_are_split_by_checkpoints() -> None:
-    stack = _pinned_stack([101, 102, 103, 104, 105])
-    plan = parse_plan("l\nl\nw deploy.yaml\nl\nc QA\nl\nl\n", stack)
-    ctx = LandingContext(stack=stack, plan=plan)
-
-    runs = native_stack.native_stack_runs(ctx)
-
-    # A lone 'l' between two checkpoints has nothing to merge alongside.
-    assert [(first, [e.pr_number for e in es]) for first, es in runs] == [
-        (0, [101, 102]),
-        (5, [104, 105]),
-    ]
-
-
-def test_native_stack_merge_run_starts_above_merged_prs() -> None:
-    stack = _pinned_stack([101, 102, 103])
-    ctx = LandingContext(stack=stack, plan=parse_plan("l\nl\nl\n", stack))
-    stack[0].state = PRState.MERGED
-
-    assert native_stack.native_stack_run(ctx, 0) == []
-    assert [e.pr_number for e in native_stack.native_stack_run(ctx, 1)] == [102, 103]
 
 
 class _FakeNativeStackGitHub:
