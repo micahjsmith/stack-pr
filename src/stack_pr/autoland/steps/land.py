@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from stack_pr.autoland import gh
+from stack_pr.autoland.pr_state import PRState
 from stack_pr.autoland.steps.base import AutolandStep, PlanParser, register_step
+from stack_pr.autoland.steps.view import StepOutcome, StepTone, StepView
 
 if TYPE_CHECKING:
     from stack_pr.autoland.model import StackEntry
@@ -17,6 +19,28 @@ if TYPE_CHECKING:
 # the '#123' spelling is deliberately unsupported: '#' starts a comment, so
 # 'l #123' is indistinguishable from a bare 'l' with a comment after it.
 RE_PR_URL = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$")
+
+_PR_STATE_STATUS = {
+    PRState.PENDING: (StepOutcome.PENDING, "Pending", StepTone.MUTED),
+    PRState.WAITING_FOR_APPROVAL: (
+        StepOutcome.ACTIVE,
+        "Waiting for approval",
+        StepTone.AWAITING_REVIEW,
+    ),
+    PRState.WAITING_FOR_CHECKS: (
+        StepOutcome.ACTIVE,
+        "Waiting for checks",
+        StepTone.AWAITING_CHECKS,
+    ),
+    PRState.IN_MERGE_QUEUE: (StepOutcome.ACTIVE, "In merge queue", StepTone.IN_QUEUE),
+    PRState.WAITING_FOR_WORKFLOW: (
+        StepOutcome.ACTIVE,
+        "Waiting for workflow",
+        StepTone.AWAITING_WORKFLOW,
+    ),
+    PRState.MERGED: (StepOutcome.DONE, "Merged", StepTone.SUCCESS),
+    PRState.FAILED: (StepOutcome.FAILED, "Failed", StepTone.FAILURE),
+}
 
 
 @register_step
@@ -75,6 +99,50 @@ class LandStep(AutolandStep):
         if self.pr_number is not None:
             return self.pr_number
         return None if self.already_landed else stack[self.entry_index].pr_number
+
+    def view(
+        self, stack: list[StackEntry], *, is_next: bool, assumed_completed: bool
+    ) -> StepView:
+        if self.already_landed:
+            # The PR is no longer in the stack, so there is no entry to read a
+            # title or progress from; the pinned number is all there is.
+            key = f"#{self.pr_number}"
+            return StepView(
+                outcome=StepOutcome.DONE,
+                status="Landed",
+                tone=StepTone.SUCCESS,
+                key=key,
+                description=f"Land PR {key} (already landed)",
+                data={"pr_number": self.pr_number, "pr_url": None, "title": None},
+            )
+        entry = stack[self.entry_index]
+        outcome, status, tone = _PR_STATE_STATUS.get(
+            entry.state, (StepOutcome.PENDING, str(entry.state), StepTone.PLAIN)
+        )
+        detail = []
+        if entry.error_message:
+            detail.append(entry.error_message)
+        # Retry counts only matter once something has been retried.
+        if entry.check_retries or entry.queue_retries:
+            detail.append(
+                f"retries CI {entry.check_retries} / MQ {entry.queue_retries}"
+            )
+        key = f"#{entry.pr_number}"
+        title = entry.title or "(untitled)"
+        return StepView(
+            outcome=outcome,
+            status=status,
+            tone=tone,
+            key=key,
+            note=title,
+            description=f"Land PR {key}: {title}",
+            detail=tuple(detail),
+            data={
+                "pr_number": entry.pr_number,
+                "pr_url": entry.pr_url,
+                "title": entry.title,
+            },
+        )
 
 
 def _current_owner_repo() -> tuple[str, str]:

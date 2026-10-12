@@ -4,64 +4,27 @@ from __future__ import annotations
 
 import sys
 from dataclasses import astuple, dataclass
-from enum import Enum
 from typing import Any
 
 from stack_pr.autoland import runtime
-from stack_pr.autoland.model import (
-    ConfirmStep,
-    LandingContext,
-    LandStep,
-    PlanStep,
-    PRState,
-    StackEntry,
-    WorkflowStep,
-)
+from stack_pr.autoland.model import LandingContext, PlanStep
 from stack_pr.autoland.plan import (
     generate_default_plan,
     is_assumed_completed,
     landed_prefix_end,
 )
 from stack_pr.autoland.runtime import Group, Padding, Text
+from stack_pr.autoland.steps import StepOutcome, StepTone, StepView
 
 # ---------------------------------------------------------------------------
 # Status display
 # ---------------------------------------------------------------------------
-
-STATE_LABELS = {
-    PRState.PENDING: "Pending",
-    PRState.WAITING_FOR_APPROVAL: "Waiting for approval",
-    PRState.WAITING_FOR_CHECKS: "Waiting for checks",
-    PRState.IN_MERGE_QUEUE: "In merge queue",
-    PRState.WAITING_FOR_WORKFLOW: "Waiting for workflow",
-    PRState.MERGED: "Merged",
-    PRState.FAILED: "Failed",
-}
-
-STATE_STYLES = {
-    PRState.PENDING: "dim",
-    PRState.WAITING_FOR_APPROVAL: "magenta",
-    PRState.WAITING_FOR_CHECKS: "yellow",
-    PRState.IN_MERGE_QUEUE: "cyan",
-    PRState.WAITING_FOR_WORKFLOW: "blue",
-    PRState.MERGED: "green",
-    PRState.FAILED: "red bold",
-}
 
 _REVIEW_DECISION_DISPLAY = {
     "APPROVED": ("Approved", "green"),
     "REVIEW_REQUIRED": ("Review required", "magenta"),
     "CHANGES_REQUESTED": ("Changes requested", "red"),
 }
-
-
-class _Outcome(Enum):
-    """The broad state a step is in, independent of how it is drawn."""
-
-    DONE = "done"
-    ACTIVE = "active"
-    PENDING = "pending"
-    FAILED = "failed"
 
 
 # Every plan line starts with an icon, so a plan scans as a column of glyphs
@@ -126,7 +89,7 @@ def _pick_glyphs() -> _Glyphs:
 GLYPHS = _pick_glyphs()
 
 
-def _icon(outcome: _Outcome) -> str:
+def _icon(outcome: StepOutcome) -> str:
     """The current glyph set's icon for *outcome*.
 
     Looked up per render rather than baked into the tables below, so a test can
@@ -135,55 +98,57 @@ def _icon(outcome: _Outcome) -> str:
     return str(getattr(GLYPHS, outcome.value))
 
 
-_PR_STATE_OUTCOMES = {
-    PRState.PENDING: _Outcome.PENDING,
-    PRState.WAITING_FOR_APPROVAL: _Outcome.ACTIVE,
-    PRState.WAITING_FOR_CHECKS: _Outcome.ACTIVE,
-    PRState.IN_MERGE_QUEUE: _Outcome.ACTIVE,
-    PRState.WAITING_FOR_WORKFLOW: _Outcome.ACTIVE,
-    PRState.MERGED: _Outcome.DONE,
-    PRState.FAILED: _Outcome.FAILED,
+# The color each kind of status is drawn in.
+_TONE_STYLES = {
+    StepTone.PLAIN: "",
+    StepTone.MUTED: "dim",
+    StepTone.SUCCESS: "green",
+    StepTone.FAILURE: "red bold",
+    StepTone.AWAITING_REVIEW: "magenta",
+    StepTone.AWAITING_CHECKS: "yellow",
+    StepTone.AWAITING_USER: "yellow",
+    StepTone.IN_QUEUE: "cyan",
+    StepTone.AWAITING_WORKFLOW: "blue",
 }
-
-# "skipped" is set only by WorkflowStep.assume_completed, i.e. for a workflow
-# that sits inside a plan's already-landed prefix — it must have run before
-# those PRs could merge, so the plan assumes it did rather than claiming it was
-# deliberately skipped.
-_WORKFLOW_STEP_STATUS = {
-    "pending": (_Outcome.PENDING, "Pending", "dim"),
-    "waiting": (_Outcome.ACTIVE, "Waiting for workflow", "blue"),
-    "succeeded": (_Outcome.DONE, "Workflow complete", "green"),
-    "failed": (_Outcome.FAILED, "Failed", "red bold"),
-    "skipped": (_Outcome.DONE, "Assumed completed", "green"),
-}
-
-_STEP_KINDS = {LandStep: "Land", WorkflowStep: "Workflow", ConfirmStep: "Confirm"}
-
-
-def _land_entry(ctx: LandingContext, step: LandStep) -> StackEntry | None:
-    """The stack entry a land step targets, or None if its PR already landed."""
-    if step.already_landed:
-        return None
-    return ctx.stack[step.entry_index]
 
 
 @dataclass(frozen=True)
 class _StepRow:
-    """One plan step, flattened into the fields the display lays out."""
+    """One plan step: its view, plus where it sits in the plan."""
 
     is_next: bool  # the first step with work left to do
-    outcome: _Outcome
     number: str  # "1.", "2." ...
-    status: str
-    status_style: str
     kind: str  # Land / Workflow / Confirm
-    key: str  # "#103", "deploy.yaml", the confirm condition
-    note: str  # PR title, or "" when there is nothing to add
-    detail: str  # second line: error message, retry counts, ...
+    view: StepView
+
+    @property
+    def outcome(self) -> StepOutcome:
+        return self.view.outcome
+
+    @property
+    def status(self) -> str:
+        return self.view.status
+
+    @property
+    def status_style(self) -> str:
+        return _TONE_STYLES[self.view.tone]
+
+    @property
+    def key(self) -> str:
+        return self.view.key
+
+    @property
+    def note(self) -> str:
+        return self.view.note
+
+    @property
+    def detail(self) -> str:
+        """The second line: error message, retry counts, ... ("" for none)."""
+        return GLYPHS.sep.join(self.view.detail)
 
     @property
     def done(self) -> bool:
-        return self.outcome is _Outcome.DONE
+        return self.outcome is StepOutcome.DONE
 
 
 def _pointer_index(ctx: LandingContext, plan: list[PlanStep]) -> int:
@@ -198,94 +163,22 @@ def _pointer_index(ctx: LandingContext, plan: list[PlanStep]) -> int:
     return max(ctx.current_step, landed_prefix_end(plan) + 1)
 
 
-def _step_status(
-    step: PlanStep,
-    ctx: LandingContext,
-    *,
-    index: int,
-    plan: list[PlanStep],
-    pointer: int,
-) -> tuple[_Outcome, str, str]:
-    """The (outcome, label, style) a step shows in the status column."""
-    if isinstance(step, LandStep):
-        if step.already_landed:
-            return _Outcome.DONE, "Landed", "green"
-        entry = ctx.stack[step.entry_index]
-        return (
-            _PR_STATE_OUTCOMES.get(entry.state, _Outcome.PENDING),
-            STATE_LABELS.get(entry.state, str(entry.state)),
-            STATE_STYLES.get(entry.state, ""),
-        )
-    if isinstance(step, WorkflowStep):
-        return _WORKFLOW_STEP_STATUS.get(
-            step.state, (_Outcome.PENDING, "Pending", "dim")
-        )
-    # ConfirmStep. A confirmation inside the landed prefix was never actually
-    # given in this run — it is inferred from the fact that later PRs merged —
-    # so say so rather than claiming the user confirmed it.
-    assert isinstance(step, ConfirmStep)  # the only step type left
-    if step.confirmed:
-        if is_assumed_completed(plan, index):
-            return _Outcome.DONE, "Assumed completed", "green"
-        return _Outcome.DONE, "Confirmed", "green"
-    if index == pointer:
-        return _Outcome.ACTIVE, "Awaiting confirmation", "yellow"
-    return _Outcome.PENDING, "Pending", "dim"
-
-
-def _step_target(step: PlanStep, ctx: LandingContext) -> tuple[str, str]:
-    """The step's subject as a (key, note) pair — e.g. ("#103", "Fix the thing")."""
-    if isinstance(step, LandStep):
-        entry = _land_entry(ctx, step)
-        if entry is None:
-            return f"#{step.pr_number}", ""
-        return f"#{entry.pr_number}", entry.title or "(untitled)"
-    if isinstance(step, WorkflowStep):
-        return step.workflow, ""
-    assert isinstance(step, ConfirmStep)  # the only step type left
-    return step.condition or "(no condition)", ""
-
-
-def _step_detail(step: PlanStep, ctx: LandingContext) -> str:
-    """The step's second line, or "" when the header says everything."""
-    parts: list[str] = []
-    if isinstance(step, LandStep):
-        entry = _land_entry(ctx, step)
-        if entry is None:
-            return ""
-        if entry.error_message:
-            parts.append(entry.error_message)
-        # Retry counts only matter once something has been retried.
-        if entry.check_retries or entry.queue_retries:
-            parts.append(f"retries CI {entry.check_retries} / MQ {entry.queue_retries}")
-    elif isinstance(step, WorkflowStep) and step.error_message:
-        parts.append(step.error_message)
-    return GLYPHS.sep.join(parts)
-
-
 def _plan_rows(ctx: LandingContext) -> list[_StepRow]:
     plan = ctx.plan or generate_default_plan(ctx.stack)
     pointer = _pointer_index(ctx, plan)
-    rows = []
-    for index, step in enumerate(plan):
-        outcome, status, style = _step_status(
-            step, ctx, index=index, plan=plan, pointer=pointer
-        )
-        key, note = _step_target(step, ctx)
-        rows.append(
-            _StepRow(
+    return [
+        _StepRow(
+            is_next=index == pointer,
+            number=f"{index + 1}.",
+            kind=step.label,
+            view=step.view(
+                ctx.stack,
                 is_next=index == pointer,
-                outcome=outcome,
-                number=f"{index + 1}.",
-                status=status,
-                status_style=style,
-                kind=_STEP_KINDS[type(step)],
-                key=key,
-                note=note,
-                detail=_step_detail(step, ctx),
-            )
+                assumed_completed=is_assumed_completed(plan, index),
+            ),
         )
-    return rows
+        for index, step in enumerate(plan)
+    ]
 
 
 def _plan_headline(rows: list[_StepRow]) -> str:
@@ -413,22 +306,11 @@ def _escape_markup(text: str) -> str:
 def _describe_step(step: PlanStep, ctx: LandingContext) -> str:
     """A one-line, human-readable description of a plan step.
 
-    Prose for the confirm prompt's "Next steps" list, built from the same
-    (key, note) the status panel shows, so the two cannot name a step
+    Prose for the confirm prompt's "Next steps" list. It comes from the same
+    ``StepView`` the status panel shows, so the two cannot name a step
     differently.
     """
-    key, note = _step_target(step, ctx)
-    if isinstance(step, LandStep):
-        if step.already_landed:
-            return f"Land PR {key} (already landed)"
-        return f"Land PR {key}: {note}"
-    if isinstance(step, WorkflowStep):
-        return f"Wait for workflow {key}"
-    # ConfirmStep
-    assert isinstance(step, ConfirmStep)  # the only step type left
-    if step.condition:
-        return f"Manual confirmation: {key}"
-    return "Manual confirmation"
+    return step.view(ctx.stack, is_next=False, assumed_completed=False).description
 
 
 def _next_steps_lines(

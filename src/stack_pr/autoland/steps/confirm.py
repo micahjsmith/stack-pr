@@ -11,6 +11,7 @@ from stack_pr.autoland.steps.base import (
     ReplanKey,
     register_step,
 )
+from stack_pr.autoland.steps.view import StepOutcome, StepTone, StepView
 
 if TYPE_CHECKING:
     from stack_pr.autoland.model import StackEntry
@@ -56,3 +57,33 @@ class ConfirmStep(AutolandStep):
 
     def credit_from(self, old: AutolandStep) -> None:
         self.confirmed = True
+
+    def view(
+        self, stack: list[StackEntry], *, is_next: bool, assumed_completed: bool
+    ) -> StepView:
+        if self.confirmed:
+            # A confirmation inside the landed prefix was never actually given
+            # in this run — it is inferred from the fact that later PRs merged
+            # — so say so rather than claiming the user confirmed it.
+            status = "Assumed completed" if assumed_completed else "Confirmed"
+            outcome, tone = StepOutcome.DONE, StepTone.SUCCESS
+        elif is_next:
+            outcome, status, tone = (
+                StepOutcome.ACTIVE,
+                "Awaiting confirmation",
+                StepTone.AWAITING_USER,
+            )
+        else:
+            outcome, status, tone = StepOutcome.PENDING, "Pending", StepTone.MUTED
+        return StepView(
+            outcome=outcome,
+            status=status,
+            tone=tone,
+            key=self.condition or "(no condition)",
+            description=(
+                f"Manual confirmation: {self.condition}"
+                if self.condition
+                else "Manual confirmation"
+            ),
+            data={"condition": self.condition},
+        )

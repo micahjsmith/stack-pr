@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 
+from stack_pr.autoland.pr_state import PRState
 from stack_pr.autoland.steps import (
     AutolandStep,
     ConfirmStep,
@@ -27,16 +27,6 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
-
-
-class PRState(str, Enum):
-    PENDING = "pending"
-    WAITING_FOR_APPROVAL = "waiting_for_approval"
-    WAITING_FOR_CHECKS = "waiting_for_checks"
-    IN_MERGE_QUEUE = "in_merge_queue"
-    WAITING_FOR_WORKFLOW = "waiting_for_workflow"
-    MERGED = "merged"
-    FAILED = "failed"
 
 
 @dataclass

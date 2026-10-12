@@ -1,14 +1,17 @@
-"""The plan step registry and the per-step-type plan syntax and persistence."""
+"""The plan step registry, and each step type's plan syntax, persistence, and
+view."""
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from stack_pr.autoland.model import LandingContext, StackEntry
+from stack_pr.autoland.model import LandingContext, PRState, StackEntry
 from stack_pr.autoland.plan import format_plan_for_editor, parse_plan
 from stack_pr.autoland.state import AutolandCheckpointer
 from stack_pr.autoland.steps import (
@@ -17,7 +20,10 @@ from stack_pr.autoland.steps import (
     ConfirmStep,
     LandStep,
     PlanParser,
+    StepOutcome,
     StepRegistry,
+    StepTone,
+    StepView,
     WorkflowStep,
 )
 
@@ -37,6 +43,19 @@ SAMPLES: dict[type[AutolandStep], AutolandStep] = {
 
 def test_every_registered_step_type_has_a_sample() -> None:
     assert set(REGISTRY.types()) == set(SAMPLES)
+
+
+@pytest.mark.parametrize("step_type", REGISTRY.types(), ids=lambda t: t.__name__)
+def test_every_registered_step_type_has_a_view(
+    step_type: type[AutolandStep],
+) -> None:
+    # A step type with no view of its own would leave view() abstract.
+    assert not inspect.isabstract(step_type)
+    view = SAMPLES[step_type].view(STACK, is_next=False, assumed_completed=False)
+    assert isinstance(view, StepView)
+    assert view.status
+    assert view.key
+    assert view.description
 
 
 @pytest.mark.parametrize(
@@ -75,6 +94,17 @@ class _Dummy(AutolandStep):
 
     def plan_line(self, stack: list[StackEntry]) -> tuple[str, str]:
         return "d", ""
+
+    def view(
+        self, stack: list[StackEntry], *, is_next: bool, assumed_completed: bool
+    ) -> StepView:
+        return StepView(
+            outcome=StepOutcome.PENDING,
+            status="Pending",
+            tone=StepTone.MUTED,
+            key="d",
+            description="Dummy",
+        )
 
 
 @pytest.mark.parametrize(
@@ -128,3 +158,195 @@ def test_unknown_step_type_in_state_file_is_an_error(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unknown plan step type: 'bogus'"):
         AutolandCheckpointer.load(sf)
+
+
+# --- views -------------------------------------------------------------------
+#
+# A step's view is everything the status panel, the "Next steps" list, and
+# `--status -o json` say about it. These pin the contract per step type.
+
+
+def _entry(**changes: object) -> StackEntry:
+    return dataclasses.replace(STACK[0], **{"title": "Fix the thing", **changes})
+
+
+def _view(
+    step: AutolandStep,
+    stack: list[StackEntry] = STACK,
+    *,
+    is_next: bool = False,
+    assumed_completed: bool = False,
+) -> StepView:
+    return step.view(stack, is_next=is_next, assumed_completed=assumed_completed)
+
+
+def test_land_view_of_a_pending_pr() -> None:
+    assert _view(LandStep(entry_index=0, pr_number=101), [_entry()]) == StepView(
+        outcome=StepOutcome.PENDING,
+        status="Pending",
+        tone=StepTone.MUTED,
+        key="#101",
+        note="Fix the thing",
+        description="Land PR #101: Fix the thing",
+        data={
+            "pr_number": 101,
+            "pr_url": "https://github.com/o/r/pull/101",
+            "title": "Fix the thing",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "outcome", "status", "tone"),
+    [
+        (
+            PRState.WAITING_FOR_APPROVAL,
+            StepOutcome.ACTIVE,
+            "Waiting for approval",
+            StepTone.AWAITING_REVIEW,
+        ),
+        (
+            PRState.WAITING_FOR_CHECKS,
+            StepOutcome.ACTIVE,
+            "Waiting for checks",
+            StepTone.AWAITING_CHECKS,
+        ),
+        (
+            PRState.IN_MERGE_QUEUE,
+            StepOutcome.ACTIVE,
+            "In merge queue",
+            StepTone.IN_QUEUE,
+        ),
+        (
+            PRState.WAITING_FOR_WORKFLOW,
+            StepOutcome.ACTIVE,
+            "Waiting for workflow",
+            StepTone.AWAITING_WORKFLOW,
+        ),
+        (PRState.MERGED, StepOutcome.DONE, "Merged", StepTone.SUCCESS),
+        (PRState.FAILED, StepOutcome.FAILED, "Failed", StepTone.FAILURE),
+    ],
+)
+def test_land_view_follows_the_pr_state(
+    state: PRState, outcome: StepOutcome, status: str, tone: StepTone
+) -> None:
+    view = _view(LandStep(entry_index=0), [_entry(state=state)])
+    assert (view.outcome, view.status, view.tone) == (outcome, status, tone)
+
+
+def test_land_view_detail_has_the_error_and_retries_once_retried() -> None:
+    step = LandStep(entry_index=0)
+    assert _view(step, [_entry(error_message="Checks failed")]).detail == (
+        "Checks failed",
+    )
+    entry = _entry(error_message="Checks failed", check_retries=2, queue_retries=1)
+    assert _view(step, [entry]).detail == ("Checks failed", "retries CI 2 / MQ 1")
+
+
+def test_land_view_of_an_untitled_pr() -> None:
+    view = _view(LandStep(entry_index=0), [_entry(title="")])
+    assert view.note == "(untitled)"
+    assert view.description == "Land PR #101: (untitled)"
+    # JSON reports the title as GitHub has it, not the placeholder.
+    assert view.data["title"] == ""
+
+
+def test_land_view_of_an_already_landed_pr() -> None:
+    assert _view(LandStep(entry_index=-1, pr_number=99)) == StepView(
+        outcome=StepOutcome.DONE,
+        status="Landed",
+        tone=StepTone.SUCCESS,
+        key="#99",
+        description="Land PR #99 (already landed)",
+        data={"pr_number": 99, "pr_url": None, "title": None},
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "outcome", "status", "tone"),
+    [
+        ("pending", StepOutcome.PENDING, "Pending", StepTone.MUTED),
+        (
+            "waiting",
+            StepOutcome.ACTIVE,
+            "Waiting for workflow",
+            StepTone.AWAITING_WORKFLOW,
+        ),
+        ("succeeded", StepOutcome.DONE, "Workflow complete", StepTone.SUCCESS),
+        ("failed", StepOutcome.FAILED, "Failed", StepTone.FAILURE),
+        # Only a workflow inside the landed prefix is "skipped".
+        ("skipped", StepOutcome.DONE, "Assumed completed", StepTone.SUCCESS),
+    ],
+)
+def test_workflow_view_follows_its_state(
+    state: str, outcome: StepOutcome, status: str, tone: StepTone
+) -> None:
+    assert _view(WorkflowStep(workflow="deploy.yaml", state=state)) == StepView(
+        outcome=outcome,
+        status=status,
+        tone=tone,
+        key="deploy.yaml",
+        description="Wait for workflow deploy.yaml",
+        data={"workflow": "deploy.yaml"},
+    )
+
+
+def test_workflow_view_detail_is_its_error() -> None:
+    step = WorkflowStep(workflow="deploy.yaml", state="failed", error_message="boom")
+    assert _view(step).detail == ("boom",)
+
+
+@pytest.mark.parametrize(
+    ("step", "is_next", "assumed_completed", "expected"),
+    [
+        (
+            ConfirmStep(condition="QA"),
+            False,
+            False,
+            (StepOutcome.PENDING, "Pending", StepTone.MUTED),
+        ),
+        (
+            ConfirmStep(condition="QA"),
+            True,
+            False,
+            (StepOutcome.ACTIVE, "Awaiting confirmation", StepTone.AWAITING_USER),
+        ),
+        (
+            ConfirmStep(condition="QA", confirmed=True),
+            True,
+            False,
+            (StepOutcome.DONE, "Confirmed", StepTone.SUCCESS),
+        ),
+        # Inside the landed prefix nobody confirmed it in this run.
+        (
+            ConfirmStep(condition="QA", confirmed=True),
+            False,
+            True,
+            (StepOutcome.DONE, "Assumed completed", StepTone.SUCCESS),
+        ),
+    ],
+)
+def test_confirm_view_states(
+    step: ConfirmStep,
+    is_next: bool,
+    assumed_completed: bool,
+    expected: tuple[StepOutcome, str, StepTone],
+) -> None:
+    outcome, status, tone = expected
+    assert _view(step, is_next=is_next, assumed_completed=assumed_completed) == (
+        StepView(
+            outcome=outcome,
+            status=status,
+            tone=tone,
+            key="QA",
+            description="Manual confirmation: QA",
+            data={"condition": "QA"},
+        )
+    )
+
+
+def test_confirm_view_without_a_condition() -> None:
+    view = _view(ConfirmStep())
+    assert view.key == "(no condition)"
+    assert view.description == "Manual confirmation"
+    assert view.data == {"condition": ""}

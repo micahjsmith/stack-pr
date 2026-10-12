@@ -1,10 +1,11 @@
 """The base class every plan step derives from, and the registry of step types.
 
 A step type owns everything that differs by kind of step: how it is spelled in
-a plan file, how it is stored in the state file, and how it counts toward a
-run's progress. Code that walks a plan calls these methods instead of
-switching on the step's type, so adding a step type means adding a class here
-rather than a branch in every module that handles plans.
+a plan file, how it is stored in the state file, how it counts toward a run's
+progress, and what it reports about itself for display (a ``StepView``). Code
+that walks a plan calls these methods instead of switching on the step's type,
+so adding a step type means adding a class here rather than a branch in every
+module that handles plans.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 if TYPE_CHECKING:
     from stack_pr.autoland.model import StackEntry
+    from stack_pr.autoland.steps.view import StepView
 
 # A workflow or confirm step's identity for replanning: its keyword, its text,
 # and the PRs landed before it. A step means "once these PRs have landed, this
@@ -117,6 +119,19 @@ class AutolandStep(ABC):
     def credit_from(self, old: AutolandStep) -> None:
         """Record on this step the result *old*, its match in the previous
         run's plan, reached."""
+
+    # --- display -------------------------------------------------------------
+
+    @abstractmethod
+    def view(
+        self, stack: list[StackEntry], *, is_next: bool, assumed_completed: bool
+    ) -> StepView:
+        """What the step reports about itself: status, subject, and detail.
+
+        ``is_next`` is whether this is the next step with work left to do, and
+        ``assumed_completed`` whether it sits inside the plan's already-landed
+        prefix (see ``plan.is_assumed_completed``).
+        """
 
 
 class StepRegistry:

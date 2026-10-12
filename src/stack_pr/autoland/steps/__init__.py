@@ -17,6 +17,7 @@ from stack_pr.autoland.steps.base import (
 )
 from stack_pr.autoland.steps.confirm import ConfirmStep
 from stack_pr.autoland.steps.land import LandStep
+from stack_pr.autoland.steps.view import StepOutcome, StepTone, StepView
 from stack_pr.autoland.steps.workflow import WorkflowStep
 
 __all__ = [
@@ -26,7 +27,10 @@ __all__ = [
     "LandStep",
     "PlanParser",
     "ReplanKey",
+    "StepOutcome",
     "StepRegistry",
+    "StepTone",
+    "StepView",
     "WorkflowStep",
     "register_step",
     "step_from_dict",
