@@ -32,7 +32,9 @@ Modules, roughly bottom of the dependency graph first:
 - ``native_stack``: merging a run of land steps as one GitHub stack.
 - ``services``: the tools a step uses as it executes (console, GitHub, the
   waits, the repo), and their production bindings.
-- ``engine``: executing a plan.
+- ``optimize``: execution units, the plan optimization policies that group
+  steps into them (e.g. ``--merge-as-stack``), and the registry of policies.
+- ``engine``: optimizing and executing a plan.
 - ``status``: the ``--status`` report.
 - ``commands``: the subparser, and the fresh / resume / replan flows.
 
