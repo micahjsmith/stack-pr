@@ -1,0 +1,33 @@
+
+Discovering stack...
+
+
+Autoland plan · 2 steps · 0 done · 2 remaining
+
+→ ⬜ 1. Pending | Land | #101 - Add the widget model
+  ⬜ 2. Pending | Land | #102 - Expose widgets over the API
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+============================================================
+Step 1/2: Landing PR #101 — Add the widget model
+============================================================
+Rerunning failed checks (attempt 1/1): ci/test
+$ gh run rerun 9101 --failed
+PR #101: Failed: ci/test — polling in 120s
+PR #101: Checks in progress... — polling in 120s
+
+
+
+Autoland plan · 2 steps · 0 done · 2 remaining
+
+→ ❌ 1. Failed  | Land | #101 - Add the widget model
+        ↳ Checks failed after 1 retries: ci/test · retries CI 1 / MQ 0
+  ⬜ 2. Pending | Land | #102 - Expose widgets over the API
+
+ABORTED: PR #101 checks failed after retries
+
+Landing failed: PR #101 checks failed after retries
+
+State saved to <TMP>/home/.stack-pr/autoland/feat.json — resume with --resume
+

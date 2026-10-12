@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "branch": "feat",
+  "base": "main",
+  "plan_file": "<TMP>/plan.autoland-plan",
+  "current_step": 1,
+  "last_landed_sha": "78e4ec1063c72debbb00f2ff966f72377789cdae",
+  "abort_reason": "Confirm step received EOF \u2014 cannot confirm in non-interactive mode",
+  "stack": [
+    {
+      "pr_url": "https://github.com/o/r/pull/101",
+      "pr_number": 101,
+      "branch": "TestBot/stack/101",
+      "title": "Add the widget model",
+      "review_decision": "APPROVED",
+      "state": "merged",
+      "check_retries": 0,
+      "queue_retries": 0,
+      "error_message": ""
+    },
+    {
+      "pr_url": "https://github.com/o/r/pull/102",
+      "pr_number": 102,
+      "branch": "TestBot/stack/102",
+      "title": "Expose widgets over the API",
+      "review_decision": "APPROVED",
+      "state": "pending",
+      "check_retries": 0,
+      "queue_retries": 0,
+      "error_message": ""
+    }
+  ],
+  "plan": [
+    {
+      "type": "land",
+      "entry_index": 0,
+      "pr_number": 101
+    },
+    {
+      "type": "confirm",
+      "condition": "QA sign-off complete",
+      "confirmed": false
+    },
+    {
+      "type": "land",
+      "entry_index": 1,
+      "pr_number": 102
+    }
+  ]
+}

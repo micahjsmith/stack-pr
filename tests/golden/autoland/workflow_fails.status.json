@@ -1,0 +1,51 @@
+{
+  "status": "stopped",
+  "branch": "feat",
+  "base": "main",
+  "state_file": "<TMP>/home/.stack-pr/autoland/feat.json",
+  "state_file_exists": true,
+  "lock_file": "<TMP>/home/.stack-pr/autoland/feat.json.lock",
+  "pid": null,
+  "last_saved": "<SAVED>",
+  "abort_reason": "Workflow deploy.yaml failed or timed out",
+  "resume_command": "stack-pr autoland --resume",
+  "plan": {
+    "total": 3,
+    "done": 1,
+    "remaining": 2,
+    "steps": [
+      {
+        "number": 1,
+        "type": "land",
+        "outcome": "done",
+        "status": "Merged",
+        "is_next": false,
+        "pr_number": 101,
+        "pr_url": "https://github.com/o/r/pull/101",
+        "title": "Add the widget model",
+        "detail": null
+      },
+      {
+        "number": 2,
+        "type": "workflow",
+        "outcome": "failed",
+        "status": "Failed",
+        "is_next": true,
+        "workflow": "deploy.yaml",
+        "detail": "Workflow timed out after 0h"
+      },
+      {
+        "number": 3,
+        "type": "land",
+        "outcome": "pending",
+        "status": "Pending",
+        "is_next": false,
+        "pr_number": 102,
+        "pr_url": "https://github.com/o/r/pull/102",
+        "title": "Expose widgets over the API",
+        "detail": null
+      }
+    ]
+  },
+  "other_runs": []
+}

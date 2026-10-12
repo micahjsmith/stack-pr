@@ -1,0 +1,65 @@
+Replanning from checkpoint: <TMP>/home/.stack-pr/autoland/feat.json
+
+Rediscovering stack...
+
+Plan: <TMP>/plan.autoland-plan
+
+Autoland plan · 8 steps · 6 done · 2 remaining
+
+  ✅ 1. Landed            | Land     | #101
+  ✅ 2. Assumed completed | Workflow | deploy.yaml
+  ✅ 3. Assumed completed | Confirm  | QA sign-off complete
+  ✅ 4. Landed            | Land     | #102
+→ ✅ 5. Workflow complete | Workflow | deploy.yaml
+  ✅ 6. Confirmed         | Confirm  | metrics look healthy
+  ⬜ 7. Pending           | Confirm  | docs updated
+  ⬜ 8. Pending           | Land     | #103 - Show widgets in the dashboard
+
+Done in the previous run, but not carried over (changed, removed, or now after different PRs):
+  - Manual confirmation: on-call agrees (after #101, #102)
+
+Continue with this plan? Type y/Y to confirm (anything else aborts): y
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+PR #101 already landed, skipping
+
+PR #102 already landed, skipping
+
+============================================================
+Step 7/8: Manual confirmation required
+============================================================
+
+Confirm "docs updated" is complete — ready to proceed?
+
+Next steps:
+  1. Land PR #103: Show widgets in the dashboard
+Type y/Y then Enter to continue (Ctrl+C to abort): y
+Confirmed
+
+============================================================
+Step 8/8: Landing PR #103 — Show widgets in the dashboard
+============================================================
+PR #103 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #103 to merge queue
+$ gh pr merge 103 --squash
+PR #103: in merge queue (0m) — polling in 120s
+
+PR #103 merged!
+
+
+
+Autoland plan · 8 steps · 8 done · 0 remaining
+
+  ✅ 1. Landed            | Land     | #101
+  ✅ 2. Assumed completed | Workflow | deploy.yaml
+  ✅ 3. Assumed completed | Confirm  | QA sign-off complete
+  ✅ 4. Landed            | Land     | #102
+  ✅ 5. Workflow complete | Workflow | deploy.yaml
+  ✅ 6. Confirmed         | Confirm  | metrics look healthy
+  ✅ 7. Confirmed         | Confirm  | docs updated
+  ✅ 8. Merged            | Land     | #103 - Show widgets in the dashboard
+
+All PRs landed successfully!
+

@@ -1,0 +1,65 @@
+
+Discovering stack...
+
+
+Autoland plan · 3 steps · 0 done · 3 remaining
+
+→ ⬜ 1. Pending | Land | #101 - Add the widget model
+  ⬜ 2. Pending | Land | #102 - Expose widgets over the API
+  ⬜ 3. Pending | Land | #103 - Show widgets in the dashboard
+Steps 1-3 (#101, #102, #103) will merge together as a GitHub stack.
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+============================================================
+Landing 3 PRs as a GitHub stack: #101, #102, #103
+============================================================
+PR #101 is mergeable (mergeStateStatus=CLEAN)
+
+Merging PRs #101-#103 as a stack
+Stack merge did not complete (Merge conflict in PR #102). Landing the remaining PRs one at a time.
+
+Rebasing stack on origin/main...
+$ git fetch origin main
+$ git rebase origin/main
+Re-submitting stack...
+
+PR #101 already merged, skipping
+
+============================================================
+Step 2/3: Landing PR #102 — Expose widgets over the API
+============================================================
+PR #102 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #102 to merge queue
+$ gh pr merge 102 --squash
+PR #102: in merge queue (0m) — polling in 120s
+
+PR #102 merged!
+
+Rebasing stack on origin/main...
+$ git fetch origin main
+$ git rebase origin/main
+Re-submitting stack...
+
+============================================================
+Step 3/3: Landing PR #103 — Show widgets in the dashboard
+============================================================
+PR #103 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #103 to merge queue
+$ gh pr merge 103 --squash
+PR #103: in merge queue (0m) — polling in 120s
+
+PR #103 merged!
+
+
+
+Autoland plan · 3 steps · 3 done · 0 remaining
+
+  ✅ 1. Merged | Land | #101 - Add the widget model
+  ✅ 2. Merged | Land | #102 - Expose widgets over the API
+  ✅ 3. Merged | Land | #103 - Show widgets in the dashboard
+
+All PRs landed successfully!
+

@@ -1,0 +1,21 @@
+Autoland status
+
+  Status:     Stopped — not running, can be resumed
+  Branch:     feat
+  Base:       main
+  State file: <TMP>/home/.stack-pr/autoland/feat.json
+  Last saved: <SAVED>
+
+
+Autoland plan · 8 steps · 8 done · 0 remaining
+
+  ✅ 1. Landed            | Land     | #101
+  ✅ 2. Assumed completed | Workflow | deploy.yaml
+  ✅ 3. Assumed completed | Confirm  | QA sign-off complete
+  ✅ 4. Landed            | Land     | #102
+  ✅ 5. Workflow complete | Workflow | deploy.yaml
+  ✅ 6. Confirmed         | Confirm  | metrics look healthy
+  ✅ 7. Confirmed         | Confirm  | docs updated
+  ✅ 8. Merged            | Land     | #103 - Show widgets in the dashboard
+
+Resume with: stack-pr autoland --resume

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "branch": "feat",
+  "base": "main",
+  "plan_file": null,
+  "current_step": 6,
+  "last_landed_sha": "1a935560d359b44bfc714d90b02f064b6167c8be",
+  "abort_reason": "",
+  "stack": [
+    {
+      "pr_url": "https://github.com/o/r/pull/103",
+      "pr_number": 103,
+      "branch": "TestBot/stack/103",
+      "title": "Show widgets in the dashboard",
+      "review_decision": "APPROVED",
+      "state": "merged",
+      "check_retries": 0,
+      "queue_retries": 0,
+      "error_message": ""
+    }
+  ],
+  "plan": [
+    {
+      "type": "land",
+      "entry_index": -1,
+      "pr_number": 101
+    },
+    {
+      "type": "workflow",
+      "workflow": "deploy.yaml",
+      "state": "skipped",
+      "error_message": ""
+    },
+    {
+      "type": "confirm",
+      "condition": "QA sign-off complete",
+      "confirmed": true
+    },
+    {
+      "type": "land",
+      "entry_index": -1,
+      "pr_number": 102
+    },
+    {
+      "type": "workflow",
+      "workflow": "deploy.yaml",
+      "state": "succeeded",
+      "error_message": ""
+    },
+    {
+      "type": "land",
+      "entry_index": 0,
+      "pr_number": 103
+    }
+  ]
+}

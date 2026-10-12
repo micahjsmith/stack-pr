@@ -1,0 +1,17 @@
+Autoland status
+
+  Status:     Stopped — not running, can be resumed
+  Branch:     feat
+  Base:       main
+  State file: <TMP>/home/.stack-pr/autoland/feat.json
+  Last saved: <SAVED>
+
+
+Autoland plan · 4 steps · 4 done · 0 remaining
+
+  ✅ 1. Merged            | Land     | #101 - Add the widget model
+  ✅ 2. Workflow complete | Workflow | deploy.yaml
+  ✅ 3. Confirmed         | Confirm  | QA sign-off complete
+  ✅ 4. Merged            | Land     | #102 - Expose widgets over the API
+
+Resume with: stack-pr autoland --resume
