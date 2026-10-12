@@ -132,6 +132,46 @@ class GitHub:
             ["gh", "pr", "merge", str(pr_number), "--squash"], quiet=False, retries=0
         )
 
+    def head_sha(self, pr_number: int) -> str:
+        """The commit at the head of the PR's branch."""
+        sha = self._pr_view(pr_number, "headRefOid").get("headRefOid")
+        if not isinstance(sha, str) or not sha:
+            raise GitHubError(f"No head commit reported for PR #{pr_number}")
+        return sha
+
+    def commit_message(self, sha: str) -> str:
+        """The full message of commit *sha*."""
+        data = self._api("GET", f"commits/{sha}")
+        commit = data.get("commit") if isinstance(data, dict) else None
+        message = commit.get("message") if isinstance(commit, dict) else None
+        if not isinstance(message, str) or not message:
+            raise GitHubError(f"No commit message reported for {sha}")
+        return message
+
+    def squash_merge(
+        self, pr_number: int, *, subject: str, body: str, head_sha: str
+    ) -> None:
+        """Squash-merge the PR straight into its base branch, as *subject* and
+        *body*. GitHub refuses if the PR's head is no longer *head_sha*."""
+        runtime.run(
+            [
+                "gh",
+                "pr",
+                "merge",
+                str(pr_number),
+                "--squash",
+                "--match-head-commit",
+                head_sha,
+                "--subject",
+                subject,
+                "--body-file",
+                "-",
+            ],
+            quiet=False,
+            input_data=body.encode(),
+            retries=0,
+        )
+
     # GitHub's native stacked PRs. A stack is an explicit server-side object —
     # GitHub does not infer one from a chain of PR bases — and once a PR is in
     # one, only the asynchronous merge API can merge it. See

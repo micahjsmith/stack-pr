@@ -229,6 +229,7 @@ def test_land_view_of_a_pending_pr() -> None:
             "In merge queue",
             StepTone.IN_QUEUE,
         ),
+        (PRState.MERGING, StepOutcome.ACTIVE, "Merging", StepTone.MERGING),
         (
             PRState.WAITING_FOR_WORKFLOW,
             StepOutcome.ACTIVE,

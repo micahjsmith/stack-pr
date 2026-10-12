@@ -43,6 +43,7 @@ from stack_pr.autoland.display import (
     _plan_rows,
     _StepRow,
 )
+from stack_pr.autoland.merge_mode import MergeMode
 from stack_pr.autoland.model import (
     ConfirmStep,
     LandingContext,
@@ -163,25 +164,61 @@ def test_default_workflow_absent_is_none() -> None:
     assert opts.default_workflow is None
 
 
-# --- merge-queue gate ----------------------------------------------------
+# --- merge mode at the entry point -------------------------------------------
 
 
-def _forbid_landing_flows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the fresh/resume/replan flows fail the test if reached, so a test of
-    run_autoland's early exits can never run a real land."""
+def _stub_landing_flows(monkeypatch: pytest.MonkeyPatch) -> list[AutolandOptions]:
+    """Replace the fresh/resume/replan flows so a test of run_autoland's entry
+    can never run a real land. A fresh run records its options; the others fail
+    the test."""
+    fresh_runs: list[AutolandOptions] = []
 
     def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("run_autoland reached a landing flow")
+        pytest.fail("run_autoland reached the resume/replan flow")
 
-    for flow in ("_run_fresh", "_run_resume", "_run_replan"):
-        monkeypatch.setattr(commands, flow, forbidden)
+    monkeypatch.setattr(
+        commands, "_run_fresh", lambda _common, opts: fresh_runs.append(opts)
+    )
+    monkeypatch.setattr(commands, "_run_resume", forbidden)
+    monkeypatch.setattr(commands, "_run_replan", forbidden)
+    return fresh_runs
 
 
-def test_run_autoland_requires_merge_queue(monkeypatch: pytest.MonkeyPatch) -> None:
-    _forbid_landing_flows(monkeypatch)
-    cfg = configparser.ConfigParser()  # no [autoland] -> merge_queue False
-    with pytest.raises(NotImplementedError):
+def _printed(console: Mock) -> str:
+    return "\n".join(str(a) for c in console.print.call_args_list for a in c.args)
+
+
+def test_run_autoland_without_merge_queue_lands_directly(
+    monkeypatch: pytest.MonkeyPatch, autoland_console: Mock
+) -> None:
+    fresh_runs = _stub_landing_flows(monkeypatch)
+    github = FakeGitHub()
+    github.script("has_merge_queue", False)
+    monkeypatch.setattr(gh, "github", github)
+    cfg = configparser.ConfigParser()  # no [autoland] -> merge_queue unset
+
+    commands.run_autoland(common_args(), _args(), cfg)
+
+    assert github.called("has_merge_queue") == [("main",)]
+    assert [opts.merge_mode for opts in fresh_runs] == [MergeMode.DIRECT]
+    assert "Merging directly into main (no merge queue)" in _printed(autoland_console)
+
+
+def test_run_autoland_stops_when_the_merge_mode_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, autoland_console: Mock
+) -> None:
+    fresh_runs = _stub_landing_flows(monkeypatch)
+    github = FakeGitHub()
+    github.script("has_merge_queue", None)
+    monkeypatch.setattr(gh, "github", github)
+    cfg = configparser.ConfigParser()
+
+    with pytest.raises(SystemExit) as exc:
         commands.run_autoland(common_args(), _args(), cfg)
+
+    assert exc.value.code == 1
+    assert fresh_runs == []
+    assert "stack-pr config autoland.merge_queue=false" in _printed(autoland_console)
 
 
 # --- check evaluation (pure: takes the check list) ------------------------
@@ -1116,7 +1153,7 @@ def test_confirm_step_banner_is_a_single_line() -> None:
 
 
 def test_execute_plan_lands_a_pinned_step_that_is_still_open() -> None:
-    fakes = FakeServices(waits=FakeWaits(queue=ok))
+    fakes = FakeServices(waits=FakeWaits(merge=ok))
 
     stack = _pinned_stack([103])
     plan = parse_plan("l 102\nl 103\n", stack, pr_is_merged=lambda pr: pr == 102)
@@ -1127,7 +1164,7 @@ def test_execute_plan_lands_a_pinned_step_that_is_still_open() -> None:
     )
 
     assert fakes.waits is not None
-    assert fakes.waits.calls == ["approval", "checks", "queue"]
+    assert fakes.waits.calls == ["approval", "checks", "merge"]
     assert all(entry is stack[0] for entry in fakes.waits.entries)
 
 
@@ -1977,7 +2014,7 @@ class _StackLanding:
 
     def __init__(self, plan_text: str, prs: list[int], **opts: object) -> None:
         self.github = FakeGitHub()
-        self.waits = FakeWaits(queue=self._land_one)
+        self.waits = FakeWaits(merge=self._land_one)
         self.fakes = FakeServices(github=self.github, waits=self.waits)
         stack = _pinned_stack(prs)
         self._ctx = LandingContext(stack=stack, plan=parse_plan(plan_text, stack))
@@ -2002,7 +2039,7 @@ class _StackLanding:
         return self.fakes.repo.rebases
 
     def landed_one_by_one(self) -> list[int]:
-        return self.waits.waited("queue")
+        return self.waits.waited("merge")
 
 
 def _land_with_fake_github(plan_text: str, prs: list[int], **opts: object):  # noqa: ANN202
@@ -2254,7 +2291,7 @@ def test_merge_queue_wait_polls_again_after_a_failed_read(mocker) -> None:  # no
     )
     entry = _pinned_stack([101])[0]
 
-    assert _real_github().waits.enqueue_and_wait(entry, opts=_opts())
+    assert _real_github().waits.merge_and_wait(entry, opts=_opts())
     assert entry.state == PRState.MERGED
 
 
@@ -2264,7 +2301,7 @@ def test_merge_queue_wait_still_times_out_while_reads_fail(mocker) -> None:  # n
     entry = _pinned_stack([101])[0]
 
     opts = _opts(poll_interval=60, merge_timeout=300)
-    assert not _real_github().waits.enqueue_and_wait(entry, opts=opts)
+    assert not _real_github().waits.merge_and_wait(entry, opts=opts)
     assert entry.error_message == "Timed out waiting for merge queue"
 
 

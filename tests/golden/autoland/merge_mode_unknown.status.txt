@@ -1,0 +1,2 @@
+No autoland in progress for branch feat.
+State file (not present): <TMP>/home/.stack-pr/autoland/feat.json

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import dataclasses
 import json
 import os
 import signal
@@ -12,8 +13,13 @@ import time
 from pathlib import Path
 
 from stack_pr import cli, git
-from stack_pr.autoland import discovery, engine, runtime
+from stack_pr.autoland import discovery, engine, gh, runtime
 from stack_pr.autoland.display import _describe_step, _escape_markup, print_status
+from stack_pr.autoland.merge_mode import (
+    MergeModeError,
+    describe_merge_mode,
+    resolve_merge_mode,
+)
 from stack_pr.autoland.model import LandingContext, LandStep, PlanStep, StackEntry
 from stack_pr.autoland.options import AutolandOptions
 from stack_pr.autoland.plan import (
@@ -42,7 +48,10 @@ def register_parser(
     """Register the `autoland` subparser. Called from cli.create_argparser."""
     p = subparsers.add_parser(
         "autoland",
-        help="Land the whole stack through the GitHub merge queue",
+        help=(
+            "Land the whole stack: through the GitHub merge queue where the "
+            "target branch has one, else by merging each PR directly"
+        ),
         parents=[common_parser],
     )
     p.add_argument(
@@ -60,7 +69,10 @@ def register_parser(
         "--max-queue-retries",
         type=int,
         default=None,
-        help="Max retries after a merge-queue boot (config: autoland.max_queue_retries).",
+        help=(
+            "Max retries after a merge-queue boot or a failed direct merge "
+            "(config: autoland.max_queue_retries)."
+        ),
     )
     p.add_argument(
         "--poll-interval",
@@ -185,14 +197,6 @@ def run_autoland(
         runtime.console.print("[red]-o/--output only applies to --status.[/red]")
         sys.exit(1)
 
-    # Merge-queue is the only supported strategy for now. Fail early otherwise.
-    if not opts.merge_queue:
-        raise NotImplementedError(
-            "stack-pr autoland currently supports only repositories that use "
-            "the GitHub merge queue. Enable it with:\n"
-            "    stack-pr config autoland.merge_queue=true"
-        )
-
     # A file plan replaces the whole plan, so --count (which only shapes the
     # generated default) and --resume (which restores the plan from a
     # checkpoint) have nothing to act on.
@@ -216,6 +220,8 @@ def run_autoland(
         )
         sys.exit(1)
 
+    opts = _resolve_merge_mode(common, opts)
+
     if opts.replan:
         _run_replan(common, opts)
         return
@@ -223,6 +229,27 @@ def run_autoland(
         _run_resume(common, opts)
         return
     _run_fresh(common, opts)
+
+
+def _resolve_merge_mode(
+    common: cli.CommonArgs, opts: AutolandOptions
+) -> AutolandOptions:
+    """*opts* with the run's merge mode resolved, before anything lands.
+
+    Exits if the mode can't be resolved. Says which mode the run uses, unless
+    it is the merge queue the config asked for, the one mode autoland used to
+    have.
+    """
+    try:
+        mode = resolve_merge_mode(common.target, gh.github, configured=opts.merge_queue)
+    except MergeModeError as e:
+        runtime.console.print(f"[red]{_escape_markup(str(e))}[/red]")
+        sys.exit(1)
+    if not (mode.uses_queue and opts.merge_queue):
+        runtime.console.print(
+            f"[bold]{_escape_markup(describe_merge_mode(mode, common.target))}[/bold]"
+        )
+    return dataclasses.replace(opts, merge_mode=mode)
 
 
 def _dispose_worktree(

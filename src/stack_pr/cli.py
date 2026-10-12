@@ -1567,6 +1567,18 @@ def rebase_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None
     force_push_with_lease([f"{e.head}:{e.head}"], remote, target, verbose=verbose)
 
 
+def squash_commit_message(commit_msg: str, pr_id: str | int) -> tuple[str, str]:
+    """The subject and body of the squash commit that lands a PR.
+
+    It is the PR's commit message and nothing else: the stack-info trailer is
+    dropped, and the PR number is appended to the subject. The body is a single
+    space when the message has none.
+    """
+    lines = remove_stack_info(commit_msg).splitlines()
+    title = f"{lines[0]} (#{pr_id})"
+    return title, "\n".join(lines[1:]) or " "
+
+
 def land_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None:
     log(b("Landing ") + e.pprint(links=False), level=2)
     # Rebase the head branch to the most recent 'origin/main'
@@ -1581,16 +1593,7 @@ def land_pr(e: StackEntry, remote: str, target: str, *, verbose: bool) -> None:
     # Switch PR base branch to 'main'
     edit_pr_base(e.pr, target, verbose=verbose)
 
-    # Form the commit message: it should contain the original commit message
-    # and nothing else.
-    pr_body = remove_stack_info(e.commit.commit_msg())
-
-    # Since title is passed separately, we need to strip the first line from the
-    # body:
-    lines = pr_body.splitlines()
-    pr_id = last(e.pr)
-    title = f"{lines[0]} (#{pr_id})"
-    pr_body = "\n".join(lines[1:]) or " "
+    title, pr_body = squash_commit_message(e.commit.commit_msg(), last(e.pr))
     run_shell_command(
         ["gh", "pr", "merge", e.pr, "--squash", "-t", title, "-F", "-"],
         input=pr_body.encode(),

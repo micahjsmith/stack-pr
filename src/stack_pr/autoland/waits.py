@@ -1,4 +1,4 @@
-"""Waiting for approval, checks, the merge queue, and workflows.
+"""Waiting for approval, checks, a merge (queued or direct), and workflows.
 
 Every wait polls through the ``Services`` it is given: GitHub, the console,
 the clock, and the local repo. ``services.PollingWaits`` binds them as the
@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
+from stack_pr import cli
 from stack_pr.autoland.checks import CheckStatus, evaluate_checks
 from stack_pr.autoland.display import _REVIEW_DECISION_DISPLAY
 from stack_pr.autoland.gh import MergeQueuePollResult, _sha_eq
@@ -19,7 +20,6 @@ from stack_pr.autoland.model import LandingContext, PRState, StackEntry, Workflo
 from stack_pr.autoland.options import AutolandOptions
 
 if TYPE_CHECKING:
-    from stack_pr import cli
     from stack_pr.autoland.services import Repo, Services
 
 # ---------------------------------------------------------------------------
@@ -313,6 +313,8 @@ def wait_for_mergeable(
 ) -> MergeableResult:
     """Wait until GitHub reports the PR as mergeable."""
     ui, github = services.ui, services.github
+    uses_queue = opts.merge_mode.uses_queue
+    reported_behind = False
     while True:
         data = _poll_read(github.merge_state, entry.pr_number, services)
         if data is None:
@@ -347,8 +349,32 @@ def wait_for_mergeable(
             services.sleep(opts.poll_interval)
             continue
 
+        # Without a queue, a branch that must be up to date with its base before
+        # it merges stays BEHIND until someone updates it; autoland doesn't
+        # push to a PR on its own, so it says what to do and waits.
+        if not uses_queue and merge_state == "BEHIND":
+            entry.error_message = "Branch is behind its base — waiting for an update"
+            if not reported_behind:
+                reported_behind = True
+                ui.print(
+                    f"\n[bold yellow]PR #{entry.pr_number} is behind its base "
+                    "branch, which must be up to date before it merges. Rebase "
+                    "the stack and run `stack-pr submit` (or update the branch "
+                    "on GitHub); autoland will resume automatically.[/bold yellow]"
+                )
+            ui.print(
+                f"[dim]PR #{entry.pr_number}: behind its base — "
+                f"polling in {opts.poll_interval}s[/dim]"
+            )
+            services.sleep(opts.poll_interval)
+            continue
+
         # UNKNOWN can also mean "already in the merge queue".
-        if merge_state == "UNKNOWN" and github.in_merge_queue(entry.pr_number) is True:
+        if (
+            uses_queue
+            and merge_state == "UNKNOWN"
+            and github.in_merge_queue(entry.pr_number) is True
+        ):
             ui.print(
                 f"[cyan]PR #{entry.pr_number} is already in the merge queue — "
                 "skipping enqueue[/cyan]"
@@ -366,7 +392,7 @@ def wait_for_mergeable(
 def _rewait_after_retry(
     entry: StackEntry, *, opts: AutolandOptions, services: Services
 ) -> bool:
-    """Re-verify approval and checks before a queue retry."""
+    """Re-verify approval and checks before retrying a merge."""
     if not wait_for_approval(entry, opts=opts, services=services):
         return False
     entry.check_retries = 0
@@ -458,3 +484,116 @@ def enqueue_and_wait(
             )
             services.sleep(opts.poll_interval)
             awake_elapsed += opts.poll_interval
+
+
+def merge_and_wait(
+    entry: StackEntry, *, opts: AutolandOptions, services: Services
+) -> bool:
+    """Merge the PR the way the run merges (``opts.merge_mode``), and wait until
+    it has merged."""
+    if opts.merge_mode.uses_queue:
+        return enqueue_and_wait(entry, opts=opts, services=services)
+    return merge_directly(entry, opts=opts, services=services)
+
+
+# After a direct merge, how many times (and how many seconds apart) to read the
+# PR's state before deciding GitHub didn't merge it after all. GitHub usually
+# reports the merge at once; this only covers it lagging behind.
+_MERGE_CONFIRM_READS = 6
+_MERGE_CONFIRM_INTERVAL = 5
+
+
+def _squash_merge(entry: StackEntry, services: Services) -> None:
+    """Squash-merge the PR as ``stack-pr land`` would: as its commit message
+    without the stack-info trailer, with the PR number in the subject.
+
+    Pinned to the head commit the message was read from, so a push since then
+    fails the merge instead of landing code under another commit's message.
+    """
+    github = services.github
+    head = github.head_sha(entry.pr_number)
+    subject, body = cli.squash_commit_message(
+        github.commit_message(head), entry.pr_number
+    )
+    github.squash_merge(entry.pr_number, subject=subject, body=body, head_sha=head)
+
+
+def _confirm_merged(entry: StackEntry, *, reads: int, services: Services) -> str:
+    """The PR's state after a merge attempt: "MERGED" or "CLOSED" as soon as
+    GitHub reports it, else what the last of *reads* reads said ("" if it
+    failed)."""
+    state = ""
+    for attempt in range(reads):
+        if attempt:
+            services.sleep(_MERGE_CONFIRM_INTERVAL)
+        state = _poll_read(services.github.pr_state, entry.pr_number, services) or ""
+        if state in ("MERGED", "CLOSED"):
+            break
+    return state
+
+
+def merge_directly(
+    entry: StackEntry, *, opts: AutolandOptions, services: Services
+) -> bool:
+    """Squash-merge the PR straight into its base branch, with no merge queue.
+
+    Waits for it to be mergeable first. A merge that fails, or that GitHub
+    doesn't report as merged, is retried up to ``max_queue_retries`` times,
+    after approval and checks are verified again.
+    """
+    ui = services.ui
+    while True:
+        mergeable_result = wait_for_mergeable(entry, opts=opts, services=services)
+        if not mergeable_result.ready:
+            return False
+        if mergeable_result.already_merged:
+            entry.state = PRState.MERGED
+            entry.error_message = ""
+            ui.print(
+                f"\n[bold green]PR #{entry.pr_number} already merged![/bold green]"
+            )
+            return True
+
+        entry.state = PRState.MERGING
+        entry.error_message = "Merging..."
+        ui.print(f"\n[bold cyan]Merging PR #{entry.pr_number}[/bold cyan]")
+
+        try:
+            _squash_merge(entry, services)
+        except RuntimeError as e:
+            failure = str(e)
+            # The merge may have gone through even though gh reported an error
+            # (e.g. a lost response), so look before retrying.
+            reads = 1
+        else:
+            failure = "GitHub did not report the PR as merged"
+            reads = _MERGE_CONFIRM_READS
+
+        state = _confirm_merged(entry, reads=reads, services=services)
+        if state == "MERGED":
+            entry.state = PRState.MERGED
+            entry.error_message = ""
+            ui.print(f"\n[bold green]PR #{entry.pr_number} merged![/bold green]")
+            return True
+        if state == "CLOSED":
+            entry.state = PRState.FAILED
+            entry.error_message = "PR was closed"
+            return False
+
+        entry.error_message = f"Failed to merge: {failure}"
+        ui.print(f"[red]Failed to merge PR #{entry.pr_number}: {failure}[/red]")
+        if entry.queue_retries >= opts.max_queue_retries:
+            entry.state = PRState.FAILED
+            entry.error_message = (
+                f"Failed to merge after {opts.max_queue_retries + 1} attempts: "
+                f"{failure}"
+            )
+            return False
+        entry.queue_retries += 1
+        ui.print(
+            f"[yellow]Retrying the merge of PR #{entry.pr_number} "
+            f"(attempt {entry.queue_retries + 1}/{opts.max_queue_retries + 1})"
+            "[/yellow]"
+        )
+        if not _rewait_after_retry(entry, opts=opts, services=services):
+            return False

@@ -1,0 +1,54 @@
+Merging directly into main (no merge queue)
+
+Discovering stack...
+
+
+Autoland plan · 2 steps · 0 done · 2 remaining
+
+→ ⬜ 1. Pending | Land | #101 - Add the widget model
+  ⬜ 2. Pending | Land | #102 - Expose widgets over the API
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+============================================================
+Step 1/2: Landing PR #101 — Add the widget model
+============================================================
+PR #101 is mergeable (mergeStateStatus=CLEAN)
+
+Merging PR #101
+$ gh pr merge 101 --squash --match-head-commit 1a5a0dd7ff70fb1f21a0ca5f5ca31aa189d0188d --subject Add the widget model (#101) --body-file -
+Failed to merge PR #101: Command failed (1): gh pr merge 101 --squash --match-head-commit 1a5a0dd7ff70fb1f21a0ca5f5ca31aa189d0188d --subject Add the widget model (#101) --body-file -
+GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)
+Retrying the merge of PR #101 (attempt 2/2)
+PR #101 is mergeable (mergeStateStatus=CLEAN)
+
+Merging PR #101
+$ gh pr merge 101 --squash --match-head-commit 1a5a0dd7ff70fb1f21a0ca5f5ca31aa189d0188d --subject Add the widget model (#101) --body-file -
+
+PR #101 merged!
+
+Rebasing stack on origin/main...
+$ git fetch origin main
+$ git rebase origin/main
+Re-submitting stack...
+
+============================================================
+Step 2/2: Landing PR #102 — Expose widgets over the API
+============================================================
+PR #102 is mergeable (mergeStateStatus=CLEAN)
+
+Merging PR #102
+$ gh pr merge 102 --squash --match-head-commit ca434a493f6745a2ec227ae2034f6b5e46c62268 --subject Expose widgets over the API (#102) --body-file -
+
+PR #102 merged!
+
+
+
+Autoland plan · 2 steps · 2 done · 0 remaining
+
+  ✅ 1. Merged | Land | #101 - Add the widget model
+        ↳ retries CI 0 / MQ 1
+  ✅ 2. Merged | Land | #102 - Expose widgets over the API
+
+All PRs landed successfully!
+

@@ -1,0 +1,14 @@
+{
+  "status": "none",
+  "branch": "feat",
+  "base": null,
+  "state_file": "<TMP>/home/.stack-pr/autoland/feat.json",
+  "state_file_exists": false,
+  "lock_file": "<TMP>/home/.stack-pr/autoland/feat.json.lock",
+  "pid": null,
+  "last_saved": null,
+  "abort_reason": null,
+  "resume_command": null,
+  "plan": null,
+  "other_runs": []
+}

@@ -129,9 +129,9 @@ class FakeWaits:
     approval: Outcome = ok
     checks: Outcome = ok
     mergeable: Outcome = ok
-    queue: Outcome = merges
+    merge: Outcome = merges
     workflow_succeeds: bool = True
-    # Each wait, in order: "approval", "checks", "mergeable", or "queue".
+    # Each wait, in order: "approval", "checks", "mergeable", or "merge".
     calls: list[str] = field(default_factory=list)
     # The entry of each wait, in the same order as ``calls``.
     entries: list[StackEntry] = field(default_factory=list)
@@ -158,8 +158,8 @@ class FakeWaits:
     ) -> MergeableResult:
         return MergeableResult(ready=self._wait("mergeable", entry, self.mergeable))
 
-    def enqueue_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
-        return self._wait("queue", entry, self.queue)
+    def merge_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
+        return self._wait("merge", entry, self.merge)
 
     def wait_for_workflow(
         self,
@@ -274,8 +274,10 @@ class FakeGitHub:
 
     A PR is open unless it is in ``merged`` or ``closed``. By default it is
     approved, has no checks, is mergeable, is merged as soon as it is
-    enqueued, and stays in the merge queue while open. Every call is logged
-    in ``calls`` as ``(method, args)``.
+    enqueued or merged directly, and stays in the merge queue while open. Its
+    head commit is ``head-<PR>``, with the message in ``messages`` (default: a
+    title, a body, and a stack-info trailer). Every call is logged in
+    ``calls`` as ``(method, args)``.
 
     ``script(method, *replies)`` answers the next calls of *method*, one
     reply each, before it goes back to answering from the fake's state. A
@@ -293,6 +295,10 @@ class FakeGitHub:
         self.pr_checks: dict[int, list[dict]] = {}
         self.merge_commits: dict[int, str] = {}
         self.enqueued: list[int] = []
+        # PR -> its head commit's message, and (PR, subject, body, head) for
+        # each direct merge.
+        self.messages: dict[int, str] = {}
+        self.squash_merges: list[tuple[int, str, str, str]] = []
         self.booted: set[int] = set()
         # The latest runs of every workflow, newest first, and GitHub's answer
         # to whether (ancestor, descendant) is one (unknown if absent).
@@ -305,6 +311,8 @@ class FakeGitHub:
         self.created: list[list[int]] = []
         self.unstacked: list[int] = []
         self.merge_requests: list[int] = []
+        # Whether each merge request asked for the merge queue.
+        self.merge_via_queue: list[bool] = []
         # (PR, new base) for each base change, and the base changes made by
         # the time of each merge request.
         self.base_changes: list[tuple[int, str]] = []
@@ -386,6 +394,26 @@ class FakeGitHub:
             return MergeQueuePollResult(booted=True)
         return MergeQueuePollResult()
 
+    # --- merging directly -------------------------------------------------
+
+    @_scriptable
+    def head_sha(self, pr: int) -> str:
+        return f"head-{pr}"
+
+    @_scriptable
+    def commit_message(self, sha: str) -> str:
+        pr = int(sha.removeprefix("head-"))
+        return self.messages.get(
+            pr,
+            f"Title {pr}\n\nBody of {pr}.\n\n"
+            f"stack-info: PR: https://github.com/o/r/pull/{pr}, branch: b{pr}",
+        )
+
+    @_scriptable
+    def squash_merge(self, pr: int, *, subject: str, body: str, head_sha: str) -> None:
+        self.squash_merges.append((pr, subject, body, head_sha))
+        self.merged.add(pr)
+
     # --- workflows -------------------------------------------------------
 
     @_scriptable
@@ -434,6 +462,7 @@ class FakeGitHub:
     @_scriptable
     def merge_async(self, pr: int, *, merge_queue: bool) -> str:
         self.merge_requests.append(pr)
+        self.merge_via_queue.append(merge_queue)
         self.bases_at_merge.append(list(self.base_changes))
         if self.merge_error:
             raise RuntimeError(self.merge_error)

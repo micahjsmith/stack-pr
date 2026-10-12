@@ -1,4 +1,4 @@
-"""stack-pr autoland: land a whole stack through the GitHub merge queue.
+"""stack-pr autoland: land a whole stack, through the merge queue or directly.
 
 This package holds the full autoland engine. cli.py only wires up the
 subparser and dispatches into `run_autoland` to keep cli.py small.
@@ -14,6 +14,7 @@ Plain shell, git, and gh helpers come from the shared modules instead.
 
 Modules, roughly bottom of the dependency graph first:
 
+- ``merge_mode``: whether a run merges through the merge queue or directly.
 - ``options``: AutolandOptions, resolved from flags, config, and defaults.
 - ``runtime``: the console, sleep/wake resilience, and the retrying ``run``.
 - ``steps``: the AutolandStep base class, the registry of step types, and one
@@ -29,7 +30,8 @@ Modules, roughly bottom of the dependency graph first:
 - ``plan``: generating, formatting, parsing, and replanning landing plans.
 - ``display``: rendering a plan's progress.
 - ``repo``: the local clone (fetch, ancestry, landed SHAs, rebase + resubmit).
-- ``waits``: waiting for approval, checks, the merge queue, and workflows.
+- ``waits``: waiting for approval, checks, a merge (queued or direct), and
+  workflows.
 - ``native_stack``: merging a run of land steps as one GitHub stack.
 - ``services``: the tools a plan's execution uses (console, GitHub, sleep,
   the repo, the waits), and their production bindings.
