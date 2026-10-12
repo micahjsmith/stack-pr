@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "branch": "feat",
+  "base": "main",
+  "plan_file": null,
+  "current_step": 0,
+  "last_landed_sha": "",
+  "abort_reason": "PR #101 checks failed after retries",
+  "stack": [
+    {
+      "pr_url": "https://github.com/o/r/pull/101",
+      "pr_number": 101,
+      "branch": "TestBot/stack/101",
+      "title": "Add the widget model",
+      "review_decision": "APPROVED",
+      "state": "failed",
+      "check_retries": 1,
+      "queue_retries": 0,
+      "error_message": "Checks failed after 1 retries: ci/test"
+    },
+    {
+      "pr_url": "https://github.com/o/r/pull/102",
+      "pr_number": 102,
+      "branch": "TestBot/stack/102",
+      "title": "Expose widgets over the API",
+      "review_decision": "APPROVED",
+      "state": "pending",
+      "check_retries": 0,
+      "queue_retries": 0,
+      "error_message": ""
+    }
+  ],
+  "plan": [
+    {
+      "type": "land",
+      "entry_index": 0,
+      "pr_number": 101
+    },
+    {
+      "type": "land",
+      "entry_index": 1,
+      "pr_number": 102
+    }
+  ]
+}

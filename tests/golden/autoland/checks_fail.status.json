@@ -1,0 +1,42 @@
+{
+  "status": "stopped",
+  "branch": "feat",
+  "base": "main",
+  "state_file": "<TMP>/home/.stack-pr/autoland/feat.json",
+  "state_file_exists": true,
+  "lock_file": "<TMP>/home/.stack-pr/autoland/feat.json.lock",
+  "pid": null,
+  "last_saved": "<SAVED>",
+  "abort_reason": "PR #101 checks failed after retries",
+  "resume_command": "stack-pr autoland --resume",
+  "plan": {
+    "total": 2,
+    "done": 0,
+    "remaining": 2,
+    "steps": [
+      {
+        "number": 1,
+        "type": "land",
+        "outcome": "failed",
+        "status": "Failed",
+        "is_next": true,
+        "pr_number": 101,
+        "pr_url": "https://github.com/o/r/pull/101",
+        "title": "Add the widget model",
+        "detail": "Checks failed after 1 retries: ci/test \u00b7 retries CI 1 / MQ 0"
+      },
+      {
+        "number": 2,
+        "type": "land",
+        "outcome": "pending",
+        "status": "Pending",
+        "is_next": false,
+        "pr_number": 102,
+        "pr_url": "https://github.com/o/r/pull/102",
+        "title": "Expose widgets over the API",
+        "detail": null
+      }
+    ]
+  },
+  "other_runs": []
+}

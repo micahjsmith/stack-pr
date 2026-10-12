@@ -1,0 +1,18 @@
+Autoland status
+
+  Status:     Stopped — not running, can be resumed
+  Branch:     feat
+  Base:       main
+  State file: <TMP>/home/.stack-pr/autoland/feat.json
+  Last saved: <SAVED>
+
+
+Autoland plan · 2 steps · 0 done · 2 remaining
+
+→ ❌ 1. Failed  | Land | #101 - Add the widget model
+        ↳ Checks failed after 1 retries: ci/test · retries CI 1 / MQ 0
+  ⬜ 2. Pending | Land | #102 - Expose widgets over the API
+
+ABORTED: PR #101 checks failed after retries
+
+Resume with: stack-pr autoland --resume

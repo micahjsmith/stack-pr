@@ -1,0 +1,78 @@
+
+Discovering stack...
+
+
+Autoland plan · 4 steps · 0 done · 4 remaining
+
+→ ⬜ 1. Pending | Land     | #101 - Add the widget model
+  ⬜ 2. Pending | Workflow | deploy.yaml
+  ⬜ 3. Pending | Confirm  | QA sign-off complete
+  ⬜ 4. Pending | Land     | #102 - Expose widgets over the API
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+============================================================
+Step 1/4: Landing PR #101 — Add the widget model
+============================================================
+PR #101: Checks in progress... — polling in 120s
+PR #101 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #101 to merge queue
+$ gh pr merge 101 --squash
+PR #101: in merge queue (0m) — polling in 120s
+
+PR #101 merged!
+
+Rebasing stack on origin/main...
+$ git fetch origin main
+$ git rebase origin/main
+Re-submitting stack...
+
+============================================================
+Step 2/4: Workflow checkpoint — deploy.yaml
+============================================================
+
+Waiting for workflow: deploy.yaml
+Target SHA: 78e4ec1063c7
+Workflow deploy.yaml: waiting (0m) — polling in 120s
+
+Workflow deploy.yaml completed with SHA 78e4ec1063c7
+
+============================================================
+Step 3/4: Manual confirmation required
+============================================================
+
+Confirm "QA sign-off complete" is complete — ready to proceed?
+
+Next steps:
+  1. Land PR #102: Expose widgets over the API
+Type y/Y then Enter to continue (Ctrl+C to abort): n
+Type 'y' or 'Y' to confirm.
+Type y/Y then Enter to continue (Ctrl+C to abort): y
+Confirmed
+
+============================================================
+Step 4/4: Landing PR #102 — Expose widgets over the API
+============================================================
+PR #102 is not yet approved (REVIEW_REQUIRED). Waiting...
+PR #102: waiting for approval — polling in 120s
+PR #102 is now approved
+PR #102 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #102 to merge queue
+$ gh pr merge 102 --squash
+PR #102: in merge queue (0m) — polling in 120s
+
+PR #102 merged!
+
+
+
+Autoland plan · 4 steps · 4 done · 0 remaining
+
+  ✅ 1. Merged            | Land     | #101 - Add the widget model
+  ✅ 2. Workflow complete | Workflow | deploy.yaml
+  ✅ 3. Confirmed         | Confirm  | QA sign-off complete
+  ✅ 4. Merged            | Land     | #102 - Expose widgets over the API
+
+All PRs landed successfully!
+

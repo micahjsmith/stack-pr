@@ -1,0 +1,78 @@
+
+Discovering stack...
+
+
+Autoland plan · 5 steps · 0 done · 5 remaining
+
+→ ⬜ 1. Pending | Land     | #101 - Add the widget model
+  ⬜ 2. Pending | Land     | #102 - Expose widgets over the API
+  ⬜ 3. Pending | Workflow | deploy.yaml
+  ⬜ 4. Pending | Confirm  | (no condition)
+  ⬜ 5. Pending | Land     | #103 - Show widgets in the dashboard
+Steps 1-2 (#101, #102) will merge together as a GitHub stack.
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+============================================================
+Landing 2 PRs as a GitHub stack: #101, #102
+============================================================
+PR #101 is mergeable (mergeStateStatus=CLEAN)
+
+Merging PRs #101-#102 as a stack
+Stack of 2 PRs up to #102: enqueued (0m) — polling in 120s
+
+PRs #101, #102 merged!
+
+Rebasing stack on origin/main...
+$ git fetch origin main
+$ git rebase origin/main
+Re-submitting stack...
+
+PR #101 already merged, skipping
+
+PR #102 already merged, skipping
+
+============================================================
+Step 3/5: Workflow checkpoint — deploy.yaml
+============================================================
+
+Waiting for workflow: deploy.yaml
+Target SHA: 9cc0a8c62f2d
+Workflow deploy.yaml: waiting (0m) — polling in 120s
+
+Workflow deploy.yaml completed with SHA 9cc0a8c62f2d
+
+============================================================
+Step 4/5: Manual confirmation required
+============================================================
+
+Ready to proceed?
+
+Next steps:
+  1. Land PR #103: Show widgets in the dashboard
+Type y/Y then Enter to continue (Ctrl+C to abort): y
+Confirmed
+
+============================================================
+Step 5/5: Landing PR #103 — Show widgets in the dashboard
+============================================================
+PR #103 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #103 to merge queue
+$ gh pr merge 103 --squash
+PR #103: in merge queue (0m) — polling in 120s
+
+PR #103 merged!
+
+
+
+Autoland plan · 5 steps · 5 done · 0 remaining
+
+  ✅ 1. Merged            | Land     | #101 - Add the widget model
+  ✅ 2. Merged            | Land     | #102 - Expose widgets over the API
+  ✅ 3. Workflow complete | Workflow | deploy.yaml
+  ✅ 4. Confirmed         | Confirm  | (no condition)
+  ✅ 5. Merged            | Land     | #103 - Show widgets in the dashboard
+
+All PRs landed successfully!
+

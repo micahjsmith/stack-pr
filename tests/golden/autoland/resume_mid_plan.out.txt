@@ -1,0 +1,50 @@
+Resuming from checkpoint: <TMP>/home/.stack-pr/autoland/feat.json
+
+Refreshing PR state from GitHub...
+
+Autoland plan · 6 steps · 4 done · 2 remaining
+
+  ✅ 1. Landed            | Land     | #101
+  ✅ 2. Assumed completed | Workflow | deploy.yaml
+  ✅ 3. Assumed completed | Confirm  | QA sign-off complete
+  ✅ 4. Landed            | Land     | #102
+→ ❌ 5. Failed            | Workflow | deploy.yaml
+        ↳ Workflow timed out after 3h
+  ⬜ 6. Pending           | Land     | #103 - Show widgets in the dashboard
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+============================================================
+Step 5/6: Workflow checkpoint — deploy.yaml
+============================================================
+
+Waiting for workflow: deploy.yaml
+Target SHA: 9cc0a8c62f2d
+Workflow deploy.yaml: waiting (0m) — polling in 120s
+
+Workflow deploy.yaml completed with SHA 9cc0a8c62f2d
+
+============================================================
+Step 6/6: Landing PR #103 — Show widgets in the dashboard
+============================================================
+PR #103 is mergeable (mergeStateStatus=CLEAN)
+
+Adding PR #103 to merge queue
+$ gh pr merge 103 --squash
+PR #103: in merge queue (0m) — polling in 120s
+
+PR #103 merged!
+
+
+
+Autoland plan · 6 steps · 6 done · 0 remaining
+
+  ✅ 1. Landed            | Land     | #101
+  ✅ 2. Assumed completed | Workflow | deploy.yaml
+  ✅ 3. Assumed completed | Confirm  | QA sign-off complete
+  ✅ 4. Landed            | Land     | #102
+  ✅ 5. Workflow complete | Workflow | deploy.yaml
+  ✅ 6. Merged            | Land     | #103 - Show widgets in the dashboard
+
+All PRs landed successfully!
+
