@@ -86,7 +86,11 @@ class StackMergeUnit(ExecutionUnit):
                 entries = stack_merge_run(uc.run, range(index, self.span.stop))
                 if entries:
                     result = land_as_native_stack(
-                        entries, ctx=uc.run, common=uc.common, opts=uc.opts
+                        entries,
+                        ctx=uc.run,
+                        common=uc.common,
+                        opts=uc.opts,
+                        services=uc.services,
                     )
                     if result.abort_reason:
                         return result.abort_reason

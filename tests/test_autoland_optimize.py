@@ -17,7 +17,6 @@ from stack_pr.autoland.model import (
     PRState,
     WorkflowStep,
 )
-from stack_pr.autoland.native_stack import NativeStackMergeResult
 from stack_pr.autoland.optimize import (
     ExecutionUnit,
     PolicyRegistry,
@@ -29,8 +28,8 @@ from stack_pr.autoland.optimize import (
 from stack_pr.autoland.options import AutolandOptions
 from stack_pr.autoland.state import AutolandCheckpointer
 from stack_pr.autoland.steps import AutolandStep, StepResult
+from tests.autoland_fakes import OPTS, FakeRepo, FakeServices, FakeUI, stack
 from tests.helpers import common_args
-from tests.test_autoland_step_execution import OPTS, FakeUI, services, stack
 
 STACKED = dataclasses.replace(OPTS, merge_as_stack=True)
 
@@ -167,14 +166,14 @@ def test_merge_as_stack_off_leaves_every_step_on_its_own() -> None:
     ]
 
 
-def test_preview_announces_each_stack_merge(mocker) -> None:  # noqa: ANN001
-    console = mocker.patch("stack_pr.autoland.runtime.console")
+def test_preview_announces_each_stack_merge() -> None:
+    ui = FakeUI()
     plan = [*land(0, 1), WorkflowStep(workflow="deploy.yaml"), *land(2, 3)]
     run = LandingContext(stack=stack(101, 102, 103, 104), plan=plan)
 
-    engine.print_execution_preview(run, STACKED)
+    engine.print_execution_preview(run, STACKED, ui=ui)
 
-    assert [c.args[0] for c in console.print.call_args_list] == [
+    assert ui.lines == [
         "[dim]Steps 1-2 (#101, #102) will merge together as a GitHub stack.[/dim]",
         "[dim]Steps 4-5 (#103, #104) will merge together as a GitHub stack.[/dim]",
     ]
@@ -186,10 +185,15 @@ def test_preview_announces_each_stack_merge(mocker) -> None:  # noqa: ANN001
 
 
 class _Recorder:
-    """A UnitContext's callbacks, recording what the unit does in order."""
+    """A UnitContext's callbacks, recording what the unit does in order.
 
-    def __init__(self, run: LandingContext) -> None:
+    The unit's stack merges go to ``fakes.github``, where each PR is approved,
+    its checks pass, and a merge request merges the whole stack.
+    """
+
+    def __init__(self, run: LandingContext, fakes: FakeServices | None = None) -> None:
         self.run = run
+        self.fakes = fakes or FakeServices()
         self.events: list[object] = []
         self.abort_at: int | None = None
 
@@ -198,7 +202,7 @@ class _Recorder:
             run=self.run,
             opts=STACKED,
             common=common_args(),
-            services=services(),
+            services=self.fakes.services,
             enter=lambda i: self.events.append(("enter", i)),
             execute_step=self.execute_step,
             checkpoint=lambda: self.events.append("checkpoint"),
@@ -211,16 +215,17 @@ class _Recorder:
         return StepResult.done()
 
 
-def _stack_merge(mocker, results: list[NativeStackMergeResult]):  # noqa: ANN001, ANN202
-    """Patch the stack merge to return *results* in turn; return the mock."""
-    return mocker.patch(
-        "stack_pr.autoland.optimize.stack_merge.land_as_native_stack",
-        side_effect=results,
-    )
+def _falls_through() -> FakeServices:
+    """Fakes on which every stack merge falls through: the GitHub stack can't
+    be created, so the PRs are to be landed one at a time."""
+    fakes = FakeServices()
+    fakes.github.create_error = "HTTP 422"
+    return fakes
 
 
-def _merged_prs(merge) -> list[list[int]]:  # noqa: ANN001
-    return [[e.pr_number for e in c.args[0]] for c in merge.call_args_list]
+def _merged_prs(fakes: FakeServices) -> list[list[int]]:
+    """The PRs of each stack merge attempted, bottom first."""
+    return fakes.github.stack_requests
 
 
 def _unit(run: LandingContext) -> StackMergeUnit:
@@ -229,23 +234,14 @@ def _unit(run: LandingContext) -> StackMergeUnit:
     return unit
 
 
-def test_stack_merge_then_each_step_executes(mocker) -> None:  # noqa: ANN001
+def test_stack_merge_then_each_step_executes() -> None:
     run = LandingContext(stack=stack(101, 102, 103), plan=land(0, 1, 2))
-
-    def lands(entries, **_kw) -> NativeStackMergeResult:  # noqa: ANN001, ANN003
-        for e in entries:
-            e.state = PRState.MERGED
-        return NativeStackMergeResult(landed=True)
-
-    merge = mocker.patch(
-        "stack_pr.autoland.optimize.stack_merge.land_as_native_stack",
-        side_effect=lands,
-    )
     recorder = _Recorder(run)
 
     assert _unit(run).execute(recorder.context()) == ""
 
-    assert _merged_prs(merge) == [[101, 102, 103]]
+    assert _merged_prs(recorder.fakes) == [[101, 102, 103]]
+    assert all(e.state == PRState.MERGED for e in run.stack)
     # Each step is entered (checkpointed as current) before any of its work.
     assert recorder.events == [
         ("enter", 0),
@@ -258,17 +254,14 @@ def test_stack_merge_then_each_step_executes(mocker) -> None:  # noqa: ANN001
     ]
 
 
-def test_a_stack_merge_that_falls_through_lands_the_rest_one_at_a_time(
-    mocker,  # noqa: ANN001
-) -> None:
+def test_a_stack_merge_that_falls_through_lands_the_rest_one_at_a_time() -> None:
     run = LandingContext(stack=stack(101, 102, 103), plan=land(0, 1, 2))
-    merge = _stack_merge(mocker, [NativeStackMergeResult(landed=False)])
-    recorder = _Recorder(run)
+    recorder = _Recorder(run, _falls_through())
 
     assert _unit(run).execute(recorder.context()) == ""
 
     # The merge is not retried for the steps it covered.
-    assert _merged_prs(merge) == [[101, 102, 103]]
+    assert _merged_prs(recorder.fakes) == [[101, 102, 103]]
     assert [e for e in recorder.events if e != "checkpoint"] == [
         ("enter", 0),
         ("step", 0),
@@ -279,13 +272,11 @@ def test_a_stack_merge_that_falls_through_lands_the_rest_one_at_a_time(
     ]
 
 
-def test_a_stack_merge_abort_stops_before_the_step(mocker) -> None:  # noqa: ANN001
-    run = LandingContext(stack=stack(101, 102), plan=land(0, 1))
-    _stack_merge(
-        mocker,
-        [NativeStackMergeResult(abort_reason="Rebase failed after merging #102: boom")],
-    )
-    recorder = _Recorder(run)
+def test_a_stack_merge_abort_stops_before_the_step() -> None:
+    # #103 stays open above the run, so the stack is rebased after the merge.
+    run = LandingContext(stack=stack(101, 102, 103), plan=land(0, 1))
+    fakes = FakeServices(repo=FakeRepo(rebase_error=RuntimeError("boom")))
+    recorder = _Recorder(run, fakes)
 
     assert (
         _unit(run).execute(recorder.context())
@@ -294,28 +285,26 @@ def test_a_stack_merge_abort_stops_before_the_step(mocker) -> None:  # noqa: ANN
     assert recorder.events == [("enter", 0)]
 
 
-def test_a_step_abort_stops_the_unit(mocker) -> None:  # noqa: ANN001
+def test_a_step_abort_stops_the_unit() -> None:
     run = LandingContext(stack=stack(101, 102, 103), plan=land(0, 1, 2))
-    _stack_merge(mocker, [NativeStackMergeResult(landed=False)])
-    recorder = _Recorder(run)
+    recorder = _Recorder(run, _falls_through())
     recorder.abort_at = 1
 
     assert _unit(run).execute(recorder.context()) == "step 1 failed"
     assert ("enter", 2) not in recorder.events
 
 
-def test_the_run_is_revalidated_when_the_unit_executes(mocker) -> None:  # noqa: ANN001
+def test_the_run_is_revalidated_when_the_unit_executes() -> None:
     run = LandingContext(stack=stack(101, 102, 103), plan=land(0, 1, 2))
     unit = _unit(run)
     # Merged elsewhere after the plan was optimized.
     run.stack[0].state = PRState.MERGED
-    merge = _stack_merge(mocker, [NativeStackMergeResult(landed=True)])
     recorder = _Recorder(run)
 
     assert unit.execute(recorder.context()) == ""
 
     # Step 0 now only skips; the stack merge starts above it.
-    assert _merged_prs(merge) == [[102, 103]]
+    assert _merged_prs(recorder.fakes) == [[102, 103]]
     assert recorder.events[:4] == [
         ("enter", 0),
         ("step", 0),
@@ -324,16 +313,17 @@ def test_the_run_is_revalidated_when_the_unit_executes(mocker) -> None:  # noqa:
     ]
 
 
-def test_a_run_shortened_to_one_pr_is_not_stack_merged(mocker) -> None:  # noqa: ANN001
+def test_a_run_shortened_to_one_pr_is_not_stack_merged() -> None:
     run = LandingContext(stack=stack(101, 102), plan=land(0, 1))
     unit = _unit(run)
     run.stack[1].state = PRState.MERGED
-    merge = _stack_merge(mocker, [])
     recorder = _Recorder(run)
 
     assert unit.execute(recorder.context()) == ""
 
-    merge.assert_not_called()
+    # No stack merge, so nothing asked GitHub or waited on a PR.
+    assert recorder.fakes.github.calls == []
+    assert recorder.fakes.ui.lines == []
     assert recorder.events == [("enter", 0), ("step", 0), ("enter", 1), ("step", 1)]
 
 
@@ -396,19 +386,19 @@ def test_a_policy_defined_outside_the_package_shapes_execution(
         path=tmp_path / "state.json", branch="feat", base="main"
     )
     saves = mocker.spy(checkpointer, "save")
-    console = mocker.patch("stack_pr.autoland.runtime.console")
+    preview, fakes = FakeUI(), FakeServices()
 
-    engine.print_execution_preview(run, OPTS, policies=registry)
+    engine.print_execution_preview(run, OPTS, ui=preview, policies=registry)
     assert engine.execute_plan(
         run,
         common_args(),
         OPTS,
         checkpointer,
-        services=services(FakeUI()),
+        services=fakes.services,
         policies=registry,
     )
 
-    assert [c.args[0] for c in console.print.call_args_list] == ["pair 0"]
+    assert preview.lines == ["pair 0"]
     assert log == ["pair 0"]
     assert run.current_step == len(plan)
     # One checkpoint as each step is entered, and one at the end.

@@ -28,24 +28,31 @@ Modules, roughly bottom of the dependency graph first:
 - ``checks``: evaluating CI checks.
 - ``plan``: generating, formatting, parsing, and replanning landing plans.
 - ``display``: rendering a plan's progress.
+- ``repo``: the local clone (fetch, ancestry, landed SHAs, rebase + resubmit).
 - ``waits``: waiting for approval, checks, the merge queue, and workflows.
 - ``native_stack``: merging a run of land steps as one GitHub stack.
-- ``services``: the tools a step uses as it executes (console, GitHub, the
-  waits, the repo), and their production bindings.
+- ``services``: the tools a plan's execution uses (console, GitHub, sleep,
+  the repo, the waits), and their production bindings.
 - ``optimize``: execution units, the plan optimization policies that group
   steps into them (e.g. ``--merge-as-stack``), and the registry of policies.
 - ``engine``: optimizing and executing a plan.
 - ``status``: the ``--status`` report.
 - ``commands``: the subparser, and the fresh / resume / replan flows.
 
-Convention for shared state and patch targets: a module-level singleton
-(``runtime.console``, the ``gh.github`` client, ``runtime.HAVE_RICH``,
-``display.GLYPHS``) lives in exactly one module, and other modules reach it
-through that module -- ``from stack_pr.autoland import runtime``, then
-``runtime.console`` -- never ``from stack_pr.autoland.runtime import console``.
-The same goes for a function that tests replace to intercept calls made from
-another module: ``runtime.run``, ``runtime.resilient_sleep``, the
-``waits.wait_for_*`` helpers, ``engine.execute_plan``, the ``discovery``
+Executing a plan (the engine, the steps, the execution units, the waits, the
+stack merge, and the repo operations) uses only the ``services.Services`` it
+is given, so tests inject fakes there instead of patching modules.
+
+Convention for the shared state that remains, and its patch targets: a
+module-level singleton (``runtime.console``, the ``gh.github`` client,
+``runtime.HAVE_RICH``, ``display.GLYPHS``) lives in exactly one module, and
+other modules reach it through that module -- ``from stack_pr.autoland import
+runtime``, then ``runtime.console`` -- never ``from stack_pr.autoland.runtime
+import console``. ``Services.production()`` binds the singletons as they are
+when it is called; the command flows' own output, ``--status``, plan parsing,
+discovery, and the shell runner use them directly. The same goes for a
+function that tests replace to intercept calls made from another module:
+``runtime.resilient_sleep``, ``engine.execute_plan``, the ``discovery``
 functions, and ``stack_pr.git.get_current_branch_name``. Each therefore has one
 canonical patch target, e.g. ``mocker.patch("stack_pr.autoland.runtime.console")``,
 and a patch can't silently miss a stale copy bound in another module. (A name
