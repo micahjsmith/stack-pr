@@ -20,7 +20,7 @@ from stack_pr.autoland.display import (
     print_status,
 )
 from stack_pr.autoland.model import (
-    _STEP_TYPES,
+    ConfirmStep,
     LandingContext,
     LandStep,
     PlanStep,
@@ -210,7 +210,7 @@ def _print_status_text(report: _StatusReport) -> None:
 def _step_json(step: PlanStep, row: _StepRow, ctx: LandingContext) -> dict:
     data: dict[str, Any] = {
         "number": int(row.number.rstrip(".")),
-        "type": _STEP_TYPES[type(step)],
+        "type": step.kind,
         "outcome": row.outcome.value,
         "status": row.status,
         "is_next": row.is_next,
@@ -223,6 +223,7 @@ def _step_json(step: PlanStep, row: _StepRow, ctx: LandingContext) -> dict:
     elif isinstance(step, WorkflowStep):
         data["workflow"] = step.workflow
     else:
+        assert isinstance(step, ConfirmStep)  # the only step type left
         data["condition"] = step.condition
     data["detail"] = row.detail or None
     return data

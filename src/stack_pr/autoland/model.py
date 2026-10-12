@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Union
+
+from stack_pr.autoland.steps import (
+    AutolandStep,
+    ConfirmStep,
+    LandStep,
+    WorkflowStep,
+    step_from_dict,
+)
+
+__all__ = [
+    "AutolandStep",
+    "ConfirmStep",
+    "LandStep",
+    "LandingContext",
+    "PRState",
+    "PlanStep",
+    "StackEntry",
+    "WorkflowStep",
+]
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -47,51 +65,9 @@ class StackEntry:
         return self.state == PRState.MERGED
 
 
-@dataclass
-class LandStep:
-    """Land a PR in the stack through the merge queue.
-
-    ``entry_index`` indexes into ``LandingContext.stack``, or is ``-1`` for a
-    PR that has already landed: such a PR is no longer part of the stack, so
-    the step is skipped at execution time.
-
-    ``pr_number`` is set when the plan pinned a specific PR (``l 123``) and is
-    ``None`` for a bare, positional ``l``. It is the only thing identifying an
-    already-landed step, so it is always set when ``entry_index`` is ``-1``.
-    """
-
-    entry_index: int
-    pr_number: int | None = None
-
-    @property
-    def already_landed(self) -> bool:
-        return self.entry_index < 0
-
-
-@dataclass
-class WorkflowStep:
-    """Wait for a GitHub Actions workflow to succeed with the landed code."""
-
-    workflow: str
-    state: str = "pending"  # pending, waiting, succeeded, failed, skipped
-    error_message: str = ""
-
-
-@dataclass
-class ConfirmStep:
-    """Pause for manual confirmation before continuing.
-
-    ``condition`` is an optional human-readable thing to verify before
-    proceeding (e.g. ``"QA sign-off complete"``). When set, it is shown in the
-    confirmation prompt; when empty, a generic prompt is shown. Either way the
-    step waits until the user types ``y``/``Y`` and presses Enter.
-    """
-
-    condition: str = ""
-    confirmed: bool = False
-
-
-PlanStep = Union[LandStep, WorkflowStep, ConfirmStep]
+# The step types live in the steps package; re-exported here, where the rest of
+# autoland has always imported them from. PlanStep predates the base class.
+PlanStep = AutolandStep
 
 
 @dataclass
@@ -112,9 +88,6 @@ class LandingContext:
         return self.aborted
 
 
-_STEP_TYPES = {LandStep: "land", WorkflowStep: "workflow", ConfirmStep: "confirm"}
-
-
 def _deserialize_entry(data: dict) -> StackEntry:
     return StackEntry(
         pr_url=data["pr_url"],
@@ -130,14 +103,9 @@ def _deserialize_entry(data: dict) -> StackEntry:
 
 
 def _serialize_step(step: PlanStep) -> dict:
-    # dataclasses.asdict gives the fields; tag the type for deserialization.
-    return {"type": _STEP_TYPES[type(step)], **asdict(step)}
+    return step.to_dict()
 
 
 def _deserialize_step(data: dict) -> PlanStep:
-    fields = {k: v for k, v in data.items() if k != "type"}
-    if data["type"] == "land":
-        return LandStep(**fields)
-    if data["type"] == "workflow":
-        return WorkflowStep(**fields)
-    return ConfirmStep(**fields)
+    """Raises ValueError for a step type no registered step class handles."""
+    return step_from_dict(data)
