@@ -17,7 +17,8 @@ Modules, roughly bottom of the dependency graph first:
 - ``options``: AutolandOptions, resolved from flags, config, and defaults.
 - ``runtime``: the console, sleep/wake resilience, and the retrying ``run``.
 - ``steps``: the AutolandStep base class, the registry of step types, and one
-  module per type, each owning its plan syntax, persistence, and progress.
+  module per type, each owning its plan syntax, persistence, progress, view,
+  and execution; plus StepContext/StepResult, what a step executes with.
 - ``model``: the stack, plan steps, and LandingContext, and their
   (de)serialization.
 - ``state``: the checkpoint (``--resume``) and the per-branch lock.
@@ -29,6 +30,8 @@ Modules, roughly bottom of the dependency graph first:
 - ``display``: rendering a plan's progress.
 - ``waits``: waiting for approval, checks, the merge queue, and workflows.
 - ``native_stack``: merging a run of land steps as one GitHub stack.
+- ``services``: the tools a step uses as it executes (console, GitHub, the
+  waits, the repo), and their production bindings.
 - ``engine``: executing a plan.
 - ``status``: the ``--status`` report.
 - ``commands``: the subparser, and the fresh / resume / replan flows.

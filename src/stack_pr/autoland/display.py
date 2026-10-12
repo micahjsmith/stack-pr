@@ -311,13 +311,3 @@ def _describe_step(step: PlanStep, ctx: LandingContext) -> str:
     differently.
     """
     return step.view(ctx.stack, is_next=False, assumed_completed=False).description
-
-
-def _next_steps_lines(
-    plan: list[PlanStep], from_index: int, ctx: LandingContext
-) -> list[str]:
-    """Numbered, markup-safe descriptions of the plan steps after `from_index`."""
-    return [
-        f"  {n}. {_escape_markup(_describe_step(s, ctx))}"
-        for n, s in enumerate(plan[from_index + 1 :], 1)
-    ]

@@ -11,6 +11,7 @@ from stack_pr.autoland.steps.base import (
     ReplanKey,
     register_step,
 )
+from stack_pr.autoland.steps.execution import StepContext, StepResult
 from stack_pr.autoland.steps.view import StepOutcome, StepTone, StepView
 
 if TYPE_CHECKING:
@@ -87,3 +88,41 @@ class ConfirmStep(AutolandStep):
             ),
             data={"condition": self.condition},
         )
+
+    def execute(self, sc: StepContext) -> StepResult:
+        """Show what comes next, and wait for the user to type y or Y."""
+        if self.confirmed:
+            return StepResult.done()
+        ui = sc.services.ui
+        question = (
+            f'Confirm "{ui.escape(self.condition)}" is complete — ready to proceed?'
+            if self.condition
+            else "Ready to proceed?"
+        )
+        lines = [
+            sc.banner("Manual confirmation required", style="bold yellow") + "\n",
+            f"[bold]{question}[/bold]\n",
+        ]
+        upcoming = sc.upcoming()
+        if upcoming:
+            lines.append("[bold]Next steps:[/bold]")
+            lines.extend(f"  {n}. {ui.escape(d)}" for n, d in enumerate(upcoming, 1))
+        else:
+            lines.append("[dim]This is the final step in the plan.[/dim]")
+        ui.print("\n".join(lines))
+        while True:
+            try:
+                answer = ui.input(
+                    "[yellow]Type y/Y then Enter to continue (Ctrl+C to abort): "
+                    "[/yellow]"
+                ).strip()
+            except EOFError:
+                return StepResult.abort(
+                    "Confirm step received EOF — cannot confirm in non-interactive mode"
+                )
+            if answer in ("y", "Y"):
+                break
+            ui.print("[dim]Type 'y' or 'Y' to confirm.[/dim]")
+        self.confirmed = True
+        ui.print("[green]Confirmed[/green]")
+        return StepResult.done()

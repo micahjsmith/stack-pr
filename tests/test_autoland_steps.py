@@ -20,8 +20,10 @@ from stack_pr.autoland.steps import (
     ConfirmStep,
     LandStep,
     PlanParser,
+    StepContext,
     StepOutcome,
     StepRegistry,
+    StepResult,
     StepTone,
     StepView,
     WorkflowStep,
@@ -105,6 +107,9 @@ class _Dummy(AutolandStep):
             key="d",
             description="Dummy",
         )
+
+    def execute(self, sc: StepContext) -> StepResult:
+        return StepResult.done()
 
 
 @pytest.mark.parametrize(

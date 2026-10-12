@@ -27,6 +27,7 @@ from stack_pr.autoland.plan import (
     parse_plan,
     plan_from_file,
 )
+from stack_pr.autoland.services import Services
 from stack_pr.autoland.state import AutolandCheckpointer, AutolandLock, _state_path
 from stack_pr.autoland.status import show_status
 from stack_pr.autoland.worktree import Worktree
@@ -428,7 +429,9 @@ def _run_fresh(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             checkpointer,
             worktree,
             opts,
-            success=engine.execute_plan(ctx, common, opts, checkpointer),
+            success=engine.execute_plan(
+                ctx, common, opts, checkpointer, services=Services.production()
+            ),
         )
     finally:
         if worktree is not None:
@@ -501,7 +504,9 @@ def _run_resume(common: cli.CommonArgs, opts: AutolandOptions) -> None:
             checkpointer,
             worktree,
             opts,
-            success=engine.execute_plan(ctx, common, opts, checkpointer),
+            success=engine.execute_plan(
+                ctx, common, opts, checkpointer, services=Services.production()
+            ),
         )
     finally:
         if worktree is not None:
@@ -723,7 +728,9 @@ def _replan(common: cli.CommonArgs, opts: AutolandOptions, state_path: Path) -> 
             checkpointer,
             worktree,
             opts,
-            success=engine.execute_plan(ctx, common, opts, checkpointer),
+            success=engine.execute_plan(
+                ctx, common, opts, checkpointer, services=Services.production()
+            ),
         )
     finally:
         if worktree is not None:

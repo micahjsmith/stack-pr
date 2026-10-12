@@ -2,7 +2,8 @@
 
 A step type owns everything that differs by kind of step: how it is spelled in
 a plan file, how it is stored in the state file, how it counts toward a run's
-progress, and what it reports about itself for display (a ``StepView``). Code
+progress, what it reports about itself for display (a ``StepView``), and how
+it executes (given a ``StepContext``, returning a ``StepResult``). Code
 that walks a plan calls these methods instead of switching on the step's type,
 so adding a step type means adding a class here rather than a branch in every
 module that handles plans.
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 if TYPE_CHECKING:
     from stack_pr.autoland.model import StackEntry
+    from stack_pr.autoland.steps.execution import StepContext, StepResult
     from stack_pr.autoland.steps.view import StepView
 
 # A workflow or confirm step's identity for replanning: its keyword, its text,
@@ -131,6 +133,16 @@ class AutolandStep(ABC):
         ``is_next`` is whether this is the next step with work left to do, and
         ``assumed_completed`` whether it sits inside the plan's already-landed
         prefix (see ``plan.is_assumed_completed``).
+        """
+
+    # --- execution -----------------------------------------------------------
+
+    @abstractmethod
+    def execute(self, sc: StepContext) -> StepResult:
+        """Do the step's work, or nothing if it is already done.
+
+        A step is independent of every other: it sees the run only through
+        *sc*, and uses only ``sc.services`` to reach the outside world.
         """
 
 
