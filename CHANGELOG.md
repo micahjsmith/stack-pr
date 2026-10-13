@@ -1,5 +1,17 @@
 # Top of tree
 
+* `autoland` now works on branches without a merge queue. It asks GitHub
+  whether the target branch has one when it starts; without one, it
+  squash-merges each PR itself once the PR is approved, passing, and
+  mergeable, with the same commit message `stack-pr land` would use (the
+  commit's message without the stack-info trailer, numbered with the PR),
+  pinned to the commit it checked. A failed merge is retried after approval
+  and CI are checked again (`max_queue_retries`), and a branch that has fallen
+  behind a target that requires it to be up to date is reported and waited
+  on. A PR being merged this way shows as `Merging` rather than `In merge
+  queue`. `autoland.merge_queue` is no longer required: unset (the new
+  default), the mode is detected; `true` or `false` forces it. Runs on
+  branches with a merge queue behave as before.
 * `autoland` plans have a new step, `x <command>`, which runs a command once
   the PRs before it have landed and stops the land unless it exits 0 — for
   automating what would otherwise be a manual `c` step, such as provisioning.

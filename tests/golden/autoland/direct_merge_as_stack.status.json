@@ -1,0 +1,62 @@
+{
+  "status": "stopped",
+  "branch": "feat",
+  "base": "main",
+  "state_file": "<TMP>/home/.stack-pr/autoland/feat.json",
+  "state_file_exists": true,
+  "lock_file": "<TMP>/home/.stack-pr/autoland/feat.json.lock",
+  "pid": null,
+  "last_saved": "<SAVED>",
+  "abort_reason": null,
+  "resume_command": "stack-pr autoland --resume",
+  "plan": {
+    "total": 4,
+    "done": 4,
+    "remaining": 0,
+    "steps": [
+      {
+        "number": 1,
+        "type": "land",
+        "outcome": "done",
+        "status": "Merged",
+        "is_next": false,
+        "pr_number": 101,
+        "pr_url": "https://github.com/o/r/pull/101",
+        "title": "Add the widget model",
+        "detail": null
+      },
+      {
+        "number": 2,
+        "type": "land",
+        "outcome": "done",
+        "status": "Merged",
+        "is_next": false,
+        "pr_number": 102,
+        "pr_url": "https://github.com/o/r/pull/102",
+        "title": "Expose widgets over the API",
+        "detail": null
+      },
+      {
+        "number": 3,
+        "type": "workflow",
+        "outcome": "done",
+        "status": "Workflow complete",
+        "is_next": false,
+        "workflow": "deploy.yaml",
+        "detail": null
+      },
+      {
+        "number": 4,
+        "type": "land",
+        "outcome": "done",
+        "status": "Merged",
+        "is_next": false,
+        "pr_number": 103,
+        "pr_url": "https://github.com/o/r/pull/103",
+        "title": "Show widgets in the dashboard",
+        "detail": null
+      }
+    ]
+  },
+  "other_runs": []
+}

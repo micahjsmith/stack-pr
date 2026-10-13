@@ -34,6 +34,7 @@ _PR_STATE_STATUS = {
         StepTone.AWAITING_CHECKS,
     ),
     PRState.IN_MERGE_QUEUE: (StepOutcome.ACTIVE, "In merge queue", StepTone.IN_QUEUE),
+    PRState.MERGING: (StepOutcome.ACTIVE, "Merging", StepTone.MERGING),
     PRState.WAITING_FOR_WORKFLOW: (
         StepOutcome.ACTIVE,
         "Waiting for workflow",
@@ -47,7 +48,7 @@ _PR_STATE_STATUS = {
 @register_step
 @dataclass
 class LandStep(AutolandStep):
-    """Land a PR in the stack through the merge queue.
+    """Land a PR in the stack, through the merge queue or directly.
 
     ``entry_index`` indexes into ``LandingContext.stack``, or is ``-1`` for a
     PR that has already landed: such a PR is no longer part of the stack, so
@@ -146,8 +147,9 @@ class LandStep(AutolandStep):
         )
 
     def execute(self, sc: StepContext) -> StepResult:
-        """Wait for approval and checks, merge through the queue, then rebase
-        and re-submit whatever is left of the stack above."""
+        """Wait for approval and checks, merge (through the queue, or
+        directly), then rebase and re-submit whatever is left of the stack
+        above."""
         ui, repo = sc.services.ui, sc.services.repo
         if self.already_landed:
             ui.print(f"\n[green]PR #{self.pr_number} already landed, skipping[/green]")
@@ -179,7 +181,7 @@ class LandStep(AutolandStep):
             return StepResult.abort(
                 f"PR #{entry.pr_number} checks failed after retries"
             )
-        if not entry.is_merged() and not waits.enqueue_and_wait(entry, opts=opts):
+        if not entry.is_merged() and not waits.merge_and_wait(entry, opts=opts):
             return StepResult.abort(f"PR #{entry.pr_number} failed to merge")
         landed_sha = repo.landed_sha(sc.common, entry.pr_number)
 

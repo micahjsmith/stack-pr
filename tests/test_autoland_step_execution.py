@@ -102,7 +102,7 @@ def test_land_step_lands_and_rebases_the_stack_above() -> None:
     )
 
     assert result == StepResult(landed_sha="sha101")
-    assert waits.calls == ["approval", "checks", "queue"]
+    assert waits.calls == ["approval", "checks", "merge"]
     assert entries[0].is_merged()
     assert repo.lookups == [101]
     assert repo.rebases == 1
@@ -168,9 +168,9 @@ def test_already_landed_step_reports_its_sha_only_at_the_end_of_the_prefix(
     [
         (FakeWaits(approval=fails), "PR #101 was closed while waiting for approval"),
         (FakeWaits(checks=fails), "PR #101 checks failed after retries"),
-        (FakeWaits(queue=fails), "PR #101 failed to merge"),
+        (FakeWaits(merge=fails), "PR #101 failed to merge"),
     ],
-    ids=["approval", "checks", "queue"],
+    ids=["approval", "checks", "merge"],
 )
 def test_land_step_aborts_when_a_wait_fails(waits: FakeWaits, reason: str) -> None:
     repo = FakeRepo(shas={101: "sha101"})

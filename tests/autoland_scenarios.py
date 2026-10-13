@@ -104,6 +104,7 @@ class FakePR:
             "mergeStateStatus": self.merge_state,
             "mergeable": "MERGEABLE",
             "mergeCommit": {"oid": self.merge_commit} if self.merge_commit else None,
+            "headRefOid": commit_sha(self.number),
         }
         return {f: values[f] for f in fields.split(",")}
 
@@ -127,6 +128,12 @@ class FakeWorld:
     stack_merge_message: str = ""
     # An ``x`` step's command line -> the status it exits with.
     commands: dict[str, int] = field(default_factory=dict)
+    # Whether the target branch has a merge queue; whether asking GitHub that
+    # fails; and how many direct merges (``gh pr merge`` without a queue) fail
+    # before they go through.
+    has_queue: bool = True
+    queue_lookup_fails: bool = False
+    merge_failures: int = 0
 
     main_head: str = field(default_factory=lambda: sha("main-0"))
     stacks: dict[int, list[int]] = field(default_factory=dict)
@@ -191,7 +198,10 @@ class FakeWorld:
             return json.dumps(self._checks(self.prs[int(args[2])]))
         if sub == ["pr", "merge"]:
             pr = self.prs[int(args[2])]
-            pr.queued_for = pr.queue_ticks
+            if self.has_queue:
+                pr.queued_for = pr.queue_ticks
+            else:
+                self._merge_directly(pr, args)
             return ""
         if sub == ["pr", "edit"]:
             return ""
@@ -244,13 +254,38 @@ class FakeWorld:
             )
         return [dict(r) for r in runs[:10]]
 
+    def _merge_directly(self, pr: FakePR, args: list[str]) -> None:
+        """``gh pr merge`` on a branch without a queue merges at once, as the
+        commit it is pinned to."""
+        assert args[args.index("--match-head-commit") + 1] == commit_sha(pr.number)
+        if self.merge_failures:
+            self.merge_failures -= 1
+            raise subprocess.CalledProcessError(
+                1,
+                ["gh", *args],
+                stderr="GraphQL: Base branch was modified. Review and try the "
+                "merge again. (mergePullRequest)",
+            )
+        self.merge(pr)
+
+    def _commit(self, commit: str) -> dict:
+        """A PR's commit, with the message stack-pr gave it."""
+        pr = next(p for p in self.prs.values() if commit_sha(p.number) == commit)
+        trailer = f"stack-info: PR: {PR_URL.format(pr.number)}, branch: {pr.branch}"
+        return {"sha": commit, "commit": {"message": f"{pr.title}\n\n{trailer}"}}
+
     def _graphql(self, args: list[str]) -> dict:
         params = dict(a.split("=", 1) for a in args[3::2])
         if "number" in params:
             queued = self.prs[int(params["number"])].queued_for is not None
             entry = {"id": "MQE_1", "state": "QUEUED"} if queued else None
             return {"data": {"repository": {"pullRequest": {"mergeQueueEntry": entry}}}}
-        return {"data": {"repository": {"mergeQueue": {"id": "MQ_1"}}}}
+        if self.queue_lookup_fails:
+            raise subprocess.CalledProcessError(
+                1, ["gh", *args], stderr="HTTP 502: Bad Gateway"
+            )
+        queue = {"id": "MQ_1"} if self.has_queue else None
+        return {"data": {"repository": {"mergeQueue": queue}}}
 
     def _stack_json(self, number: int) -> dict:
         return {
@@ -261,7 +296,9 @@ class FakeWorld:
             ],
         }
 
-    def _rest(self, method: str, path: str, body: dict | None) -> Any:
+    def _rest(self, method: str, path: str, body: dict | None) -> Any:  # noqa: PLR0911
+        if method == "GET" and path.startswith("commits/"):
+            return self._commit(path.split("/", 1)[1])
         if method == "GET" and path.startswith("stacks?pull_request="):
             pr = int(path.split("=", 1)[1])
             return [self._stack_json(n) for n, prs in self.stacks.items() if pr in prs]
@@ -275,7 +312,8 @@ class FakeWorld:
             self.stacks.pop(int(path.split("/")[1]))
             return None
         if method == "PUT" and path.endswith("/merge-async"):
-            return self._merge_async(int(path.split("/")[1]))
+            assert body is not None
+            return self._merge_async(int(path.split("/")[1]), body)
         if method == "GET" and "/merge-async/" in path:
             prs = self.merge_requests[path.rsplit("/", 1)[1]]
             if self.stack_merge == "fail":
@@ -287,7 +325,14 @@ class FakeWorld:
             return {"status": "merged" if merged else "enqueued"}
         raise AssertionError(f"unexpected gh api call: {method} {path}")
 
-    def _merge_async(self, top: int) -> dict:
+    def _merge_async(self, top: int, body: dict) -> dict:
+        # GitHub rejects a request that doesn't match whether there is a queue.
+        expected = (
+            {"merge_action": "merge_queue"}
+            if self.has_queue
+            else {"merge_action": "direct_merge", "merge_method": "squash"}
+        )
+        assert body == expected, body
         native = next(prs for prs in self.stacks.values() if top in prs)
         prs = [
             n for n in native[: native.index(top) + 1] if self.prs[n].state == "OPEN"
@@ -296,6 +341,9 @@ class FakeWorld:
         self.merge_requests[uuid] = prs
         if self.stack_merge == "fail":
             for n in self.stack_merge_lands:
+                self.merge(self.prs[n])
+        elif not self.has_queue:
+            for n in prs:
                 self.merge(self.prs[n])
         else:
             for n in prs:
@@ -323,8 +371,8 @@ class Scenario:
     plan: str | None = None
     # Extra autoland flags (the plan file and the state file are added).
     flags: list[str] = field(default_factory=list)
-    # [autoland] config, on top of the defaults below.
-    config: dict[str, str] = field(default_factory=dict)
+    # [autoland] config, on top of the defaults below; None unsets a default.
+    config: dict[str, str | None] = field(default_factory=dict)
     # What the user types at each prompt; input after that is EOF.
     answers: list[str] = field(default_factory=list)
     workflows: dict[str, str] = field(default_factory=dict)
@@ -333,6 +381,12 @@ class Scenario:
     stack_merge_message: str = ""
     # An ``x`` step's command line -> the status it exits with.
     commands: dict[str, int] = field(default_factory=dict)
+    # Whether the target branch has a merge queue (the default config also
+    # says it does), whether asking GitHub that fails, and how many direct
+    # merges fail before one goes through.
+    has_queue: bool = True
+    queue_lookup_fails: bool = False
+    merge_failures: int = 0
     # PRs that landed before this run (and so are no longer in the stack).
     landed: list[int] = field(default_factory=list)
     # Builds the checkpoint of an earlier run, which this run resumes or
@@ -371,11 +425,13 @@ class ScenarioResult:
     """What a user could observe of a run, normalized for golden files."""
 
     out: str  # the console output of the run
-    checkpoint: str  # the last checkpoint the run wrote
+    # The last checkpoint the run wrote, or None if it stopped before writing
+    # one (and so did everything below, but --status).
+    checkpoint: str | None
     status_text: str  # `autoland --status`, over that checkpoint
     status_json: str  # `autoland --status -o json`, over that checkpoint
-    plan: str  # the checkpointed plan, as the -i editor shows it
-    plan_round_trip: str  # that text, parsed and formatted again
+    plan: str | None  # the checkpointed plan, as the -i editor shows it
+    plan_round_trip: str | None  # that text, parsed and formatted again
     exit_code: int | None
 
 
@@ -421,6 +477,8 @@ def _install_seams(
         return 0.0
 
     mocker.patch.object(runtime, "resilient_sleep", side_effect=sleep)
+    # Retries of a transient gh failure back off in real time; don't wait.
+    mocker.patch.object(shell_commands, "RETRY_DELAY", 0)
 
     # Subprocesses: git, gh, and the scenario's commands go to the world;
     # anything else is a test bug.
@@ -488,13 +546,17 @@ def run_scenario(
         stack_merge_lands=scenario.stack_merge_lands,
         stack_merge_message=scenario.stack_merge_message,
         commands=dict(scenario.commands),
+        has_queue=scenario.has_queue,
+        queue_lookup_fails=scenario.queue_lookup_fails,
+        merge_failures=scenario.merge_failures,
     )
     for number in scenario.landed:
         world.merge(world.prs[number])
     _install_seams(mocker, monkeypatch, scenario, world, tmp_path)
     state_path = AutolandCheckpointer.default_path(BRANCH)
     config = configparser.ConfigParser()
-    config["autoland"] = {**DEFAULT_CONFIG, **scenario.config}
+    settings = {**DEFAULT_CONFIG, **scenario.config}
+    config["autoland"] = {k: v for k, v in settings.items() if v is not None}
 
     argv = list(scenario.flags)
     plan_file = tmp_path / "plan.autoland-plan"
@@ -520,14 +582,24 @@ def run_scenario(
     capsys.readouterr()
     exit_code = _autoland(argv, config)
     out = capsys.readouterr().out
-    assert saved, "the run wrote no checkpoint"
 
     # --status, as it would read the run's last checkpoint.
-    state_path.write_text(saved[-1])
+    if saved:
+        state_path.write_text(saved[-1])
     assert _autoland(["--status"], config) is None
     status_text = capsys.readouterr().out
     assert _autoland(["--status", "-o", "json"], config) is None
     status_json = capsys.readouterr().out
+    if not saved:
+        return ScenarioResult(
+            out=_normalize(out, tmp_path),
+            checkpoint=None,
+            status_text=_normalize(status_text, tmp_path),
+            status_json=_normalize(status_json, tmp_path),
+            plan=None,
+            plan_round_trip=None,
+            exit_code=exit_code,
+        )
 
     _checkpointer, ctx = AutolandCheckpointer.load(state_path)
     plan_text = format_plan_for_editor(ctx.stack, ctx.plan)

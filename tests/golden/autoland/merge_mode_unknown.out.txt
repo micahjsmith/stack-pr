@@ -1,0 +1,3 @@
+Could not tell whether main uses a merge queue. Say which with one of:
+    stack-pr config autoland.merge_queue=true
+    stack-pr config autoland.merge_queue=false

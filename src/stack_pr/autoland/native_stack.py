@@ -129,8 +129,12 @@ def _await_native_stack_merge(
         # PR that leaves it, so the lowest open PR leaving means the merge is
         # off. A request still "pending" hasn't reached the queue yet; without
         # a request id to ask, give it one interval to get there.
-        settled = not unread and (
-            status == "enqueued" or (not uuid and awake_elapsed > 0)
+        # Without a queue there is nothing to be booted from: the request
+        # merges or fails, and GitHub says which.
+        settled = (
+            opts.merge_mode.uses_queue
+            and not unread
+            and (status == "enqueued" or (not uuid and awake_elapsed > 0))
         )
         # A failed lookup (None) leaves the merge undecided; keep polling.
         if settled and github.in_merge_queue(still_open[0].pr_number) is False:
@@ -161,8 +165,8 @@ def land_as_native_stack(
     Every PR still needs its own approval and passing checks, so those are
     waited for first, exactly as when landing one at a time. Then a single
     merge request on the top PR merges the whole run — through the merge queue
-    as one group, where the repo has one — and the stack above is rebased and
-    re-submitted once, not once per PR.
+    as one group, or directly, per ``opts.merge_mode`` — and the stack above is
+    rebased and re-submitted once, not once per PR.
 
     Anything that keeps the run from merging as a stack is not fatal: the
     result asks for the rest to be landed one at a time. A GitHub stack holding
@@ -215,9 +219,12 @@ def land_as_native_stack(
         abort_reason = f"PR #{bottom.pr_number} failed to merge"
 
     if not abort_reason and bottom is not None:
+        merging = (
+            PRState.IN_MERGE_QUEUE if opts.merge_mode.uses_queue else PRState.MERGING
+        )
         for entry in entries:
             if entry.state != PRState.MERGED:
-                entry.state = PRState.IN_MERGE_QUEUE
+                entry.state = merging
                 entry.error_message = "Merging as a stack..."
         ui.print(
             f"\n[bold cyan]Merging PRs #{bottom.pr_number}-#{top.pr_number} "
@@ -241,13 +248,16 @@ def land_as_native_stack(
                 )
         if not failure:
             try:
-                # Ask GitHub rather than trust the config: the request body must
-                # match whether the branch really has a queue (see merge_async).
-                has_queue = github.has_merge_queue(common.target)
-                uuid = github.merge_async(
-                    top.pr_number,
-                    merge_queue=opts.merge_queue if has_queue is None else has_queue,
-                )
+                # The request body must match whether the branch really has a
+                # queue (see merge_async). A direct run has found it has none,
+                # or was told so. A queue run asks again: merge_queue = true
+                # used to be required on any branch, queue or not.
+                if opts.merge_mode.uses_queue:
+                    has_queue = github.has_merge_queue(common.target)
+                    use_queue = True if has_queue is None else has_queue
+                else:
+                    use_queue = False
+                uuid = github.merge_async(top.pr_number, merge_queue=use_queue)
             except RuntimeError as e:
                 # 409: a merge request for this stack is already in flight (e.g.
                 # from a run that was interrupted) — wait for it like our own.

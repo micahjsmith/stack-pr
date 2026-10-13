@@ -72,7 +72,9 @@ class Waits(Protocol):
         self, entry: StackEntry, *, opts: AutolandOptions
     ) -> MergeableResult: ...
 
-    def enqueue_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool: ...
+    def merge_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
+        """Merge the PR the run's way (``opts.merge_mode``: through the merge
+        queue, or directly), and wait until it has merged."""
 
     def wait_for_workflow(
         self,
@@ -220,8 +222,8 @@ class PollingWaits:
     ) -> MergeableResult:
         return waits.wait_for_mergeable(entry, opts=opts, services=self.services)
 
-    def enqueue_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
-        return waits.enqueue_and_wait(entry, opts=opts, services=self.services)
+    def merge_and_wait(self, entry: StackEntry, *, opts: AutolandOptions) -> bool:
+        return waits.merge_and_wait(entry, opts=opts, services=self.services)
 
     def wait_for_workflow(
         self,

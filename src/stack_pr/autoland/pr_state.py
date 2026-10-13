@@ -13,6 +13,7 @@ class PRState(str, Enum):
     WAITING_FOR_APPROVAL = "waiting_for_approval"
     WAITING_FOR_CHECKS = "waiting_for_checks"
     IN_MERGE_QUEUE = "in_merge_queue"
+    MERGING = "merging"  # being merged directly, with no merge queue
     WAITING_FOR_WORKFLOW = "waiting_for_workflow"
     MERGED = "merged"
     FAILED = "failed"

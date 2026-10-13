@@ -137,7 +137,7 @@ This will:
    ```
 3. Repeat for each PR in the stack
 
-**Option C**: Using `stack-pr autoland` (if your repo uses GitHub merge queue):
+**Option C**: Using `stack-pr autoland`:
 ```bash
 stack-pr autoland
 ```
@@ -169,11 +169,11 @@ That's it!
 
 `stack-pr` also has several other commands:
 
-- `autoland` - land the whole stack automatically through the GitHub merge
-  queue: wait for approvals and CI (retrying flaky checks), enqueue each PR
-  bottom-to-top, rebase and re-submit the rest after each merge, and resume
-  cleanly after an interruption. Requires a repo that uses the GitHub merge
-  queue (see `autoland.merge_queue` below).
+- `autoland` - land the whole stack automatically: wait for approvals and CI
+  (retrying flaky checks), merge each PR bottom-to-top — through the GitHub
+  merge queue where the target branch has one, or directly otherwise — rebase
+  and re-submit the rest after each merge, and resume cleanly after an
+  interruption (see `autoland.merge_queue` below).
 - `config` - set configuration values in the config file. Similar to `git config`,
   it takes a setting in the format `<section>.<key>=<value>` and updates the
   config file (`.stack-pr.cfg` by default).
@@ -543,16 +543,31 @@ PR onto the right commit directly with `stack-pr adopt --commit <ref>`.
 
 #### autoland
 
-Land the entire stack automatically through the GitHub merge queue, one PR at a
-time from the bottom up. Run it from the repo root while on the stack's head
-branch. For each PR it waits for approval and CI (re-running flaky checks),
-adds the PR to the merge queue (retrying if the PR is booted), and after each
+Land the entire stack automatically, one PR at a time from the bottom up. Run
+it from the repo root while on the stack's head branch. For each PR it waits
+for approval and CI (re-running flaky checks), merges the PR, and after each
 merge rebases and re-submits the rest of the stack. Progress is checkpointed so
 an interrupted run can be resumed.
 
-> **Note**: `autoland` currently supports only repositories that use the GitHub
-> merge queue. On other repositories it fails fast with a "not implemented"
-> error; use `stack-pr land` instead. (Direct-merge autoland is future work.)
+How a PR is merged depends on the target branch:
+
+- **With a merge queue**, the PR is added to the queue, and `autoland` waits for
+  it to merge, re-adding it (after checking approval and CI again) if it is
+  booted. The queue merges with its own configured method.
+- **Without one**, `autoland` squash-merges the PR itself once GitHub reports it
+  mergeable, with the same commit message `stack-pr land` uses: the commit's
+  message without the stack-info trailer, with ` (#<PR>)` after the subject.
+  The merge is pinned to the commit `autoland` checked, so a push in between
+  fails it rather than landing unchecked code. A failed merge is retried (up to
+  `max_queue_retries` times) after checking approval and CI again. If the
+  branch must be up to date with the target before merging and has fallen
+  behind, `autoland` says so and waits for you to rebase and `stack-pr submit`
+  (or to update the branch on GitHub), then carries on.
+
+`autoland` asks GitHub which applies when it starts, and prints `Merging
+directly into <target> (no merge queue)` when there is no queue. Set
+`autoland.merge_queue` to skip the question (see below). If GitHub can't
+answer and the config doesn't say, `autoland` stops before doing anything.
 
 Options:
 
@@ -644,7 +659,10 @@ max_queue_retries = 3
 default_workflow = deploy.yaml
 ```
 
-- `merge_queue` (default `false`): must be `true` to enable `autoland`.
+- `merge_queue` (default unset): whether the target branch merges through a
+  merge queue. Unset, `autoland` asks GitHub at the start of each run; `true`
+  or `false` skips the question and forces that mode — for when GitHub can't
+  say (e.g. the token can't read the branch's rules), or to skip the lookup.
 - `required_checks` (default empty): comma-separated CI check names that gate a
   merge. When empty, all reported (non-skipped) checks must pass.
 - `default_workflow` (default empty): when set, an interactive (`-i`) landing
@@ -668,9 +686,10 @@ instead of one PR at a time:
    just as when landing them one at a time.
 3. It makes one merge request on the top PR of the run, which merges it and
    every PR below it — all enqueued together in the merge queue, where the
-   repo has one. Each PR still lands as its own commit (made with the merge
-   queue's configured method, or squashed when there is no queue), and every
-   PR is closed as merged.
+   repo has one, or merged directly otherwise. Each PR still lands as its own
+   commit (made with the merge queue's configured method, or squashed when
+   there is no queue, with GitHub's default squash message rather than the
+   one `stack-pr land` uses), and every PR is closed as merged.
 4. It rebases and re-submits the rest of the stack once, rather than after
    every PR.
 

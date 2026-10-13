@@ -7,6 +7,8 @@ import configparser
 from dataclasses import dataclass
 from pathlib import Path
 
+from stack_pr.autoland.merge_mode import MergeMode
+
 # ---------------------------------------------------------------------------
 # Defaults (overridable via [autoland] config or flags)
 # ---------------------------------------------------------------------------
@@ -25,7 +27,9 @@ DEFAULT_MERGE_TIMEOUT = 3600  # 60 minutes
 
 @dataclass
 class AutolandOptions:
-    merge_queue: bool
+    # ``autoland.merge_queue``: True or False forces the merge mode; None (unset)
+    # leaves it to be detected. See ``merge_mode.resolve_merge_mode``.
+    merge_queue: bool | None
     required_checks: list[str]
     poll_interval: int
     max_check_retries: int
@@ -43,6 +47,9 @@ class AutolandOptions:
     plan_file: Path | None = None
     merge_as_stack: bool = True
     replan: bool = False
+    # How this run merges, resolved from ``merge_queue`` (and GitHub) before
+    # anything lands.
+    merge_mode: MergeMode = MergeMode.QUEUE
 
     @classmethod
     def from_config_and_args(
@@ -67,7 +74,7 @@ class AutolandOptions:
                 "autoland", "merge_as_stack", fallback=True
             )
         return cls(
-            merge_queue=config.getboolean("autoland", "merge_queue", fallback=False),
+            merge_queue=config.getboolean("autoland", "merge_queue", fallback=None),
             required_checks=required_checks,
             poll_interval=_int(
                 getattr(args, "poll_interval", None),

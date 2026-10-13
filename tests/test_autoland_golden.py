@@ -237,6 +237,48 @@ SCENARIOS = [
         landed=[101, 102],
         checkpoint=_replan_checkpoint,
     ),
+    # No merge queue on the target branch, and none configured: autoland
+    # detects that and merges each PR directly, with a workflow between.
+    Scenario(
+        name="direct_one_at_a_time",
+        prs=_one_at_a_time_prs(),
+        stack=[101, 102],
+        plan="l\nw deploy.yaml\nl\n",
+        config={"merge_queue": None},
+        has_queue=False,
+        workflows={"deploy.yaml": "success"},
+    ),
+    # A run of land steps merges as one GitHub stack, directly rather than
+    # through a queue.
+    Scenario(
+        name="direct_merge_as_stack",
+        prs=_prs(101, 102, 103),
+        stack=[101, 102, 103],
+        plan="l\nl\nw deploy.yaml\nl\n",
+        config={"merge_queue": None, "merge_as_stack": "true"},
+        has_queue=False,
+        workflows={"deploy.yaml": "success"},
+    ),
+    # The first direct merge fails (the base moved under it); after approval
+    # and checks are verified again, the retry goes through.
+    Scenario(
+        name="direct_merge_retry",
+        prs=_prs(101, 102),
+        stack=[101, 102],
+        config={"merge_queue": None},
+        has_queue=False,
+        merge_failures=1,
+    ),
+    # GitHub can't say whether the target branch has a merge queue, and the
+    # config doesn't either: autoland stops before doing anything.
+    Scenario(
+        name="merge_mode_unknown",
+        prs=_prs(101, 102),
+        stack=[101, 102],
+        config={"merge_queue": None},
+        queue_lookup_fails=True,
+        expect_exit=1,
+    ),
 ]
 
 
@@ -272,6 +314,9 @@ def test_golden_scenario(
     for suffix, attr in ARTIFACTS.items():
         path = GOLDEN_DIR / f"{scenario.name}.{suffix}"
         actual = getattr(result, attr)
+        if actual is None:  # the run stopped before it wrote a checkpoint
+            assert not path.exists(), f"{path.name} is stale; delete it"
+            continue
         if UPDATE:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(actual)

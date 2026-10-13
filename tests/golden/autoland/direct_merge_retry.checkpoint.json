@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "branch": "feat",
+  "base": "main",
+  "plan_file": null,
+  "current_step": 2,
+  "last_landed_sha": "9cc0a8c62f2d99c85284a96fe68191bd3843f14b",
+  "abort_reason": "",
+  "stack": [
+    {
+      "pr_url": "https://github.com/o/r/pull/101",
+      "pr_number": 101,
+      "branch": "TestBot/stack/101",
+      "title": "Add the widget model",
+      "review_decision": "APPROVED",
+      "state": "merged",
+      "check_retries": 0,
+      "queue_retries": 1,
+      "error_message": ""
+    },
+    {
+      "pr_url": "https://github.com/o/r/pull/102",
+      "pr_number": 102,
+      "branch": "TestBot/stack/102",
+      "title": "Expose widgets over the API",
+      "review_decision": "APPROVED",
+      "state": "merged",
+      "check_retries": 0,
+      "queue_retries": 0,
+      "error_message": ""
+    }
+  ],
+  "plan": [
+    {
+      "type": "land",
+      "entry_index": 0,
+      "pr_number": 101
+    },
+    {
+      "type": "land",
+      "entry_index": 1,
+      "pr_number": 102
+    }
+  ]
+}

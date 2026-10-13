@@ -1,0 +1,64 @@
+Merging directly into main (no merge queue)
+
+Discovering stack...
+
+
+Autoland plan · 4 steps · 0 done · 4 remaining
+
+→ ⬜ 1. Pending | Land     | #101 - Add the widget model
+  ⬜ 2. Pending | Land     | #102 - Expose widgets over the API
+  ⬜ 3. Pending | Workflow | deploy.yaml
+  ⬜ 4. Pending | Land     | #103 - Show widgets in the dashboard
+Steps 1-2 (#101, #102) will merge together as a GitHub stack.
+State file: <TMP>/home/.stack-pr/autoland/feat.json
+
+
+============================================================
+Landing 2 PRs as a GitHub stack: #101, #102
+============================================================
+PR #101 is mergeable (mergeStateStatus=CLEAN)
+
+Merging PRs #101-#102 as a stack
+
+PRs #101, #102 merged!
+
+Rebasing stack on origin/main...
+$ git fetch origin main
+$ git rebase origin/main
+Re-submitting stack...
+
+PR #101 already merged, skipping
+
+PR #102 already merged, skipping
+
+============================================================
+Step 3/4: Workflow checkpoint — deploy.yaml
+============================================================
+
+Waiting for workflow: deploy.yaml
+Target SHA: 9cc0a8c62f2d
+Workflow deploy.yaml: waiting (0m) — polling in 120s
+
+Workflow deploy.yaml completed with SHA 9cc0a8c62f2d
+
+============================================================
+Step 4/4: Landing PR #103 — Show widgets in the dashboard
+============================================================
+PR #103 is mergeable (mergeStateStatus=CLEAN)
+
+Merging PR #103
+$ gh pr merge 103 --squash --match-head-commit 4fdac901a32a008e208f052358166d2d269e920a --subject Show widgets in the dashboard (#103) --body-file -
+
+PR #103 merged!
+
+
+
+Autoland plan · 4 steps · 4 done · 0 remaining
+
+  ✅ 1. Merged            | Land     | #101 - Add the widget model
+  ✅ 2. Merged            | Land     | #102 - Expose widgets over the API
+  ✅ 3. Workflow complete | Workflow | deploy.yaml
+  ✅ 4. Merged            | Land     | #103 - Show widgets in the dashboard
+
+All PRs landed successfully!
+
