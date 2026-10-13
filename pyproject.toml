@@ -191,6 +191,9 @@ multiline-quotes = "double"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v"
+markers = [
+    "allow_gh_shim: the test may run `gh` (the failing test shim, never the real gh) without erroring; see tests/conftest.py",
+]
 
 [tool.mypy]
 # Let's be strict.

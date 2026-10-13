@@ -1,7 +1,38 @@
+"""Shared fixtures, and the guard that keeps every test away from the real world.
+
+The guard (``isolated_env``, autouse) exists because a test once reached real
+GitHub with the developer's credentials and landed PRs. For every test it:
+
+- points ``HOME`` (and ``XDG_CONFIG_HOME``) at a fresh temporary directory, so
+  ``~/.stack-pr`` state and ``~/.gitconfig`` are never the developer's, and
+  ignores the system git config;
+- empties ``GH_TOKEN`` / ``GITHUB_TOKEN`` / ``GH_ENTERPRISE_TOKEN`` /
+  ``GITHUB_ENTERPRISE_TOKEN`` and points ``GH_CONFIG_DIR`` at an empty
+  directory, so gh has no credentials;
+- sets ``GIT_ALLOW_PROTOCOL=file``, so git can only reach local (bare repo)
+  remotes, never https/ssh;
+- puts a ``gh`` shim first on ``PATH`` that logs its arguments and exits 1
+  with "tests must not run the real gh". If a test invokes it, the test
+  errors at teardown, even if it caught the failure. Tests route gh through
+  ``fake_gh`` / ``FakeGitHub`` instead;
+- starts the test in an empty temporary directory, not the checkout, so code
+  that acts on "the current repo" finds no repo unless the test made one and
+  ``chdir``-ed into it.
+
+Opt-out: a test that legitimately runs ``gh`` and expects it to fail (e.g.
+behavior when gh errors) marks itself ``@pytest.mark.allow_gh_shim``; it still
+runs the shim, never the real gh. Request ``isolated_env`` to read the shim's
+log (``isolated_env.gh_calls()``).
+"""
+
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
@@ -11,6 +42,94 @@ from stack_pr import cli, shell_commands
 from stack_pr.git import git_config
 from stack_pr.shell_commands import CommandFailedError
 from tests.helpers import FakeGitHub, FakeShell
+
+# For tests/test_isolation.py, which runs the guard in an inner pytest session.
+pytest_plugins = ["pytester"]
+
+GH_SHIM_MESSAGE = "tests must not run the real gh"
+
+# Variables that would point git at another repository or config, or hand gh
+# a host; dropped for every test.
+_UNSET_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GH_HOST",
+    "GH_REPO",
+)
+_EMPTY_ENV = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+
+
+@dataclass(frozen=True)
+class IsolatedEnv:
+    home: Path
+    cwd: Path
+    gh_log: Path
+
+    def gh_calls(self) -> list[str]:
+        """The argv of each run of the gh shim, one string per run."""
+        if not self.gh_log.exists():
+            return []
+        return self.gh_log.read_text().splitlines()
+
+
+def _write_gh_shim(bin_dir: Path, log: Path) -> None:
+    shim = bin_dir / "gh"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"gh $*\" >> '{log}'\n"
+        f"echo '{GH_SHIM_MESSAGE}' >&2\n"
+        "exit 1\n"
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+@pytest.fixture(autouse=True)
+def isolated_env(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[IsolatedEnv]:
+    """Isolate the test from the developer's HOME, gh auth, the network, and
+    the checkout. See the module docstring."""
+    base = tmp_path_factory.mktemp("isolated")
+    env = IsolatedEnv(home=base / "home", cwd=base / "cwd", gh_log=base / "gh.log")
+    bin_dir = base / "bin"
+    for d in (env.home, env.cwd, bin_dir, base / "gh-config"):
+        d.mkdir()
+    _write_gh_shim(bin_dir, env.gh_log)
+
+    for name in _UNSET_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name in _EMPTY_ENV:
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("HOME", str(env.home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(env.home / ".config"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GH_CONFIG_DIR", str(base / "gh-config"))
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.chdir(env.cwd)
+
+    yield env
+
+    calls = env.gh_calls()
+    if calls and request.node.get_closest_marker("allow_gh_shim") is None:
+        pytest.fail(
+            f"{GH_SHIM_MESSAGE}, but this test ran it {len(calls)} time(s):\n  "
+            + "\n  ".join(calls)
+            + "\nRoute gh through the fake_gh fixture (or FakeGitHub), or mark "
+            "the test @pytest.mark.allow_gh_shim if it means to see gh fail.",
+            pytrace=False,
+        )
 
 
 @pytest.fixture
