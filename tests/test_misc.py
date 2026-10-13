@@ -14,6 +14,15 @@ from stack_pr.cli import (
 )
 from stack_pr.git import git_config, is_rebase_in_progress
 from stack_pr.shell_commands import run_shell_command
+from tests.helpers import init_repo
+
+
+@pytest.fixture(autouse=True)
+def in_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run inside a throwaway repo: branch names are built from the current
+    branch ($BRANCH), so these tests need one, and it must not be the checkout's.
+    """
+    monkeypatch.chdir(init_repo(tmp_path / "repo"))
 
 
 @pytest.mark.parametrize(

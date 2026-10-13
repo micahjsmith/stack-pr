@@ -166,7 +166,19 @@ def test_default_workflow_absent_is_none() -> None:
 # --- merge-queue gate ----------------------------------------------------
 
 
-def test_run_autoland_requires_merge_queue() -> None:
+def _forbid_landing_flows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the fresh/resume/replan flows fail the test if reached, so a test of
+    run_autoland's early exits can never run a real land."""
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("run_autoland reached a landing flow")
+
+    for flow in ("_run_fresh", "_run_resume", "_run_replan"):
+        monkeypatch.setattr(commands, flow, forbidden)
+
+
+def test_run_autoland_requires_merge_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_landing_flows(monkeypatch)
     cfg = configparser.ConfigParser()  # no [autoland] -> merge_queue False
     with pytest.raises(NotImplementedError):
         commands.run_autoland(common_args(), _args(), cfg)
